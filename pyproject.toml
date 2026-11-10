@@ -3,50 +3,76 @@ requires = ["setuptools >= 77.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "ebook-converter"
-version = "4.12.0"
+name = "ebook-convert"
+version = "4.13.0"
 requires-python = ">= 3.10"
-description = "Convert ebook between different formats"
-dependencies = [
-    "beautifulsoup4>=4.9.3",
-    "css-parser>=1.0.6",
-    "filelock>=3.0.12",
-    "html2text>=2020.1.16",
-    "html5-parser==0.4.12",
-    "msgpack>=1.0.0",
-    "odfpy>=1.4.1",
-    "pillow>=8.0.1",
-    "python-dateutil>=2.8.1",
-    "setuptools>=61.0",
-    "tinycss>=0.4"
-]
+description = "Command-line ebook converter extracted from Calibre: epub, mobi, azw3, docx, fb2, lrf, pdf, rtf, txt, ..."
 readme = "README.rst"
+license = "GPL-3.0-or-later"
+license-files = ["LICENSE"]
 authors = [
     {name = "gryf", email = "gryf73@gmail.com"}
 ]
-license = "GPL-3.0-or-later"
+maintainers = [
+    {name = "Nuno Sempere"}
+]
+keywords = ["ebook", "epub", "mobi", "azw3", "docx", "fb2", "lrf", "calibre", "converter"]
 classifiers = [
     "Environment :: Console",
-    "Intended Audience :: Other Audience",
+    "Intended Audience :: End Users/Desktop",
     "Operating System :: POSIX :: Linux",
-    "Development Status :: 3 - Alpha",
+    "Operating System :: MacOS",
+    "Development Status :: 4 - Beta",
     "Programming Language :: Python",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3 :: Only",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
-    "Programming Language :: Python :: 3.13"
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Text Processing :: Markup",
+    "Topic :: Utilities",
+]
+# Every dependency here ships binary wheels (or is pure Python), so the tool
+# installs with plain `pip`/`uvx` and no compiler.
+dependencies = [
+    "beautifulsoup4>=4.9.3",
+    "chardet>=4.0",
+    "css-parser>=1.0.6",
+    "html2text>=2020.1.16",
+    "html5lib>=1.1",
+    "lxml>=4.9",
+    "msgpack>=1.0.0",
+    "odfpy>=1.4.1",
+    "pillow>=8.0.1",
+    "python-dateutil>=2.8.1",
 ]
 
+[project.optional-dependencies]
+# Markdown formatted plain-text input.
+markdown = ["markdown>=3.0"]
+
 [project.urls]
-Repository = "https://github.com/gryf/ebook-converter"
+Repository = "https://github.com/NunoSempere/ebook-convert"
+Issues = "https://github.com/NunoSempere/ebook-convert/issues"
+Original = "https://github.com/gryf/ebook-converter"
 
 [project.scripts]
-ebook-converter = "ebook_converter.main:main"
+ebook-convert = "ebook_convert.main:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "pyinstaller>=6.10",
+]
 
 [tool.setuptools.packages.find]
-exclude = ["snap"]
+include = ["ebook_convert*"]
+exclude = ["ebook_convert.tinycss.tests*"]
 
 [tool.setuptools.package-data]
 "*" = ["*.types", "*.css", "*.html", "*.xhtml", "*.xsl", "*.json"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

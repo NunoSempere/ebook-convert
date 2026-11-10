@@ -1,162 +1,167 @@
-===============
-Ebook converter
-===============
+=============
+ebook-convert
+=============
 
-This is an impudent ripoff of the bits from `Calibre project`_, and is aimed
-only for converter thing.
+Command-line ebook converter, carved out of the `Calibre project`_. It is only
+the conversion pipeline: no GUI, no library management, no Qt, no device
+drivers. Just:
 
-My motivation is to have only the converter for ebooks run from the
-commandline, without all of those bells and whistles Calibre has, and with
-cleanest more *pythonic* approach.
+.. code:: shell-session
 
-Requirements
-------------
+   $ ebook-convert book.epub book.mobi
 
-To build and run ebook converter, you'll need:
+The package is pure Python and every dependency ships binary wheels, so it
+installs anywhere with a stock Python 3.10+ and no compiler.
 
-- Python 3.10 or newer
-- `Liberation fonts`_
-- setuptools
-- ``pdftohtml``, ``pdfinfo`` and ``pdftoppm`` from `poppler`_ project for
-  conversion from PDF available in ``$PATH``
-- ``libxml2-dev`` and ``libxslt-dev`` as dependencies for format manipulation
-  from some of the Calibre code
-
-and several Python packages:
-
-- `beautifulsoup4`_
-- `css-parser`_
-- `filelock`_
-- `html2text`_
-- `html5-parser`_
-- `msgpack`_
-- `odfpy`_
-- `pillow`_
-- `python-dateutil`_
-- `setuptools`_
-- `tinycss`_
-
-No Python2 support. Even if Calibre probably still is able to run on Python2, I
-do not have an intention to support it.
-
-
-What's supported
-----------------
-
-To be able to perform some optimization and make the converter more reliable
-and easy to use, first I need to remove some of the features, which are totally
-not crucial in my opinion, although they might be re-added later, like, for
-instance there is no automatic language translations depending on the locale
-settings.
-
-First of all, I'm in the process of getting rid of strongly coupled things to
-QT libraries, and GUI code as well. Second, I'll try to minimize all
-modifications from third parties (external modules copied into Calibre project
-for instance), and make a huge cleanup. I'm not sure if I find time and
-strength for doing it completely, but I'll try.
-
-Windows is not currently supported, because of the original spaghetti code.
-This may change in the future, after cleanup of mentioned pasta would be
-completed.
-
-So called *Kindle periodical* format (which `Amazon has`_ `killed`_ anyway back
-in September 2023) is not supported, since all we do care are local files. If
-there would be downloaded periodical thing (using Calibre for example), it
-would be treated as common book.
-
-
-Input formats
-~~~~~~~~~~~~~
-
-Currently, I've tested the following input formats:
-
-- Microsoft Word 2007 and up (``docx``)
-- EPUB, both v2 and v3 (``epub``)
-- LibreOffice (``odt``)
-- Pure text files (``txt``)
-- Several PalmOS (``pdb``) readers support:
-
-  - Plucker
-  - Adobe Reader for PalmOS
-  - eReader various formats
-  - Weasel Reader
-  - Haodoo Reader
-
-- Rich Text Format (``rtf``)
-- Mobipocket (``mobi``)
-- Kindle (``azw3``, ``azw4``, …)
-- FictionBook (``fb2``)
-- Hyper Text Markup Language (``html``)
-- Adobe Portable Document Format (``pdf``)
-- Broadband eBooks (shortened as BBeB) (``lrf``)
-
-Note, that old Microsoft doc format is not supported, although old documents
-can be fairly easy converted using text processors programs, like Microsoft
-Word or LibreOffice to supported formats.
-
-
-Output formats
-~~~~~~~~~~~~~~
-
-Currently, following formats are supported:
-
-- Broadband eBooks (shortened as BBeB) (``lrf``)
-- EPUB v2 (``epub``)
-- Mobipocket (``mobi``)
-- Microsoft Word (``docx``)
-- zipped HTML file with additional assets, like images (``htmlz``)
-- Text (``txt``)
+This is a packaging-focused fork of `gryf's ebook-convert`_, which did the
+hard work of extracting the converter from Calibre and removing Qt. All
+credit for that goes to gryf and, of course, to Kovid Goyal and the Calibre
+contributors. The fork exists to publish the tool on PyPI under the name
+``ebook-convert``, to make it installable with ``uvx``, and to ship
+single-file binaries.
 
 
 Installation
 ------------
 
-Ebook converter is somewhere in between in alpha and beta stage, therefore I
-didn't place it on `pypi`_ yet.
-
-Preferred way for installation is to use virtualenv (or any other virtualenv
-managers), i.e:
+Run it without installing anything permanently, with `uv`_:
 
 .. code:: shell-session
 
-   $ python -m venv venv
-   $ . venv/bin/activate
-   (venv) $ git clone https://github.com/gryf/ebook-converter
-   (venv) $ cd ebook-converter
-   (venv) $ pip install --no-binary lxml .
+   $ uvx ebook-convert book.epub book.mobi
 
-Simple as that. And from now on, you can issue converter:
+Or install it as a tool:
 
 .. code:: shell-session
 
-   (venv) $ ebook-converter book.docx book.lrf
+   $ uv tool install ebook-convert      # with uv
+   $ pipx install ebook-convert         # with pipx
+   $ pip install ebook-convert          # into the current environment
 
-.. note:: The ``--no-binary lxml`` flag is required to ensure ``lxml`` is
-   compiled against the same system ``libxml2`` as ``html5-parser``. Without
-   it, pip may install a pre-built ``lxml`` wheel bundling a different
-   ``libxml2`` version, which causes a ``RuntimeError``.
+Single-file executables for Linux (x86_64, aarch64) and macOS (arm64, x86_64)
+that need no Python at all are attached to each `GitHub release`_.
+
+Optional system tools:
+
+- ``pdftohtml``, ``pdfinfo`` and ``pdftoppm`` from `poppler`_ are needed in
+  ``$PATH`` for conversion *from* PDF.
+- `Liberation fonts`_ are used when embedding fonts into LRF output.
+
+Markdown-formatted text input additionally needs the ``markdown`` package:
+``pip install 'ebook-convert[markdown]'``.
+
+
+Usage
+-----
+
+.. code:: shell-session
+
+   $ ebook-convert INPUT OUTPUT [-v|-q]
+
+The formats are taken from the file extensions. ``-v`` makes the output more
+verbose (repeat for more), ``-q`` quieter.
+
+
+What's supported
+----------------
+
+Input formats
+~~~~~~~~~~~~~
+
+- EPUB, both v2 and v3 (``epub``)
+- Mobipocket and Kindle (``mobi``, ``prc``, ``azw``, ``azw3``)
+- Microsoft Word 2007 and up (``docx``)
+- LibreOffice / OpenDocument text (``odt``)
+- Rich Text Format (``rtf``)
+- FictionBook (``fb2``)
+- HTML (``html``, ``htm``, ``xhtml``, ``opf``) and zipped HTML (``htmlz``)
+- Plain text (``txt``, ``txtz``), Markdown (``md``) and Textile
+- PDF (``pdf``), via poppler
+- Broadband eBooks (BBeB) (``lrf``)
+- PalmOS databases (``pdb``, ``updb``): Plucker, eReader, zTXT, PalmDOC,
+  Haodoo
+
+The old binary Microsoft ``doc`` format is not supported; convert it to
+``docx`` or ``odt`` with Word or LibreOffice first.
+
+Output formats
+~~~~~~~~~~~~~~
+
+- EPUB v2 (``epub``)
+- Mobipocket (``mobi``)
+- Microsoft Word (``docx``)
+- FictionBook (``fb2``)
+- Zipped HTML with assets (``htmlz``)
+- Plain text (``txt``) and zipped text (``txtz``)
+- Broadband eBooks (BBeB) (``lrf``)
+- Unpacked OEB directory (``oeb``)
+
+Calibre's remaining formats (LIT, AZW3/KF8 output, PDB output, PDF output,
+RB, SNB, TCR, PML, CHM, DJVU, comics, recipes) were never ported and are not
+registered.
+
+Known limitations
+~~~~~~~~~~~~~~~~~
+
+- SVG images are not rasterized (Calibre does that with Qt). Formats that
+  cannot display SVG, like ``mobi``, will show such images as missing. A
+  warning is logged when this happens.
+- The *Kindle periodical* format (discontinued by Amazon in 2023) is treated
+  as an ordinary book.
+- Windows is not tested.
+- Conversion options are not exposed on the command line yet; Calibre's
+  defaults are used.
+
+
+Development
+-----------
+
+.. code:: shell-session
+
+   $ git clone https://github.com/NunoSempere/ebook-convert
+   $ cd ebook-convert
+   $ ./make.sh install        # uv sync: creates .venv with dev dependencies
+   $ ./make.sh test           # pytest
+   $ ./make.sh build          # sdist + wheel into dist/
+   $ ./make.sh binary         # single-file executable via PyInstaller
+
+Releasing: bump ``version`` in ``pyproject.toml`` and ``numeric_version`` in
+``ebook_convert/constants_old.py``, commit, then tag ``vX.Y.Z`` and push the
+tag. The ``release.yml`` workflow runs the tests, publishes to PyPI through
+trusted publishing, builds the binaries and attaches everything to a GitHub
+release. To publish by hand instead, run ``UV_PUBLISH_TOKEN=pypi-... ./make.sh
+publish`` after ``./make.sh build``.
+
+
+Background
+----------
+
+In gryf's words, `the original project`_ started as "an impudent ripoff of the
+conversion bits from Calibre", with the aim of having only the converter,
+runnable from the command line, without the rest of Calibre, and with a
+cleaner, more pythonic code base. Qt and GUI code were removed and most
+vendored third-party modules replaced by their PyPI versions. This fork adds
+PyPI packaging, binaries, a test-suite, and swaps the HTML5 parser for the
+pure-Python `html5lib`_ instead of a C extension that had to be compiled
+against a matching ``libxml2``.
+
+Note that Calibre itself installs a command with the same name,
+``ebook-convert``. If you have Calibre installed, whichever comes first on
+your ``$PATH`` wins; ``uvx ebook-convert`` always runs this one.
+
+There is no Python 2 support and there will not be.
 
 
 License
 -------
 
-This work is licensed on GPL3 license, like the original work. See LICENSE file
-for details.
+This work is licensed under GPL3, like the original. See LICENSE for details.
 
 .. _Calibre project: https://calibre-ebook.com/
-.. _pypi: https://pypi.python.org
-.. _Liberation fonts: https://github.com/liberationfonts/liberation-fonts
-.. _Amazon has: https://goodereader.com/blog/kindle/amazon-will-discontinue-newspaper-and-magazine-subscriptions-in-september
-.. _killed: https://www.theverge.com/23861370/amazon-kindle-periodicals-unlimited-ended
+.. _gryf's ebook-converter: https://github.com/gryf/ebook-converter
+.. _uv: https://docs.astral.sh/uv/
+.. _GitHub release: https://github.com/NunoSempere/ebook-convert/releases
 .. _poppler: https://poppler.freedesktop.org/
-.. _beautifulsoup4: https://www.crummy.com/software/BeautifulSoup
-.. _css-parser: https://github.com/ebook-utils/css-parser
-.. _filelock: https://github.com/tox-dev/py-filelock
-.. _html2text: https://github.com/Alir3z4/html2text
-.. _html5-parser: https://html5-parser.readthedocs.io
-.. _msgpack: https://msgpack.org
-.. _odfpy: https://github.com/eea/odfpy
-.. _pillow: https://python-pillow.github.io
-.. _python-dateutil: https://github.com/dateutil/dateutil
-.. _setuptools: https://setuptools.pypa.io
-.. _tinycss: http://tinycss.readthedocs.io
+.. _Liberation fonts: https://github.com/liberationfonts/liberation-fonts
+.. _html5lib: https://github.com/html5lib/html5lib-python
+.. _the original project: https://github.com/gryf/ebook-converter

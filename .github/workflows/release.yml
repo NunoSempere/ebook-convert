@@ -1,0 +1,90 @@
+name: Release
+
+# Publishes to PyPI and attaches single-file binaries to the GitHub release.
+# Trigger by pushing a tag like v4.13.0 (which must match pyproject version).
+#
+# PyPI side: set up "trusted publishing" for this repository once at
+# https://pypi.org/manage/account/publishing/ (owner, repo name, workflow
+# "release.yml", environment "pypi").  No API token is stored in GitHub.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: Check tag matches project version
+        run: |
+          version=$(grep -Po '^version = "\K[^"]+' pyproject.toml)
+          test "v$version" = "${GITHUB_REF_NAME}" || { echo "tag ${GITHUB_REF_NAME} != v$version"; exit 1; }
+      - run: uv sync --all-extras
+      - run: uv run pytest
+      - run: uv build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  binaries:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            name: linux-x86_64
+          - os: ubuntu-22.04-arm
+            name: linux-aarch64
+          - os: macos-14
+            name: macos-arm64
+          - os: macos-13
+            name: macos-x86_64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync --all-extras --python 3.12
+      - run: uv run pyinstaller --noconfirm --clean packaging/ebook-convert.spec
+      - name: Smoke-test binary
+        run: |
+          ./dist/ebook-convert tests/fixtures/sample.txt out.epub
+          test -s out.epub
+      - run: mv dist/ebook-convert dist/ebook-convert-${{ matrix.name }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: binary-${{ matrix.name }}
+          path: dist/ebook-convert-${{ matrix.name }}
+
+  publish-pypi:
+    needs: [build, binaries]
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
+
+  github-release:
+    needs: [build, binaries]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+      - uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            artifacts/dist/*
+            artifacts/binary-*/*
