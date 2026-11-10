@@ -573,7 +573,8 @@ class Book(Delegator):
                 if 'baselineskip' in span.attrs:
                     span.attrs['baselineskip'] = rescale(span.attrs['baselineskip'])
 
-        text_styles = set(tb.textStyle for tb in text_blocks)
+        # Calibre 94d68db7af: styles are not hashable
+        text_styles = (tb.textStyle for tb in text_blocks)
         for ts in text_styles:
             ts.attrs['fontsize'] = rescale(ts.attrs['fontsize'])
             ts.attrs['baselineskip'] = rescale(ts.attrs['baselineskip'])
@@ -1068,7 +1069,7 @@ class BookSetting(LrsAttributes):
     def toLrf(self, lrfWriter):
         a = self.attrs
         lrfWriter.dpi = int(a["dpi"])
-        lrfWriter.bindingdirection = \
+        lrfWriter.binding = \
                 BINDING_DIRECTION_ENCODING[a["bindingdirection"]]
         lrfWriter.height = int(a["screenheight"])
         lrfWriter.width = int(a["screenwidth"])
@@ -2296,7 +2297,7 @@ class Image(LrsObject, LrsContainer, LrsAttributes):
                  y0=0, y1=0, xsize=0, ysize=0, **settings):
         LrsObject.__init__(self)
         LrsContainer.__init__(self, [])
-        LrsAttributes.__init__(self, self.defaults, settings)
+        LrsAttributes.__init__(self, self.defaults, **settings)
         self.x0, self.y0, self.x1, self.y1 = int(x0), int(y0), int(x1), int(y1)
         self.xsize, self.ysize = int(xsize), int(ysize)
         self.setRefstream(refstream)
@@ -2335,7 +2336,7 @@ class ImageBlock(LrsObject, LrsContainer, LrsAttributes):
 
     def __init__(self, refstream, x0="0", y0="0", x1="600", y1="800",
                        xsize="600", ysize="800",
-                       blockStyle=BlockStyle(blockrule='block-fixed'),
+                       blockStyle=None,
                        alttext=None, **settings):
         LrsObject.__init__(self)
         LrsContainer.__init__(self, [Text, Image])
@@ -2343,7 +2344,8 @@ class ImageBlock(LrsObject, LrsContainer, LrsAttributes):
         self.x0, self.y0, self.x1, self.y1 = int(x0), int(y0), int(x1), int(y1)
         self.xsize, self.ysize = int(xsize), int(ysize)
         self.setRefstream(refstream)
-        self.blockStyle = blockStyle
+        # a fresh default style per block, not one shared mutable default
+        self.blockStyle = blockStyle or BlockStyle(blockrule='block-fixed')
         self.alttext = alttext
 
     def setRefstream(self, refstream):
