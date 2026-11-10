@@ -56,3 +56,20 @@ def test_epub_toc_is_taken_from_nav(epub3_path, tmp_path):
         ncx = next(n for n in zf.namelist() if n.endswith('.ncx'))
         data = zf.read(ncx).decode('utf-8')
     assert 'Chapter One' in data and 'Chapter Two' in data
+
+
+@pytest.mark.parametrize('ext', ['mobi', 'docx', 'fb2', 'lrf', 'htmlz'])
+def test_cover_image_survives(epub3_with_cover_path, tmp_path, ext):
+    out = tmp_path / ('out.' + ext)
+    proc = convert(epub3_with_cover_path, out)
+    assert 'thumbnail' not in proc.stderr
+    assert 'Bad image' not in proc.stderr
+    data = out.read_bytes()
+    if ext in ('mobi', 'lrf'):
+        assert b'JFIF' in data
+    elif ext == 'fb2':
+        assert b'<binary' in data
+    else:
+        with zipfile.ZipFile(out) as zf:
+            assert any(n.lower().endswith(('.jpg', '.jpeg'))
+                       for n in zf.namelist())

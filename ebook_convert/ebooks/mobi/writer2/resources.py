@@ -116,8 +116,9 @@ class Resources(object):
                     try:
                         data = rescale_image(item.data, dimen=MAX_THUMB_DIMEN,
                             maxsizeb=MAX_THUMB_SIZE)
-                    except:
-                        self.log.warning('Failed to generate thumbnail')
+                    except Exception as err:
+                        self.log.warning('Failed to generate thumbnail: %s',
+                                         err)
                     else:
                         self.image_indices.add(len(self.records))
                         self.records.append(data)
