@@ -13,6 +13,14 @@ from ebook_convert.ebooks.oeb import parse_utils
 from ebook_convert.ebooks.oeb.stylizer import Stylizer as Sz, Style as St
 from ebook_convert.utils.localization import lang_as_iso639_1
 
+# The whitespace characters that are collapsible under the CSS/HTML whitespace
+# processing rules. Deliberately ASCII only: NBSP and the other non-breaking
+# spaces (U+00A0, U+2007, U+202F, ...) are content, not whitespace, and must
+# reach Word verbatim. Note that unlike oeb.base.COLLAPSE_RE this includes the
+# form feed, since lxml refuses to serialize control characters.
+COLLAPSIBLE_WS = ' \t\r\n\f\v'
+COLLAPSE_WS_PAT = re.compile('[%s]+' % COLLAPSIBLE_WS)
+
 
 def lang_for_tag(tag):
     for attr in ('lang', '{http://www.w3.org/XML/1998/namespace}lang'):
@@ -49,13 +57,15 @@ class Stylizer(Sz):
 
 class TextRun(object):
 
-    ws_pat = None
+    soft_hyphen_pat = None
 
     def __init__(self, namespace, style, first_html_parent, lang=None):
         self.first_html_parent = first_html_parent
-        if self.ws_pat is None:
-            TextRun.ws_pat = self.ws_pat = re.compile(r'\s+')
+        if self.soft_hyphen_pat is None:
+            TextRun.soft_hyphen_pat = self.soft_hyphen_pat = re.compile('(\xad)')
         self.style = style
+        # (text, preserve_whitespace, bookmark) or (None, clear, bookmark) for
+        # breaks or (drawing, drawing_link, bookmark) for images
         self.texts = []
         self.link = None
         self.lang = lang
@@ -65,8 +75,8 @@ class TextRun(object):
 
     def add_text(self, text, preserve_whitespace, bookmark=None, link=None):
         if not preserve_whitespace:
-            text = self.ws_pat.sub(' ', text)
-            if text.strip() != text:
+            text = COLLAPSE_WS_PAT.sub(' ', text)
+            if text.strip(COLLAPSIBLE_WS) != text:
                 # If preserve_whitespace is False, Word ignores leading and
                 # trailing whitespace
                 preserve_whitespace = True
@@ -76,12 +86,15 @@ class TextRun(object):
     def add_break(self, clear='none', bookmark=None):
         self.texts.append((None, clear, bookmark))
 
-    def add_image(self, drawing, bookmark=None):
-        self.texts.append((drawing, None, bookmark))
+    def add_image(self, drawing, bookmark=None, drawing_link=None):
+        # As for breaks, the second slot is overloaded, for drawings it holds
+        # the link to put on the drawing itself (used for floating images)
+        self.texts.append((drawing, drawing_link, bookmark))
 
-    def serialize(self, p, links_manager):
+    def serialize(self, p, links_manager, parent=None):
         makeelement = self.makeelement
-        parent = p if self.link is None else links_manager.serialize_hyperlink(p, self.link)
+        if parent is None:
+            parent = p if self.link is None else links_manager.serialize_hyperlink(p, self.link)
         r = makeelement(parent, 'w:r')
         rpr = makeelement(r, 'w:rPr', append=False)
         if getattr(self.descendant_style, 'id', None) is not None:
@@ -91,6 +104,12 @@ class TextRun(object):
         if len(rpr) > 0:
             r.append(rpr)
 
+        def add_text(text, preserve_whitespace):
+            t = makeelement(r, 'w:t')
+            t.text = text
+            if preserve_whitespace:
+                t.set('{http://www.w3.org/XML/1998/namespace}space', 'preserve')
+
         for text, preserve_whitespace, bookmark in self.texts:
             if bookmark is not None:
                 bid = links_manager.bookmark_id
@@ -98,12 +117,27 @@ class TextRun(object):
             if text is None:
                 makeelement(r, 'w:br', w_clear=preserve_whitespace)
             elif hasattr(text, 'xpath'):
+                drawing_link = preserve_whitespace  # holds the link for images
+                if drawing_link is not None:
+                    links_manager.serialize_drawing_link(text, drawing_link)
                 r.append(text)
+            elif text:
+                for x in self.soft_hyphen_pat.split(text):
+                    if x == '\u00ad':
+                        # trailing spaces in <w:t> before a soft hyphen are
+                        # ignored, so put them in a preserve whitespace
+                        # element with a single space.
+                        if not preserve_whitespace and len(r) and r[-1].text and r[-1].text.endswith(' '):
+                            r[-1].text = r[-1].text.rstrip(COLLAPSIBLE_WS)
+                            add_text(' ', True)
+                        makeelement(r, 'w:softHyphen')
+                    elif x:
+                        if not preserve_whitespace and x.startswith(' ') and len(r) and r[-1].tag and 'softHyphen' in r[-1].tag:
+                            x = x.lstrip(COLLAPSIBLE_WS)
+                            add_text(' ', True)
+                        add_text(x, preserve_whitespace)
             else:
-                t = makeelement(r, 'w:t')
-                t.text = text or ''
-                if preserve_whitespace:
-                    t.set('{http://www.w3.org/XML/1998/namespace}space', 'preserve')
+                add_text('', preserve_whitespace)
             if bookmark is not None:
                 makeelement(r, 'w:bookmarkEnd', w_id=str(bid))
 
@@ -116,6 +150,10 @@ class TextRun(object):
         if len(self.texts) == 1 and self.texts[0][:2] == ('', False):
             return True
         return False
+
+    @property
+    def has_text(self):
+        return any(isinstance(text, str) for text, preserve_whitespace, bookmark in self.texts)
 
     @property
     def style_weight(self):
@@ -165,13 +203,15 @@ class Block(object):
         ws = style['white-space']
         preserve_whitespace = ws in {'pre', 'pre-wrap', '-o-pre-wrap'}
         ts = self.styles_manager.create_text_style(style, is_parent_style=is_parent_style)
-        if self.runs and ts == self.runs[-1].style and link == self.runs[-1].link and lang == self.runs[-1].lang:
+        # Each source anchor has its own link tuple, even when its destination
+        # and tooltip match another anchor.
+        if self.runs and ts == self.runs[-1].style and link is self.runs[-1].link and lang == self.runs[-1].lang:
             run = self.runs[-1]
         else:
             run = TextRun(self.namespace, ts, self.html_block if html_parent is None else html_parent, lang=lang)
             self.runs.append(run)
         if ignore_leading_whitespace and not preserve_whitespace:
-            text = text.lstrip()
+            text = text.lstrip(COLLAPSIBLE_WS)
         if preserve_whitespace or ws == 'pre-line':
             for text in text.splitlines():
                 run.add_text(text, preserve_whitespace, bookmark=bookmark, link=link)
@@ -188,13 +228,27 @@ class Block(object):
             self.runs.append(run)
         run.add_break(clear=clear, bookmark=bookmark)
 
-    def add_image(self, drawing, bookmark=None):
-        if self.runs:
-            run = self.runs[-1]
+    def add_image(self, drawing, bookmark=None, link=None, floating=False):
+        drawing_link = None
+        if link is not None and floating:
+            # Floating image, the link must go on the image itself, not on the
+            # run. Insert it before any runs of the same link so as not to
+            # split the <w:hyperlink> of the surrounding text into two. At
+            # worst, this moves the floating image up to the line on which
+            # the link starts.
+            link, drawing_link = None, link
+            pos = len(self.runs)
+            while pos > 0 and self.runs[pos - 1].link is drawing_link:
+                pos -= 1
+        else:
+            pos = len(self.runs)
+        if pos > 0 and link is self.runs[pos - 1].link:
+            run = self.runs[pos - 1]
         else:
             run = TextRun(self.namespace, self.styles_manager.create_text_style(self.html_style), self.html_block)
-            self.runs.append(run)
-        run.add_image(drawing, bookmark=bookmark)
+            run.link = link
+            self.runs.insert(pos, run)
+        run.add_image(drawing, bookmark=bookmark, drawing_link=drawing_link)
 
     def serialize(self, body):
         makeelement = self.namespace.makeelement
@@ -226,8 +280,13 @@ class Block(object):
             makeelement(ppr, 'w:pageBreakBefore', w_val='on')
         if self.keep_lines:
             makeelement(ppr, 'w:keepLines', w_val='on')
+        # Runs sharing a link share a single <w:hyperlink>
+        current_link, parent = None, p
         for run in self.runs:
-            run.serialize(p, self.links_manager)
+            if run.link is not current_link:
+                current_link = run.link
+                parent = p if current_link is None else self.links_manager.serialize_hyperlink(p, current_link)
+            run.serialize(p, self.links_manager, parent=parent)
         for bmark in end_bookmarks:
             makeelement(p, 'w:bookmarkEnd', w_id=bmark)
 
@@ -386,7 +445,10 @@ class Blocks(object):
         for block in self.all_blocks:
             count = collections.Counter()
             for run in block.runs:
-                count[run.lang] += 1
+                # Runs containing only images have no language and must not
+                # influence the language of the block
+                if run.has_text:
+                    count[run.lang] += 1
             if count:
                 block.block_lang = bl = count.most_common(1)[0][0]
                 for run in block.runs:
@@ -395,8 +457,6 @@ class Blocks(object):
                 if bl == default_lang:
                     block.block_lang = None
 
-    def __repr__(self):
-        return 'Block(%r)' % self.runs
 
 
 class Convert(object):
@@ -419,6 +479,7 @@ class Convert(object):
     def __call__(self):
         from ebook_convert.ebooks.oeb.transforms.rasterize import SVGRasterizer, Unavailable
         self.stylizer_cache = {}
+        self.svg_rasterizer = None
         try:
             self.svg_rasterizer = SVGRasterizer(base_css=self.base_css)
         except Unavailable:
@@ -430,7 +491,7 @@ class Convert(object):
 
         self.styles_manager = StylesManager(self.docx.namespace, self.log, self.mi.language)
         self.links_manager = LinksManager(self.docx.namespace, self.docx.document_relationships, self.log)
-        self.images_manager = ImagesManager(self.oeb, self.docx.document_relationships, self.opts)
+        self.images_manager = ImagesManager(self.oeb, self.docx.document_relationships, self.opts, self.svg_rasterizer)
         self.lists_manager = ListsManager(self.docx)
         self.fonts_manager = FontsManager(self.docx.namespace, self.oeb, self.opts)
         self.blocks = Blocks(self.docx.namespace, self.styles_manager, self.links_manager)
@@ -552,7 +613,7 @@ class Convert(object):
             return  # We ignore the tail for these tags
 
         ignore_whitespace_tail = is_block or display.startswith('table')
-        if not is_first_tag and html_tag.tail and (not ignore_whitespace_tail or not html_tag.tail.isspace()):
+        if not is_first_tag and html_tag.tail and (not ignore_whitespace_tail or html_tag.tail.strip(COLLAPSIBLE_WS)):
             # Ignore trailing space after a block tag, as otherwise it will
             # become a new empty paragraph
             block = self.create_block_from_parent(html_tag, stylizer)
@@ -572,12 +633,18 @@ class Convert(object):
         if anchor:
             block.bookmarks.add(self.bookmark_for_anchor(anchor, html_tag))
         if tagname == 'img':
-            self.images_manager.add_image(html_tag, block, stylizer, as_block=True)
+            self.images_manager.add_image(html_tag, block, stylizer, as_block=True, link=self.current_link)
         else:
             text = html_tag.text
+            is_list_item = tagname == 'li'
+            # html_tag[0] may be a comment, whose tag is not a string
+            has_sublist = (is_list_item and len(html_tag) and isinstance(html_tag[0].tag, str) and
+                           parse_utils.barename(html_tag[0].tag) in ('ul', 'ol') and len(html_tag[0]))
+            if text and has_sublist and not text.strip(COLLAPSIBLE_WS):
+                text = ''  # whitespace only, ignore
             if text:
                 block.add_text(text, tag_style, ignore_leading_whitespace=True, is_parent_style=True, link=self.current_link, lang=self.current_lang)
-            elif tagname == 'li' and len(html_tag) and parse_utils.barename(html_tag[0].tag) in ('ul', 'ol') and len(html_tag[0]):
+            elif has_sublist:
                 block.force_not_empty = True
 
     def add_inline_tag(self, tagname, html_tag, tag_style, stylizer):
@@ -591,7 +658,7 @@ class Convert(object):
                 block.add_break(clear={'both':'all', 'left':'left', 'right':'right'}.get(tag_style['clear'], 'none'), bookmark=bmark)
         elif tagname == 'img':
             block = self.create_block_from_parent(html_tag, stylizer)
-            self.images_manager.add_image(html_tag, block, stylizer, bookmark=bmark)
+            self.images_manager.add_image(html_tag, block, stylizer, bookmark=bmark, link=self.current_link)
         else:
             if html_tag.text:
                 block = self.create_block_from_parent(html_tag, stylizer)
