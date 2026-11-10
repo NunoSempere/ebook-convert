@@ -73,6 +73,7 @@ def epub_with_svg_path(tmp_path):
     return pack_epub(src, tmp_path / 'svg.epub')
 
 
+# AZW3 (KF8) displays SVG natively, so it is not rasterized there.
 @pytest.mark.parametrize('ext', ['mobi', 'docx', 'fb2'])
 def test_svg_is_rasterized_for_formats_without_svg(epub_with_svg_path,
                                                    tmp_path, ext):

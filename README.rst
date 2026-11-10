@@ -97,6 +97,7 @@ Output formats
 ~~~~~~~~~~~~~~
 
 - EPUB v2 (``epub``)
+- Kindle KF8 (``azw3``)
 - Mobipocket (``mobi``)
 - Microsoft Word (``docx``)
 - FictionBook (``fb2``)
@@ -105,9 +106,8 @@ Output formats
 - Broadband eBooks (BBeB) (``lrf``)
 - Unpacked OEB directory (``oeb``)
 
-Calibre's remaining formats (LIT, AZW3/KF8 output, PDB output, PDF output,
-RB, SNB, TCR, PML, CHM, DJVU, comics, recipes) were never ported and are not
-registered.
+Calibre's remaining formats (LIT, PDB output, PDF output, RB, SNB, TCR, PML,
+CHM, DJVU, comics, recipes) were never ported and are not registered.
 
 Known limitations
 ~~~~~~~~~~~~~~~~~

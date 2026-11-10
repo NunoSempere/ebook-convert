@@ -369,8 +369,8 @@ class Blocks(object):
         if self.pos > 0 and self.pos < len(self.all_blocks):
             # Insert a page break corresponding to the start of the html file
             self.all_blocks[self.pos].page_break_before = True
-            if self.top_bookmark is not None:
-                self.all_blocks[self.pos].bookmarks.add(self.top_bookmark)
+        if self.top_bookmark is not None and self.pos < len(self.all_blocks):
+            self.all_blocks[self.pos].bookmarks.add(self.top_bookmark)
         self.top_bookmark = None
         self.block_map = {}
 

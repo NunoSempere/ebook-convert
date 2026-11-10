@@ -269,7 +269,8 @@ class OEBReader(object):
             media_type = elem.get('media-type', None)
             if media_type is None:
                 media_type = elem.get('mediatype', None)
-            if not media_type or media_type == 'text/xml':
+            if not media_type or media_type in ('text/xml', 'text/plain'):
+                # Publishers sometimes mislabel images as text/plain
                 guessed = mimetypes.guess_type(href)[0]
                 media_type = guessed or media_type or base.BINARY_MIME
             if hasattr(media_type, 'lower'):

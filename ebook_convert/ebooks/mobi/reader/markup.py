@@ -59,6 +59,12 @@ def update_internal_links(mobi8_reader, log):
 
 
 def remove_kindlegen_markup(parts, aid_anchor_suffix, linked_aids):
+    # The reader collects aids as bytes while the parts are str; normalize so
+    # that linked anchors are actually recognized and kept.
+    if isinstance(aid_anchor_suffix, bytes):
+        aid_anchor_suffix = aid_anchor_suffix.decode('utf-8')
+    linked_aids = {a.decode('utf-8') if isinstance(a, bytes) else a
+                   for a in linked_aids}
 
     # we can safely remove all of the Kindlegen generated aid attributes and
     # calibre generated cid attributes

@@ -37,7 +37,7 @@ def test_tag_soup_html_to_epub(tmp_path):
         assert 'Test Author' in zf.read(opf).decode('utf-8')
 
 
-@pytest.mark.parametrize('ext', ['epub', 'mobi', 'txt', 'docx',
+@pytest.mark.parametrize('ext', ['epub', 'mobi', 'azw3', 'txt', 'docx',
                                  'htmlz', 'lrf', 'fb2'])
 def test_epub3_with_malformed_xhtml(epub3_path, tmp_path, ext):
     out = tmp_path / ('out.' + ext)
@@ -58,14 +58,14 @@ def test_epub_toc_is_taken_from_nav(epub3_path, tmp_path):
     assert 'Chapter One' in data and 'Chapter Two' in data
 
 
-@pytest.mark.parametrize('ext', ['mobi', 'docx', 'fb2', 'lrf', 'htmlz'])
+@pytest.mark.parametrize('ext', ['mobi', 'azw3', 'docx', 'fb2', 'lrf', 'htmlz'])
 def test_cover_image_survives(epub3_with_cover_path, tmp_path, ext):
     out = tmp_path / ('out.' + ext)
     proc = convert(epub3_with_cover_path, out)
     assert 'thumbnail' not in proc.stderr
     assert 'Bad image' not in proc.stderr
     data = out.read_bytes()
-    if ext in ('mobi', 'lrf'):
+    if ext in ('mobi', 'azw3', 'lrf'):
         assert b'JFIF' in data
     elif ext == 'fb2':
         assert b'<binary' in data
@@ -73,3 +73,22 @@ def test_cover_image_survives(epub3_with_cover_path, tmp_path, ext):
         with zipfile.ZipFile(out) as zf:
             assert any(n.lower().endswith(('.jpg', '.jpeg'))
                        for n in zf.namelist())
+
+
+def test_azw3_round_trip(epub3_path, tmp_path):
+    azw3 = tmp_path / 'book.azw3'
+    convert(epub3_path, azw3)
+    data = azw3.read_bytes()
+    assert data[60:68] == b'BOOKMOBI'
+    assert b'KF8' not in data[:16]  # header is PalmDOC, KF8 lives inside
+    back = tmp_path / 'back.epub'
+    convert(azw3, back)
+    with zipfile.ZipFile(back) as zf:
+        names = zf.namelist()
+        html = b''.join(zf.read(n) for n in names
+                        if n.endswith(('.html', '.xhtml')))
+        ncx = next(n for n in names if n.endswith('.ncx'))
+        toc = zf.read(ncx).decode('utf-8')
+    assert b'HTML5 fallback' in html
+    assert b'Chapter Two' in html
+    assert 'Chapter One' in toc and 'Chapter Two' in toc

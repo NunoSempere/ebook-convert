@@ -628,7 +628,7 @@ from ebook_convert.ebooks.conversion.plugins.docx_input import DOCXInput
 from ebook_convert.ebooks.conversion.plugins.epub_output import EPUBOutput
 from ebook_convert.ebooks.conversion.plugins.fb2_output import FB2Output
 from ebook_convert.ebooks.conversion.plugins.lrf_output import LRFOutput
-from ebook_convert.ebooks.conversion.plugins.mobi_output import MOBIOutput
+from ebook_convert.ebooks.conversion.plugins.mobi_output import MOBIOutput, AZW3Output
 from ebook_convert.ebooks.conversion.plugins.oeb_output import OEBOutput
 from ebook_convert.ebooks.conversion.plugins.txt_output import TXTOutput, TXTZOutput
 from ebook_convert.ebooks.conversion.plugins.htmlz_output import HTMLZOutput
@@ -639,8 +639,8 @@ from ebook_convert.ebooks.conversion.plugins.docx_output import DOCXOutput
 # ebook_convert/ebooks/conversion/plugins/ but no working backend, so they
 # are left out rather than failing with an ImportError half-way through a
 # conversion: inputs CBZ/CBR (comic), DJVU, LIT, RB, Recipe, TCR, CHM, SNB,
-# PML, AZW4; outputs LIT, AZW3 (KF8 writer), PDB, PDF (needs Qt), PML, RB,
-# RTF, TCR, HTML (needs templite), SNB.
+# PML, AZW4; outputs LIT, PDB, PDF (needs Qt), PML, RB, RTF, TCR, HTML (needs
+# templite), SNB.
 plugins += [
     EPUBInput,
     FB2Input,
@@ -661,6 +661,7 @@ plugins += [
     FB2Output,
     LRFOutput,
     MOBIOutput,
+    AZW3Output,
     OEBOutput,
     TXTOutput,
     TXTZOutput,
