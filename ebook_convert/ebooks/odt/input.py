@@ -25,11 +25,20 @@ class Extract(ODF2XHTML):
     def _extract_pictures(self, zf):
         if not os.path.exists('Pictures'):
             os.makedirs('Pictures')
+        # Calibre e1b5f9b45a / 4eabb38427: never write outside the
+        # container directory
+        base = os.path.abspath(os.getcwd())
+        if not base.endswith(os.sep):
+            base += os.sep
         for name in zf.namelist():
             if (name.startswith('Pictures') and
                     name not in {'Pictures', 'Pictures/'}):
+                dest = os.path.abspath(os.path.join(base, name))
+                if os.path.commonprefix([base, dest]) != base:
+                    continue
                 data = zf.read(name)
-                with open(name, 'wb') as f:
+                os.makedirs(os.path.dirname(dest), exist_ok=True)
+                with open(dest, 'wb') as f:
                     f.write(data)
 
     def _apply_list_starts(self, root, log):
@@ -71,7 +80,8 @@ class Extract(ODF2XHTML):
 
         css = u'\n\n'.join(ans)
         parser = CSSParser(loglevel=logging.WARNING, log=_css_logger)
-        self.css = parser.parseString(css, validate=False)
+        # odfpy's ODF2XHTML keeps its own self.css attribute, do not clobber it
+        self._parsed_css = parser.parseString(css, validate=False)
 
         with open('odfpy.css', 'wb') as f:
             f.write(css.encode('utf-8'))
@@ -79,7 +89,7 @@ class Extract(ODF2XHTML):
     def get_css_for_class(self, cls):
         if not cls:
             return None
-        for rule in self.css.cssRules.rulesOfType(CSSRule.STYLE_RULE):
+        for rule in self._parsed_css.cssRules.rulesOfType(CSSRule.STYLE_RULE):
             for sel in rule.selectorList:
                 q = sel.selectorText
                 if q == '.' + cls:
