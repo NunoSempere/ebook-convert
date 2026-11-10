@@ -4,15 +4,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ebook-convert"
-version = "5.0.0"
+version = "5.0.1"
 requires-python = ">= 3.12"
 description = "Command-line ebook converter extracted from Calibre: epub, mobi, azw3, docx, fb2, lrf, pdf, rtf, txt, ..."
 readme = "README.rst"
 license = "GPL-3.0-or-later"
 license-files = ["LICENSE"]
 authors = [
-    {name = "Kovid Goyal and the Calibre contributors"},
-    {name = "gryf", email = "gryf73@gmail.com"},
+    {name = "Nuno Sempere", email = "hello@sentinel-team.org"},
 ]
 maintainers = [
     {name = "Nuno Sempere"}
@@ -42,6 +41,7 @@ dependencies = [
     "html2text>=2020.1.16",
     "html5lib>=1.1",
     "lxml>=4.9",
+    "markdown>=3.0",
     "msgpack>=1.0.0",
     "odfpy>=1.4.1",
     "pillow>=8.0.1",
@@ -53,8 +53,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Markdown formatted plain-text input.
-markdown = ["markdown>=3.0"]
+# Kept so that `pip install ebook-convert[markdown]` from the 4.x docs still works.
+markdown = []
 # Japanese transliteration for --asciiize
 japanese = ["pykakasi>=2.2"]
 

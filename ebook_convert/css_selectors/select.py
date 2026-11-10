@@ -303,10 +303,11 @@ class Select:
         return (self.root if tag is None else tag).getparent()
 
     def iteridtags(self):
-        return get_compiled_xpath('//*[@id]')(self.root)
+        # ebook-convert: a tree walk; the XPath is pathologically slow on very wide trees
+        return [elem for elem in self.root.iter('*') if elem.get('id') is not None]
 
     def iterclasstags(self):
-        return get_compiled_xpath('//*[@class]')(self.root)
+        return [elem for elem in self.root.iter('*') if elem.get('class') is not None]
 
     def sibling_count(self, child, before=True, same_type=False, matching=None):
         ''' Return the number of siblings before or after child or raise ValueError if child has no parent.

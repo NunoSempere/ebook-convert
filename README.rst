@@ -53,8 +53,8 @@ Optional pieces:
 
 - ``pdftohtml``, ``pdfinfo`` and ``pdftoppm`` from `poppler`_ are needed in
   ``$PATH`` for conversion *from* PDF.
-- ``pip install 'ebook-convert[markdown]'`` enables Markdown input (``.md``);
-  ``[japanese]`` adds Japanese transliteration for ``--asciiize``.
+- ``pip install 'ebook-convert[japanese]'`` adds Japanese transliteration for
+  ``--asciiize``.
 - ``optipng``, ``jpegtran``/``cjpeg`` and ``cwebp`` are used to optimise
   images when present; Pillow is used otherwise.
 
@@ -88,7 +88,7 @@ checked to survive).
 
 **Input:** ``azw``, ``azw3``, ``azw4``, ``docx``, ``docm``, ``epub``,
 ``fb2``, ``fbz``, ``htm``, ``html``, ``xhtml``, ``shtml``, ``htmlz``,
-``lrf``, ``md``/``markdown`` (needs the ``markdown`` extra), ``mobi``,
+``lrf``, ``md``/``markdown``, ``mobi``,
 ``prc``, ``pobi``, ``odt``, ``opf``, ``pdb``, ``updb``, ``pdf`` (needs
 poppler), ``pml``, ``pmlz``, ``rb``, ``rtf``, ``snb``, ``tcr``, ``txt``,
 ``text``, ``textile``, ``txtz``, ``zip`` (of HTML), ``kepub`` (also as

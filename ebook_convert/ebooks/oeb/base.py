@@ -573,6 +573,28 @@ def isqname(name: str) -> bool | str:
     return name and QNAME_RE.match(name) is not None
 
 
+_noop_xslt = None
+
+
+def order_document_elements(elem: etree._Element | None) -> None:
+    """Make libxml2 assign document-order indices to the elements of the
+    document containing elem (a side effect of running any XSLT on it), so
+    that sorting XPath results is linear instead of quadratic on very wide
+    trees. Elements created afterwards lack the index but comparisons that
+    involve them stay cheap as long as they are few."""
+    global _noop_xslt
+    if not isinstance(elem, etree._Element):
+        return
+    if _noop_xslt is None:
+        _noop_xslt = etree.XSLT(etree.XML(
+            '<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform">'
+            '<xsl:template match="/"/></xsl:stylesheet>'))
+    try:
+        _noop_xslt(elem.getroottree())
+    except Exception:
+        pass
+
+
 @lru_cache(128)
 def XPath(expr: str) -> etree.XPath:
     return etree.XPath(expr, namespaces=XPNSMAP)
@@ -1315,11 +1337,14 @@ class Manifest:
                 self.oeb.log.warn(f'{self.href} contains data in TXT format', 'converting to HTML')
                 data = self._parse_txt(data)
                 self.media_type = XHTML_MIME
+            if data is not self._data:
+                order_document_elements(data)
             self._data = data
             return data
 
         @data.setter
         def data(self, value: ItemData | None) -> None:
+            order_document_elements(value)
             self._data = value
 
         @data.deleter

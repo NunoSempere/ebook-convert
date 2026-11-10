@@ -168,3 +168,32 @@ def test_kepub_input_strips_kobo_markup(epub3_path, tmp_path):
                             if n.endswith('.xhtml')).decode('utf-8')
     sentence = re.search(r'<p[^>]*>([^<]{20,})</p>', original).group(1)
     assert sentence in html
+
+
+def test_mobi_round_trip_keeps_full_toc(epub3_path, tmp_path):
+    # Nested TOC with entries inside a chapter; the MOBI's inline contents
+    # page (if any) is not the source of truth, the NCX index record is.
+    import shutil
+    sys.path.insert(0, str(pathlib.Path(__file__).parent))
+    from conftest import pack_epub
+    src = tmp_path / 'src'
+    shutil.copytree(pathlib.Path(__file__).parent / 'fixtures' / 'epub3', src)
+    ch1 = src / 'OEBPS' / 'ch1.xhtml'
+    ch1.write_text(ch1.read_text(encoding='utf-8').replace(
+        '</body>', '<h2 id="s1">Section One</h2><p>one one</p>'
+                   '<h2 id="s2">Section Two</h2><p>one two</p></body>'), encoding='utf-8')
+    nav = src / 'OEBPS' / 'nav.xhtml'
+    nav.write_text(nav.read_text(encoding='utf-8').replace(
+        '<li><a href="ch1.xhtml">Chapter One</a></li>',
+        '<li><a href="ch1.xhtml">Chapter One</a><ol>'
+        '<li><a href="ch1.xhtml#s1">Section One</a></li>'
+        '<li><a href="ch1.xhtml#s2">Section Two</a></li></ol></li>'), encoding='utf-8')
+    epub = pack_epub(src, tmp_path / 'nested.epub')
+    mobi = tmp_path / 'book.mobi'
+    convert(epub, mobi)
+    back = tmp_path / 'back.epub'
+    convert(mobi, back)
+    with zipfile.ZipFile(back) as zf:
+        ncx = zf.read(next(n for n in zf.namelist() if n.endswith('.ncx'))).decode('utf-8')
+    labels = re.findall(r'<text>([^<]*)</text>', ncx)
+    assert {'Chapter One', 'Section One', 'Section Two', 'Chapter Two'} <= set(labels), labels

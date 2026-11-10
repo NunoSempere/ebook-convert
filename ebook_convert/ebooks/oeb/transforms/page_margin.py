@@ -145,7 +145,7 @@ class RemoveFakeMargins:
                 elem = elem.getparent()  # ty: ignore[invalid-assignment] elem is a descendant of body
             return ans
 
-        paras = XPath('descendant::h:p|descendant::h:div')
+        paras = XPath('descendant::*[self::h:p or self::h:div]')  # ebook-convert: no union, see tools/patches
 
         for item in self.oeb.spine:
             root = item.data

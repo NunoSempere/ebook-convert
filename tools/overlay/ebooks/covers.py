@@ -40,12 +40,11 @@ cprefs.defaults['subtitle_template'] = ''
 cprefs.defaults['footer_template'] = ''
 
 # A few of calibre's default colour themes (background, title, subtitle, footer)
-default_color_themes = {
-    'Mocha': 'e8d9ac c7b07b 564628 382d1a',
-    'Lavender': 'f7f5fb a5a2ba 8f88b0 2c2a32',
-    'Ocean': 'bbcfe6 7e9ab7 405f87 23344b',
-    'Forest': 'c4d4b8 7f9a72 486a3d 273821',
-    'Grey': 'd8d8d8 9c9c9c 525252 2e2e2e',
+default_color_themes = {  # calibre's defaults: background, accent, contrast 1, contrast 2
+    'Earth': 'e8d9ac c7b07b 564628 382d1a',
+    'Grass': 'd8edb5 abc8a4 375d3b 183128',
+    'Water': 'd3dcf2 829fe4 00448d 00305a',
+    'Silver': 'e6f1f5 aab3b6 6e7476 3b3e40',
 }
 fallback_colors = 'ffffff 000000 000000 000000'
 
@@ -173,7 +172,7 @@ def _wrap(draw: ImageDraw.ImageDraw, text: str, font, max_width: int) -> list[st
     return lines or ['']
 
 
-def _draw_block(draw, text, font_size, family, color, width, top, bottom, align_bottom=False, max_lines=8) -> int:
+def _draw_block(draw, text, font_size, family, color, width, top, bottom, align_bottom=False, max_lines=8, measure_only=False) -> int:
     'Draw text centred between top and bottom; return the y coordinate below the text'
     if not text:
         return top
@@ -186,6 +185,8 @@ def _draw_block(draw, text, font_size, family, color, width, top, bottom, align_
     total = line_height * len(lines)
     y = bottom - total if align_bottom else top
     y = max(top, min(y, bottom - total))
+    if measure_only:
+        return y + total
     for line in lines:
         w = draw.textlength(line, font=font)
         draw.text(((width - w) / 2, y), line, font=font, fill=color)
@@ -209,9 +210,20 @@ def _render(mi, prefs, logo_path: str | None = None) -> Image.Image:
     if footer.lower() in ('unknown', 'unbekannt'):
         footer = ''
     pad = int(height * 0.06)
-    y = _draw_block(draw, title, prefs['title_font_size'], prefs['title_font_family'], c_title, width, pad, height // 2)
-    y = _draw_block(draw, subtitle, prefs['subtitle_font_size'], prefs['subtitle_font_family'], c_subtitle, width, y + pad // 2, height * 2 // 3, max_lines=3)
-    footer_top = _draw_block(draw, footer, prefs['footer_font_size'], prefs['footer_font_family'], c_footer, width, y + pad, height - pad, align_bottom=True, max_lines=4)
+    # Layout after calibre's "The Cross" style: a band in the accent colour
+    # behind the title and subtitle, a stripe down the left edge, title and
+    # subtitle in the darkest contrast colour, the author line in the other.
+    band_top = pad * 2
+    y = _draw_block(draw, title, prefs['title_font_size'], prefs['title_font_family'], c_footer, width, band_top + pad // 2, height // 2, measure_only=True)
+    y = _draw_block(draw, subtitle, prefs['subtitle_font_size'], prefs['subtitle_font_family'], c_footer, width, y + pad // 4, height * 2 // 3, max_lines=3, measure_only=True)
+    band_bottom = y + pad // 2
+    radius = max(8, width // 60)
+    draw.rounded_rectangle((0, band_top, width - 1, band_bottom), radius=radius, fill=c_title)
+    draw.rectangle((0, 0, int(width * 0.04), height), fill=c_title)
+    y = _draw_block(draw, title, prefs['title_font_size'], prefs['title_font_family'], c_footer, width, band_top + pad // 2, height // 2)
+    y = _draw_block(draw, subtitle, prefs['subtitle_font_size'], prefs['subtitle_font_family'], c_footer, width, y + pad // 4, height * 2 // 3, max_lines=3)
+    y = band_bottom
+    footer_top = _draw_block(draw, footer, prefs['footer_font_size'], prefs['footer_font_family'], c_subtitle, width, y + pad, height - pad, align_bottom=True, max_lines=4)
     if logo_path:
         try:
             logo = Image.open(logo_path).convert('RGBA')

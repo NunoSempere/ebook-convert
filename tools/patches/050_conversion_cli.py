@@ -1,6 +1,6 @@
 """ebooks/conversion/cli.py: recipes (news download) need calibre.web, which
-is not vendored, so --list-recipes explains that instead of importing it.
-Also point the usage text at this project."""
+is not vendored, so the --list-recipes option is dropped.  Also point the
+usage text at this project."""
 
 TARGET = 'ebooks/conversion/cli.py'
 
@@ -19,9 +19,20 @@ REPLACEMENTS = [
         log(f'{len(titles)} recipes available')
         raise SystemExit(0)
 """,
-        """    if '--list-recipes' in args:
-        log('News download (recipes) is not part of ebook-convert; use calibre for that.')
-        raise SystemExit(1)
+        "",
+    ),
+    (
+        """    parser = OptionParser(usage=USAGE)
+    parser.add_option(
+        '--list-recipes',
+        default=False,
+        action='store_true',
+        help=_('List builtin recipe names. You can create an e-book from a builtin recipe like this: ebook-convert "Recipe Name.recipe" output.epub'),
+    )
+    return parser
+""",
+        """    parser = OptionParser(usage=USAGE)
+    return parser
 """,
     ),
     (
