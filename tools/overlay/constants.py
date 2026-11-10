@@ -16,7 +16,7 @@ from ebook_convert._vendored import CALIBRE_COMMIT, CALIBRE_VERSION  # ruff: ign
 
 __appname__ = 'ebook-convert'
 numeric_version = (5, 0, 0)
-__version__ = '5.0.0a1'
+__version__ = '5.0.0'
 __author__ = 'Kovid Goyal <kovid@kovidgoyal.net>'
 
 '''
