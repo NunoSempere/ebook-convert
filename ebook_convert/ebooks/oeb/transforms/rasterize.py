@@ -1,9 +1,13 @@
 """
 SVG rasterization transform.
+
+Calibre renders SVG with Qt.  Here the rendering is done by resvg (through the
+``resvg_py`` wheel), a complete SVG renderer with no system dependencies.
 """
 import os
 import re
 import urllib.parse
+from io import BytesIO
 
 from ebook_convert import constants as const
 from ebook_convert.ebooks.oeb import base
@@ -24,22 +28,105 @@ class Unavailable(Exception):
 
 
 def renderer_available():
-    """Return True if an SVG renderer is available.
+    """Return True if the resvg renderer can be imported."""
+    try:
+        import resvg_py  # noqa: F401
+    except ImportError:
+        return False
+    return True
 
-    Calibre rasterizes SVG with Qt (QSvgRenderer).  This project deliberately
-    does not depend on Qt, so no renderer is available and SVG content is
-    passed through untouched.  Output plugins catch :class:`Unavailable` and
-    log a warning instead of failing the whole conversion.
+
+def _length(value):
+    """Parse an SVG length attribute (``"120"``, ``"120px"``, ``"2in"``) into
+    CSS pixels; return None for percentages or garbage."""
+    if value is None:
+        return None
+    m = re.match(r'^\s*([0-9.]+)\s*([a-z%]*)\s*$', value, re.I)
+    if m is None:
+        return None
+    try:
+        num = float(m.group(1))
+    except ValueError:
+        return None
+    unit = m.group(2).lower()
+    factor = {'': 1, 'px': 1, 'pt': 96/72., 'pc': 16, 'in': 96, 'cm': 96/2.54,
+              'mm': 96/25.4, 'em': 16, 'ex': 8}.get(unit)
+    if factor is None:
+        return None
+    return num * factor
+
+
+def svg_intrinsic_size(root, logger=None):
+    """Return the (width, height) an SVG root element declares, in pixels.
+
+    Uses the width/height attributes, then the viewBox, then falls back to
+    100x100 like Qt's QSvgRenderer does.
     """
-    return False
+    width = _length(root.get('width'))
+    height = _length(root.get('height'))
+    view_box = root.get('viewBox', root.get('viewbox'))
+    box = None
+    if view_box is not None:
+        try:
+            box = [float(x) for x in filter(None, re.split('[, ]+', view_box))]
+            if len(box) != 4 or box[2] <= 0 or box[3] <= 0:
+                raise ValueError(view_box)
+        except (TypeError, ValueError):
+            box = None
+            if logger is not None:
+                logger.warning('SVG image has invalid viewBox="%s", ignoring '
+                               'the viewBox', view_box)
+    if width and height:
+        return width, height
+    if box is not None:
+        bw, bh = box[2], box[3]
+        if width:
+            return width, width * bh / bw
+        if height:
+            return height * bw / bh, height
+        return bw, bh
+    return 100., 100.
+
+
+def fit_size(size, width=0, height=0):
+    """Scale ``size`` to fit inside ``width`` x ``height`` keeping the aspect
+    ratio (both bounds optional), returning integer pixel dimensions."""
+    w, h = size
+    if width and height:
+        scale = min(width / w, height / h)
+    elif width:
+        scale = width / w
+    elif height:
+        scale = height / h
+    else:
+        scale = 1.
+    return max(1, int(round(w * scale))), max(1, int(round(h * scale)))
+
+
+def render_svg(svg_bytes, width=0, height=0, size=None, bgcolor='#ffffff'):
+    """Render SVG markup to PNG bytes of the given size using resvg.
+
+    ``size`` is the intrinsic size to scale from; when omitted it is read
+    from the markup.
+    """
+    import resvg_py
+    if size is None:
+        from ebook_convert.utils.xml_parse import safe_xml_fromstring
+        size = svg_intrinsic_size(safe_xml_fromstring(svg_bytes))
+    w, h = fit_size(size, width, height)
+    if isinstance(svg_bytes, bytes):
+        svg_bytes = svg_bytes.decode('utf-8', 'replace')
+    png = resvg_py.svg_to_bytes(svg_string=svg_bytes, width=w, height=h,
+                                background=bgcolor)
+    return bytes(png)
 
 
 class SVGRasterizer(object):
 
     def __init__(self, base_css=''):
         if not renderer_available():
-            raise Unavailable('SVG rasterization needs Qt, which is not '
-                              'available; SVG images are left as they are')
+            raise Unavailable('SVG rasterization needs the resvg_py package; '
+                              'SVG images are left as they are')
         self.base_css = base_css
 
     @classmethod
@@ -68,49 +155,24 @@ class SVGRasterizer(object):
                 pass
 
     def rasterize_svg(self, elem, width=0, height=0, format='PNG'):
-        view_box = elem.get('viewBox', elem.get('viewbox', None))
-        sizes = None
         logger = self.oeb.logger
-
-        if view_box is not None:
+        size = svg_intrinsic_size(elem, logger)
+        for image in elem.xpath('descendant::*[local-name()="image" and '
+                                '@height and contains(@height, "%")]'):
+            logger.info('Found SVG image height in %, trying to convert...')
             try:
-                box = [float(x) for x in filter(None, re.split('[, ]', view_box))]
-                sizes = [box[2]-box[0], box[3] - box[1]]
-            except (TypeError, ValueError, IndexError):
-                logger.warning('SVG image has invalid viewBox="%s", ignoring '
-                               'the viewBox', view_box)
-            else:
-                for image in elem.xpath('descendant::*[local-name()="image" and '
-                        '@height and contains(@height, "%")]'):
-                    logger.info('Found SVG image height in %, trying to '
-                                'convert...')
-                    try:
-                        h = float(image.get('height').replace('%', ''))/100.
-                        image.set('height', str(h*sizes[1]))
-                    except:
-                        logger.exception('Failed to convert percentage '
-                                         'height: %s', image.get('height'))
-
-        data = QByteArray(xml2str(elem, with_tail=False))
-        svg = QSvgRenderer(data)
-        size = svg.defaultSize()
-        if size.width() == 100 and size.height() == 100 and sizes:
-            size.setWidth(sizes[0])
-            size.setHeight(sizes[1])
-        if width or height:
-            size.scale(width, height, Qt.KeepAspectRatio)
-        logger.info('Rasterizing %r to %dx%d', elem, size.width(),
-                    size.height())
-        image = QImage(size, QImage.Format_ARGB32_Premultiplied)
-        image.fill(QColor("white").rgb())
-        painter = QPainter(image)
-        svg.render(painter)
-        painter.end()
-        array = QByteArray()
-        buffer = QBuffer(array)
-        buffer.open(QIODevice.WriteOnly)
-        image.save(buffer, format)
-        return array.data()
+                h = float(image.get('height').replace('%', ''))/100.
+                image.set('height', str(h*size[1]))
+            except Exception:
+                logger.exception('Failed to convert percentage height: %s',
+                                 image.get('height'))
+        w, h = fit_size(size, width, height)
+        logger.info('Rasterizing %r to %dx%d', elem, w, h)
+        data = render_svg(xml2str(elem, with_tail=False), w, h, size=size)
+        if format.upper() != 'PNG':
+            from ebook_convert.utils.img import image_to_data
+            data = image_to_data(data, fmt=format)
+        return data
 
     def dataize_manifest(self):
         for item in self.oeb.manifest.values():
@@ -191,41 +253,30 @@ class SVGRasterizer(object):
         height = style['height']
         width = (width / 72) * self.profile.dpi
         height = (height / 72) * self.profile.dpi
-        data = QByteArray(svgitem.bytes_representation)
-        svg = QSvgRenderer(data)
-        size = svg.defaultSize()
-        size.scale(width, height, Qt.KeepAspectRatio)
-        key = (svgitem.href, size.width(), size.height())
+        svg = self.dataize_svg(svgitem)
+        size = svg_intrinsic_size(svg, self.oeb.logger)
+        w, h = fit_size(size, width, height)
+        key = (svgitem.href, w, h)
         if key in self.images:
             href = self.images[key]
         else:
             logger = self.oeb.logger
-            logger.info('Rasterizing %r to %dx%d', svgitem.href, size.width(),
-                        size.height())
-            image = QImage(size, QImage.Format_ARGB32_Premultiplied)
-            image.fill(QColor("white").rgb())
-            painter = QPainter(image)
-            svg.render(painter)
-            painter.end()
-            array = QByteArray()
-            buffer = QBuffer(array)
-            buffer.open(QIODevice.WriteOnly)
-            image.save(buffer, 'PNG')
-            data = array.data()
+            logger.info('Rasterizing %r to %dx%d', svgitem.href, w, h)
+            data = render_svg(xml2str(svg), w, h, size=size)
             manifest = self.oeb.manifest
             href = os.path.splitext(svgitem.href)[0] + '.png'
             id, href = manifest.generate(svgitem.id, href)
             manifest.add(id, href, PNG_MIME, data=data)
             self.images[key] = href
         elem.tag = base.tag('xhtml', 'img')
-        for attr in elem.attrib:
+        for attr in list(elem.attrib):
             if attr not in KEEP_ATTRS:
                 del elem.attrib[attr]
         elem.attrib['src'] = item.relhref(href)
         if elem.text:
             elem.attrib['alt'] = elem.text
             elem.text = None
-        for child in elem:
+        for child in list(elem):
             elem.remove(child)
 
     def rasterize_cover(self):

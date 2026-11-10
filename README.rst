@@ -112,9 +112,9 @@ registered.
 Known limitations
 ~~~~~~~~~~~~~~~~~
 
-- SVG images are not rasterized (Calibre does that with Qt). Formats that
-  cannot display SVG, like ``mobi``, will show such images as missing. A
-  warning is logged when this happens.
+- SVG images are rendered to PNG with `resvg`_ for formats that cannot
+  display SVG (``mobi``, ``docx``, ``fb2``). Text inside SVG uses whatever
+  fonts are installed on the machine doing the conversion.
 - The *Kindle periodical* format (discontinued by Amazon in 2023) is treated
   as an ordinary book.
 - Windows is not tested.
@@ -199,6 +199,7 @@ This work is licensed under GPL3, like the original. See LICENSE for details.
 .. _poppler: https://poppler.freedesktop.org/
 .. _Liberation fonts: https://github.com/liberationfonts/liberation-fonts
 .. _html5lib: https://github.com/html5lib/html5lib-python
+.. _resvg: https://github.com/linebender/resvg
 .. _the original project: https://github.com/gryf/ebook-converter
 .. _FicHub: https://fichub.net/
 .. _Source: https://github.com/FicHub/fichub.net

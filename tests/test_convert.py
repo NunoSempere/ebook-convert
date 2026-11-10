@@ -10,9 +10,9 @@ import pytest
 FIXTURES = pathlib.Path(__file__).parent / 'fixtures'
 
 
-def convert(src, dst):
+def convert(src, dst, *args):
     proc = subprocess.run([sys.executable, '-m', 'ebook_convert.main',
-                           str(src), str(dst)],
+                           str(src), str(dst)] + list(args),
                           capture_output=True, text=True, timeout=300)
     assert proc.returncode == 0, proc.stderr
     assert dst.exists() and dst.stat().st_size > 0, proc.stderr

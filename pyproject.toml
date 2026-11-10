@@ -47,6 +47,7 @@ dependencies = [
     "odfpy>=1.4.1",
     "pillow>=8.0.1",
     "python-dateutil>=2.8.1",
+    "resvg-py>=0.5",
 ]
 
 [project.optional-dependencies]
