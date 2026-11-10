@@ -3,8 +3,10 @@ from ebook_convert.utils import icu
 
 def test_sort_key_orders_case_and_accent_insensitively():
     words = ['zebra', 'Apple', 'éclair', 'apple', 'Eclair', 'banana']
+    # Accents are a secondary difference, case a tertiary one: unaccented
+    # before accented, lowercase before uppercase (ICU defaults).
     assert sorted(words, key=icu.sort_key) == [
-        'apple', 'Apple', 'banana', 'éclair', 'Eclair', 'zebra']
+        'apple', 'Apple', 'banana', 'Eclair', 'éclair', 'zebra']
     assert icu.strcmp('a', 'B') < 0
     assert icu.primary_strcmp('e', 'É') == 0
     assert icu.sort_key(None) == ('', '', '')
