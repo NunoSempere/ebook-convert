@@ -1,35 +1,73 @@
+# License: GPLv3 Copyright: 2008, Kovid Goyal <kovid at kovidgoyal.net>
+
+from __future__ import annotations
 import array
-import itertools
+import logging
+import os
 import re
 import sys
+from itertools import chain
+from typing import IO, TYPE_CHECKING, cast
 
+from ebook_convert import setup_cli_handlers
+from ebook_convert.ebooks.lrf.meta import LRFMetaFile
+from ebook_convert.ebooks.lrf.objects import BookAttr, Font, PageTree, StyleObject, Text, TOCObject, get_object, ruby_tags
 from ebook_convert.utils.config import OptionParser
 from ebook_convert.utils.filenames import ascii_filename
-from ebook_convert.ebooks.lrf.meta import LRFMetaFile
-from ebook_convert.ebooks.lrf.objects import get_object, PageTree, \
-        StyleObject, Font, Text, TOCObject, BookAttr, ruby_tags
+from ebook_convert.utils.localization import _
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+
+    from ebook_convert.ebooks.lrf.objects import ImageStream, LRFObject
 
 
 class LRFDocument(LRFMetaFile):
+    class temp:
+        title: str
+        title_reading: str
+        author: str
+        author_reading: str
+        book_id: str
+        classification: str
+        free_text: str
+        publisher: str
+        label: str
+        category: str
+        thumbnail: bytes | None
+        language: str
+        creator: str
+        producer: str
+        page: str
+        thumbnail_extension: str
+        dpi: int
+        width: int
+        height: int
 
-    class temp(object):
-        pass
-
-    def __init__(self, stream):
+    def __init__(self, stream: IO[bytes]) -> None:
         LRFMetaFile.__init__(self, stream)
         self.scramble_key = self.xor_key
-        self.page_trees = []
-        self.font_map = {}
-        self.image_map = {}
-        self.toc = ''
+        self.page_trees: list[PageTree] = []
+        self.font_map: dict[str, Font] = {}
+        self.image_map: dict[int, ImageStream] = {}
+        self.toc: str | TOCObject = ''
         self.keep_parsing = True
 
-    def parse(self):
+    def parse(self) -> None:
         self._parse_objects()
         self.metadata = LRFDocument.temp()
-        for a in ('title', 'title_reading', 'author', 'author_reading',
-                  'book_id', 'classification', 'free_text', 'publisher',
-                  'label', 'category'):
+        for a in (
+            'title',
+            'title_reading',
+            'author',
+            'author_reading',
+            'book_id',
+            'classification',
+            'free_text',
+            'publisher',
+            'label',
+            'category',
+        ):
             setattr(self.metadata, a, getattr(self, a))
         self.doc_info = LRFDocument.temp()
         for a in ('thumbnail', 'language', 'creator', 'producer', 'page'):
@@ -39,83 +77,66 @@ class LRFDocument(LRFMetaFile):
         for a in ('dpi', 'width', 'height'):
             setattr(self.device_info, a, getattr(self, a))
 
-    def _parse_objects(self):
-        self.objects = {}
+    def _parse_objects(self) -> None:
+        self.objects: dict[int, LRFObject] = {}
         self._file.seek(self.object_index_offset)
-        obj_array = array.array("I", self._file.read(4 * 4 *
-                                                     self.number_of_objects))
-        if sys.byteorder == 'big':
+        obj_array = array.array('I', self._file.read(4 * 4 * self.number_of_objects))
+        if ord(array.array('i', [1]).tobytes()[0:1]) == 0:  # big-endian
             obj_array.byteswap()
-
         for i in range(self.number_of_objects):
             if not self.keep_parsing:
                 break
-            objid, objoff, objsize = obj_array[i*4:i*4+3]
+            objid, objoff, objsize = obj_array[i * 4 : i * 4 + 3]
             self._parse_object(objid, objoff, objsize)
         for obj in self.objects.values():
             if not self.keep_parsing:
                 break
             if hasattr(obj, 'initialize'):
-                obj.initialize()
+                obj.initialize()  # ty: ignore[call-non-callable] hasattr() narrowing types it as object
 
-    def _parse_object(self, objid, objoff, objsize):
-        obj = get_object(self, self._file, objid, objoff, objsize,
-                         self.scramble_key)
+    def _parse_object(self, objid: int, objoff: int, objsize: int) -> None:
+        obj = get_object(self, self._file, objid, objoff, objsize, self.scramble_key)
         self.objects[objid] = obj
         if isinstance(obj, PageTree):
             self.page_trees.append(obj)
         elif isinstance(obj, TOCObject):
             self.toc = obj
         elif isinstance(obj, BookAttr):
-            self.ruby_tags = {}
+            self.ruby_tags: dict[str, object] = {}
             for h in ruby_tags.values():
                 attr = h[0]
-                if hasattr(obj, attr):
+                if isinstance(attr, str) and hasattr(obj, attr):
                     self.ruby_tags[attr] = getattr(obj, attr)
 
-    def __iter__(self):
-        for pt in self.page_trees:
-            yield pt
+    def __iter__(self) -> Iterator[PageTree]:
+        yield from self.page_trees
 
-    def write_files(self):
-        for obj in itertools.chain(self.image_map.values(),
-                                   self.font_map.values()):
+    def write_files(self) -> None:
+        for obj in chain(self.image_map.values(), self.font_map.values()):
             with open(obj.file, 'wb') as f:
-                f.write(obj.stream)
+                f.write(cast('bytes', obj.stream))  # the stream has been read
 
-    def to_xml(self, write_files=True):
-        bookinfo = ('<BookInformation>\n<Info version="1.1">\n<BookInfo>\n'
-                    '<Title reading="%s">%s</Title>\n'
-                    '<Author reading="%s">%s</Author>\n'
-                    '<BookID>%s</BookID>\n'
-                    '<Publisher reading="">%s</Publisher>\n'
-                    '<Label reading="">%s</Label>\n'
-                    '<Category reading="">%s</Category>\n'
-                    '<Classification reading="">%s</Classification>\n'
-                    '<FreeText reading="">%s</FreeText>\n'
-                    '</BookInfo>\n<DocInfo>\n' %
-                    (self.metadata.title_reading, self.metadata.title,
-                     self.metadata.author_reading, self.metadata.author,
-                     self.metadata.book_id, self.metadata.publisher,
-                     self.metadata.label, self.metadata.category,
-                     self.metadata.classification, self.metadata.free_text))
+    def to_xml(self, write_files: bool = True) -> str:
+        bookinfo = '<BookInformation>\n<Info version="1.1">\n<BookInfo>\n'
+        bookinfo += f'<Title reading="{self.metadata.title_reading}">{self.metadata.title}</Title>\n'
+        bookinfo += f'<Author reading="{self.metadata.author_reading}">{self.metadata.author}</Author>\n'
+        bookinfo += f'<BookID>{self.metadata.book_id}</BookID>\n'
+        bookinfo += f'<Publisher reading="">{self.metadata.publisher}</Publisher>\n'
+        bookinfo += f'<Label reading="">{self.metadata.label}</Label>\n'
+        bookinfo += f'<Category reading="">{self.metadata.category}</Category>\n'
+        bookinfo += f'<Classification reading="">{self.metadata.classification}</Classification>\n'
+        bookinfo += f'<FreeText reading="">{self.metadata.free_text}</FreeText>\n</BookInfo>\n<DocInfo>\n'
         th = self.doc_info.thumbnail
         if th:
             prefix = ascii_filename(self.metadata.title)
-            bookinfo += ('<CThumbnail file="%s" />\n' %
-                         (prefix + '_thumbnail.' +
-                          self.doc_info.thumbnail_extension))
+            bookinfo += '<CThumbnail file="{}" />\n'.format(prefix + '_thumbnail.' + self.doc_info.thumbnail_extension)
             if write_files:
-                with open(prefix + '_thumbnail.' +
-                          self.doc_info.thumbnail_extension, 'wb') as f:
+                with open(prefix + '_thumbnail.' + self.doc_info.thumbnail_extension, 'wb') as f:
                     f.write(th)
-        bookinfo += ('<Language reading="">%s</Language>\n'
-                     '<Creator reading="">%s</Creator>\n'
-                     '<Producer reading="">%s</Producer>\n'
-                     '<SumPage>%s</SumPage>\n'
-                     '</DocInfo>\n</Info>\n%s</BookInformation>\n' %
-                     (self.doc_info.language, self.doc_info.creator,
-                      self.doc_info.producer, self.doc_info.page, self.toc))
+        bookinfo += f'<Language reading="">{self.doc_info.language}</Language>\n'
+        bookinfo += f'<Creator reading="">{self.doc_info.creator}</Creator>\n'
+        bookinfo += f'<Producer reading="">{self.doc_info.producer}</Producer>\n'
+        bookinfo += f'<SumPage>{self.doc_info.page}</SumPage>\n</DocInfo>\n</Info>\n{self.toc}</BookInformation>\n'
         pages = ''
         done_main = False
         pt_id = -1
@@ -126,13 +147,12 @@ class LRFDocument(LRFMetaFile):
                 close = '</Main>\n'
                 pt_id = page_tree.id
             else:
-                pages += '<PageTree objid="%d">\n' % (page_tree.id,)
+                pages += f'<PageTree objid="{page_tree.id}">\n'
                 close = '</PageTree>\n'
             for page in page_tree:
                 pages += str(page)
             pages += close
-        traversed_objects = [int(i) for i in re.findall(r'objid="(\w+)"',
-                                                        pages)] + [pt_id]
+        traversed_objects = [int(i) for i in re.findall(r'objid="(\w+)"', pages)] + [pt_id]
 
         objects = '\n<Objects>\n'
         styles = '\n<Style>\n'
@@ -150,19 +170,46 @@ class LRFDocument(LRFMetaFile):
         objects += '</Objects>\n'
         if write_files:
             self.write_files()
-        return ('<BBeBXylog version="1.0">\n' + bookinfo + pages + styles +
-                objects + '</BBeBXylog>')
+        return '<BBeBXylog version="1.0">\n' + bookinfo + pages + styles + objects + '</BBeBXylog>'
 
 
-def option_parser():
-    parser = OptionParser(usage='%prog book.lrf\nConvert an LRF file into '
-                          'an LRS (XML UTF-8 encoded) file')
-    parser.add_option('--output', '-o', default=None,
-                      help='Output LRS file', dest='out')
-    parser.add_option('--dont-output-resources', default=True,
-                      action='store_false',
-                      help='Do not save embedded image and font files to '
-                      'disk', dest='output_resources')
-    parser.add_option('--verbose', default=False, action='store_true',
-                      dest='verbose', help='Be more verbose')
+def option_parser() -> OptionParser:
+    parser = OptionParser(usage=_('%prog book.lrf\nConvert an LRF file into an LRS (XML UTF-8 encoded) file'))
+    parser.add_option('--output', '-o', default=None, help=_('Output LRS file'), dest='out')
+    parser.add_option(
+        '--dont-output-resources',
+        default=True,
+        action='store_false',
+        help=_('Do not save embedded image and font files to disk'),
+        dest='output_resources',
+    )
+    parser.add_option('--verbose', default=False, action='store_true', dest='verbose', help=_('Be more verbose'))
     return parser
+
+
+def main(args: list[str] = sys.argv, logger: logging.Logger | None = None) -> int:
+    parser = option_parser()
+    opts, args = parser.parse_args(args)
+    if logger is None:
+        level = logging.DEBUG if opts.verbose else logging.INFO
+        logger = logging.getLogger('lrf2lrs')
+        setup_cli_handlers(logger, level)
+    if len(args) != 2:
+        parser.print_help()
+        return 1
+    if opts.out is None:
+        opts.out = os.path.join(os.path.dirname(args[1]), os.path.splitext(os.path.basename(args[1]))[0] + '.lrs')
+    logger.info(_('Parsing LRF...'))
+    with open(args[1], 'rb') as r:
+        d = LRFDocument(r)
+        d.parse()
+        logger.info(_('Creating XML...'))
+        with open(os.path.abspath(os.path.expanduser(opts.out)), 'w', encoding='utf-8') as f:
+            f.write('<?xml version="1.0" encoding="UTF-8"?>\n')
+            f.write(d.to_xml(write_files=opts.output_resources))
+        logger.info(_('LRS written to ') + opts.out)
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

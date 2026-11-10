@@ -1,8 +1,29 @@
+#!/usr/bin/env python
+# License: GPLv3 Copyright: 2010, Kovid Goyal <kovid at kovidgoyal.net>
+
+from __future__ import annotations
 import re
-import html.entities
+from html.entities import name2codepoint
+from typing import TYPE_CHECKING, Literal, overload
+
+from ebook_convert.constants import preferred_encoding
+from ebook_convert.calibre_extensions.speedup import clean_xml_chars as _ncxc
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable
 
 
-def ascii_pat(for_binary=False):
+def native_clean_xml_chars(x: str | bytes) -> str:
+    if isinstance(x, bytes):
+        x = x.decode(preferred_encoding)
+    return _ncxc(x)
+
+
+@overload
+def ascii_pat(for_binary: Literal[True]) -> re.Pattern[bytes]: ...
+@overload
+def ascii_pat(for_binary: Literal[False] = False) -> re.Pattern[str]: ...
+def ascii_pat(for_binary: bool = False) -> re.Pattern[str] | re.Pattern[bytes]:
     attr = 'binary' if for_binary else 'text'
     ans = getattr(ascii_pat, attr, None)
     if ans is None:
@@ -16,36 +37,45 @@ def ascii_pat(for_binary=False):
     return ans
 
 
-def clean_ascii_chars(txt, charlist=None):
-    r'''
+@overload
+def clean_ascii_chars(txt: bytes, charlist: Iterable[int] | None = None) -> bytes: ...
+@overload
+def clean_ascii_chars(txt: str | None, charlist: Iterable[int] | None = None) -> str: ...
+def clean_ascii_chars(txt: str | bytes | None, charlist: Iterable[int] | None = None) -> str | bytes:
+    r"""
     Remove ASCII control chars.
     This is all control chars except \t, \n and \r
-    '''
-    is_binary = isinstance(txt, bytes)
-    empty = b'' if is_binary else ''
-    if not txt:
-        return empty
-
-    if charlist is None:
-        pat = ascii_pat(is_binary)
+    """
+    if isinstance(txt, bytes):
+        if not txt:
+            return b''
+        if charlist is None:
+            return ascii_pat(True).sub(b'', txt)
+        return re.compile('|'.join(map(chr, charlist)).encode('utf-8')).sub(b'', txt)
     else:
-        pat = '|'.join(map(chr, charlist))
-        if is_binary:
-            pat = pat.encode('utf-8')
-    return pat.sub(empty, txt)
+        if not txt:
+            return ''
+        if charlist is None:
+            return ascii_pat(False).sub('', txt)
+        return re.compile('|'.join(map(chr, charlist))).sub('', txt)
 
 
-def allowed(x):
-    x = ord(x)
-    return ((x != 127 and (31 < x < 0xd7ff or x in (9, 10, 13))) or
-            (0xe000 < x < 0xfffd) or (0x10000 < x < 0x10ffff))
+def allowed(x: str) -> bool:
+    cp = ord(x)
+    return (cp != 127 and (31 < cp < 0xD7FF or cp in (9, 10, 13))) or (0xE000 < cp < 0xFFFD) or (0x10000 < cp < 0x10FFFF)
 
 
-def py_clean_xml_chars(unicode_string):
+def py_clean_xml_chars(unicode_string: str) -> str:
     return ''.join(filter(allowed, unicode_string))
 
 
-clean_xml_chars = py_clean_xml_chars
+clean_xml_chars = native_clean_xml_chars or py_clean_xml_chars
+
+
+def test_clean_xml_chars() -> None:
+    raw = 'asd\x02a\U00010437x\ud801b\udffe\ud802'
+    if native_clean_xml_chars(raw) != 'asda\U00010437xb':
+        raise ValueError(f'Failed to XML clean: {raw!r}')
 
 
 # Fredrik Lundh: http://effbot.org/zone/re-sub.htm#unescape-html
@@ -54,13 +84,14 @@ clean_xml_chars = py_clean_xml_chars
 # @param text The HTML (or XML) source text.
 # @return The plain text, as a Unicode string, if necessary.
 
-def unescape(text, rm=False, rchar=''):
-    def fixup(m, rm=rm, rchar=rchar):
+
+def unescape(text: str, rm: bool = False, rchar: str = '') -> str:
+    def fixup(m: re.Match[str], rm: bool = rm, rchar: str = rchar) -> str:
         text = m.group(0)
-        if text[:2] == "&#":
+        if text[:2] == '&#':
             # character reference
             try:
-                if text[:3] == "&#x":
+                if text[:3] == '&#x':
                     return chr(int(text[3:-1], 16))
                 else:
                     return chr(int(text[2:-1]))
@@ -69,10 +100,11 @@ def unescape(text, rm=False, rchar=''):
         else:
             # named entity
             try:
-                text = chr(html.entities.name2codepoint[text[1:-1]])
+                text = chr(name2codepoint[text[1:-1]])
             except KeyError:
                 pass
         if rm:
             return rchar  # replace by char
         return text  # leave as is
-    return re.sub("&#?\\w+;", fixup, text)
+
+    return re.sub(r'&#?\w+;', fixup, text)

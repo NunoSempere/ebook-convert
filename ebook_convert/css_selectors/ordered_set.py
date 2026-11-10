@@ -1,8 +1,14 @@
-import collections
+#!/usr/bin/env python
+# vim:fileencoding=utf-8
 
 
+from __future__ import annotations
 __license__ = 'GPL v3'
 __copyright__ = '2015, Kovid Goyal <kovid at kovidgoyal.net>'
+
+import collections.abc
+
+from ebook_convert.polyglot.builtins import string_or_bytes
 
 SLICE_ALL = slice(None)
 
@@ -16,7 +22,7 @@ def is_iterable(obj):
     Strings, however, should be considered as atomic values to look up, not
     iterables.
     """
-    return hasattr(obj, '__iter__') and not isinstance(obj, (str, bytes))
+    return hasattr(obj, '__iter__') and not isinstance(obj, string_or_bytes)
 
 
 class OrderedSet(collections.abc.MutableSet):

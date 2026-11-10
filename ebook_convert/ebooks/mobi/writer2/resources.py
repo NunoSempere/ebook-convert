@@ -1,113 +1,155 @@
+#!/usr/bin/env python
+# License: GPLv3 Copyright: 2012, Kovid Goyal <kovid@kovidgoyal.net>
 
+from __future__ import annotations
 import os
 from io import BytesIO
+from typing import TYPE_CHECKING
 
 from PIL import Image, ImageOps
 
-from ebook_convert.ebooks.mobi import MAX_THUMB_DIMEN, MAX_THUMB_SIZE
-from ebook_convert.ebooks.mobi.utils import (rescale_image, mobify_image,
-        write_font_record)
 from ebook_convert.ebooks import generate_masthead
+from ebook_convert.ebooks.mobi import MAX_THUMB_DIMEN, MAX_THUMB_SIZE
+from ebook_convert.ebooks.mobi.utils import mobify_image, rescale_image, write_font_record
 from ebook_convert.ebooks.oeb.base import OEB_RASTER_IMAGES
 from ebook_convert.ptempfile import PersistentTemporaryFile
 from ebook_convert.utils.imghdr import what
 
+if TYPE_CHECKING:
+    import unittest
+    from optparse import Values
 
-__license__ = 'GPL v3'
-__copyright__ = '2012, Kovid Goyal <kovid@kovidgoyal.net>'
-__docformat__ = 'restructuredtext en'
+    from ebook_convert.ebooks.oeb.base import Manifest, OEBBook
 
-# Image formats that can be read but that no MOBI/AZW3 viewer can display, so
+# Image formats calibre can read but that no MOBI/AZW3 viewer can display, so
 # they are converted to PNG before being added to the book
 UNSUPPORTED_IMAGE_TYPES = frozenset({'image/webp', 'image/avif', 'image/jxl'})
 
-PLACEHOLDER_GIF = (b'GIF89a\x01\x00\x01\x00\xf0\x00\x00\x00\x00\x00\xff\xff'
-                   b'\xff!\xf9\x04\x01\x00\x00\x00\x00!\xfe calibre-placeho'
-                   b'lder-gif-for-azw3\x00,\x00\x00\x00\x00\x01\x00\x01\x00'
-                   b'\x00\x02\x02D\x01\x00;')
+PLACEHOLDER_GIF = b'GIF89a\x01\x00\x01\x00\xf0\x00\x00\x00\x00\x00\xff\xff\xff!\xf9\x04\x01\x00\x00\x00\x00!\xfe calibre-placeholder-gif-for-azw3\x00,\x00\x00\x00\x00\x01\x00\x01\x00\x00\x02\x02D\x01\x00;'  # ruff: ignore[line-too-long]
 
 
-def process_jpegs_for_amazon(data):
-    '''
-    Amazon's MOBI renderer cannot render JPEG images without a JFIF (APP0)
-    segment and images with EXIF data are not displayed on the cover screen.
-    Re-encode JPEG images that lack JFIF metadata or carry EXIF data, applying
-    any EXIF orientation first so that the picture stays upright. Other image
-    formats and JPEGs that need no change are returned untouched.
-    '''
-    try:
-        img = Image.open(BytesIO(data))
-    except Exception:
-        return data
-    if img.format != 'JPEG':
-        return data
-    # img.info is empty for JPEGs with neither JFIF nor EXIF (nor other)
-    # metadata segments
-    changed = not img.info
-    # Check for the EXIF segment via img.info, not the tag count, so that
-    # empty EXIF segments (APP1 marker with zero entries) are also detected
-    has_exif = 'exif' in img.info
-    if hasattr(img, 'getexif'):
-        exif = img.getexif()
-        if exif.get(0x0112) in (2, 3, 4, 5, 6, 7, 8):
-            changed = True
-            img = ImageOps.exif_transpose(img)
-    if changed or has_exif:
-        if img.mode not in ('RGB', 'L', 'CMYK'):
-            img = img.convert('RGB')
-        out = BytesIO()
-        # Saving without an exif= argument drops the APP1 segment and Pillow
-        # always writes a JFIF APP0 header
-        img.save(out, 'JPEG', quality=95)
-        data = out.getvalue()
+def process_jpegs_for_amazon(data: bytes) -> bytes:
+    img = Image.open(BytesIO(data))
+    if img.format == 'JPEG':
+        # Amazon's MOBI renderer can't render JPEG images without JFIF metadata
+        # and images with EXIF data don't get displayed on the cover screen
+        changed = not img.info
+        # Check for EXIF segment presence via img.info, not tag count, so that
+        # empty EXIF segments (APP1 marker with zero entries) are also detected.
+        has_exif = 'exif' in img.info
+        if hasattr(img, 'getexif'):
+            exif = img.getexif()
+            if exif.get(0x0112) in (2, 3, 4, 5, 6, 7, 8):
+                changed = True
+                img = ImageOps.exif_transpose(img)
+        if changed or has_exif:
+            out = BytesIO()
+            img.save(out, 'JPEG')
+            data = out.getvalue()
     return data
 
 
-class Resources(object):
+def find_tests() -> unittest.TestSuite:
+    import struct
+    import unittest
 
-    def __init__(self, oeb, opts, is_periodical, add_fonts=False,
-            process_images=True):
+    class TestProcessJpegsForAmazon(unittest.TestCase):
+        def _make_minimal_jpeg(self) -> bytes:
+            from PIL import Image as PILImage
+
+            img = PILImage.new('RGB', (8, 8), color=(255, 0, 0))
+            buf = BytesIO()
+            img.save(buf, 'JPEG')
+            return buf.getvalue()
+
+        def _inject_app1_segment(self, jpeg_data: bytes, app1_payload: bytes) -> bytes:
+            # Insert an APP1 segment right after the SOI marker (FF D8)
+            length = struct.pack('>H', len(app1_payload) + 2)
+            app1_segment = b'\xff\xe1' + length + app1_payload
+            return jpeg_data[:2] + app1_segment + jpeg_data[2:]
+
+        def _make_empty_exif_payload(self) -> bytes:
+            # Minimal TIFF with 0 IFD entries (little-endian byte order)
+            tiff = b'II' + struct.pack('<HI', 42, 8) + struct.pack('<H', 0) + struct.pack('<I', 0)
+            return b'Exif\x00\x00' + tiff
+
+        def _has_exif_segment(self, data: bytes) -> bool:
+            from PIL import Image as PILImage
+
+            img = PILImage.open(BytesIO(data))
+            return 'exif' in img.info
+
+        def test_jpeg_without_exif_is_unchanged(self) -> None:
+            data = self._make_minimal_jpeg()
+            # PIL saves with JFIF by default, not EXIF — should pass through unchanged
+            result = process_jpegs_for_amazon(data)
+            self.assertFalse(self._has_exif_segment(result))
+
+        def test_jpeg_with_populated_exif_is_stripped(self) -> None:
+            from PIL import Image as PILImage
+
+            img = PILImage.new('RGB', (8, 8), color=(0, 255, 0))
+            exif = img.getexif()
+            exif[0x010E] = 'test'  # ImageDescription tag
+            buf = BytesIO()
+            img.save(buf, 'JPEG', exif=exif.tobytes())
+            data = buf.getvalue()
+            self.assertTrue(self._has_exif_segment(data))
+            result = process_jpegs_for_amazon(data)
+            self.assertFalse(self._has_exif_segment(result))
+
+        def test_jpeg_with_empty_exif_segment_is_stripped(self) -> None:
+            # Regression test for https://bugs.launchpad.net/bugs/1943495:
+            # empty EXIF segments (APP1 marker, zero tag entries) must also be removed.
+            base = self._make_minimal_jpeg()
+            data = self._inject_app1_segment(base, self._make_empty_exif_payload())
+            self.assertTrue(self._has_exif_segment(data))
+            result = process_jpegs_for_amazon(data)
+            self.assertFalse(self._has_exif_segment(result))
+
+    return unittest.defaultTestLoader.loadTestsFromTestCase(TestProcessJpegsForAmazon)
+
+
+class Resources:
+    def __init__(self, oeb: OEBBook, opts: Values, is_periodical: bool, add_fonts: bool = False, process_images: bool = True) -> None:
         self.oeb, self.log, self.opts = oeb, oeb.log, opts
         self.is_periodical = is_periodical
         self.process_images = process_images
 
-        self.item_map = {}
-        self.records = []
-        self.mime_map = {}
+        self.item_map: dict[str, int] = {}
+        self.records: list[bytes | None] = []
+        self.mime_map: dict[str, str] = {}
         self.masthead_offset = 0
-        self.used_image_indices = set()
-        self.image_indices = set()
-        self.cover_offset = self.thumbnail_offset = None
+        self.used_image_indices: set[int] = set()
+        self.image_indices: set[int] = set()
+        self.cover_offset: int | None = None
+        self.thumbnail_offset: int | None = None
         self.has_fonts = False
 
         self.add_resources(add_fonts)
 
-    def process_image(self, data):
+    def process_image(self, data: bytes) -> bytes:
         if not self.process_images:
             return process_jpegs_for_amazon(data)
         func = mobify_image if self.opts.mobi_keep_original_images else rescale_image
         try:
             return process_jpegs_for_amazon(func(data))
         except Exception:
-            ext = what(None, data)
-            if ext not in ('png', 'gif'):
+            if 'png' != what(None, data):
                 raise
-            if ext == 'gif':
-                with PersistentTemporaryFile(suffix='.gif') as pt:
-                    pt.write(data)
-                    return mobify_image(data)
-
             with PersistentTemporaryFile(suffix='.png') as pt:
                 pt.write(data)
             try:
                 from ebook_convert.utils.img import optimize_png
+
                 optimize_png(pt.name)
-                data = open(pt.name, 'rb').read()
+                with open(pt.name, 'rb') as f:
+                    data = f.read()
             finally:
                 os.remove(pt.name)
             return func(data)
 
-    def add_resources(self, add_fonts):
+    def add_resources(self, add_fonts: bool) -> None:
         oeb = self.oeb
         oeb.logger.info('Serializing resources...')
         index = 1
@@ -128,8 +170,7 @@ class Resources(object):
             index += 1
 
         cover_href = self.cover_offset = self.thumbnail_offset = None
-        if (oeb.metadata.cover and
-                str(oeb.metadata.cover[0]) in oeb.manifest.ids):
+        if oeb.metadata.cover and str(oeb.metadata.cover[0]) in oeb.manifest.ids:
             cover_id = str(oeb.metadata.cover[0])
             item = oeb.manifest.ids[cover_id]
             cover_href = item.href
@@ -140,9 +181,11 @@ class Resources(object):
             if item.media_type.lower() in UNSUPPORTED_IMAGE_TYPES:
                 self.convert_unsupported_image(item)
             try:
-                data = self.process_image(item.data)
+                idata = item.data
+                assert isinstance(idata, bytes)  # raster images are unparsed bytes, errors are handled below
+                data = self.process_image(idata)
             except Exception:
-                self.log.warning('Bad image file %r', item.href)
+                self.log.warn(f'Bad image file {item.href!r}')
                 continue
             else:
                 if mh_href and item.href == mh_href:
@@ -152,20 +195,16 @@ class Resources(object):
                 self.image_indices.add(len(self.records))
                 self.records.append(data)
                 self.item_map[item.href] = index
-                self.mime_map[item.href] = 'image/%s'%what(None, data)
+                self.mime_map[item.href] = f'image/{what(None, data)}'
                 index += 1
 
                 if cover_href and item.href == cover_href:
                     self.cover_offset = self.item_map[item.href] - 1
                     self.used_image_indices.add(self.cover_offset)
                     try:
-                        # Build the thumbnail from the processed data so that
-                        # it is upright and free of EXIF metadata as well
-                        tdata = rescale_image(data, dimen=MAX_THUMB_DIMEN,
-                            maxsizeb=MAX_THUMB_SIZE)
-                    except Exception as err:
-                        self.log.warning('Failed to generate thumbnail: %s',
-                                         err)
+                        tdata = rescale_image(data, dimen=MAX_THUMB_DIMEN, maxsizeb=MAX_THUMB_SIZE)
+                    except Exception:
+                        self.log.warn('Failed to generate thumbnail')
                     else:
                         self.image_indices.add(len(self.records))
                         self.records.append(tdata)
@@ -177,57 +216,48 @@ class Resources(object):
 
         if add_fonts:
             for item in self.oeb.manifest.values():
-                if item.href and item.href.rpartition('.')[-1].lower() in {
-                        'ttf', 'otf'} and isinstance(item.data, bytes):
+                if item.href and item.href.rpartition('.')[-1].lower() in {'ttf', 'otf'} and isinstance(item.data, bytes):
                     self.records.append(write_font_record(item.data))
                     self.item_map[item.href] = len(self.records)
                     self.has_fonts = True
 
-    def convert_unsupported_image(self, item):
-        '''
-        Convert an image in a format no Kindle can display (WebP, AVIF, JXL)
-        to PNG, in place, updating the manifest item's media type.
-        '''
-        from ebook_convert.utils.img import (image_and_format_from_data,
-                                             image_to_data)
-        try:
-            img, fmt = image_and_format_from_data(item.data)
-        except Exception as err:
-            self.log.warning('Could not decode %s image %s: %s',
-                             item.media_type, item.href, err)
-            return
-        if 'image/%s' % fmt in UNSUPPORTED_IMAGE_TYPES and not img.isNull():
-            self.log.info('Converting %s image %s to PNG', fmt.upper(),
-                          item.href)
+    def convert_unsupported_image(self, item: Manifest.Item) -> None:
+        from ebook_convert.utils.img import image_and_format_from_data, image_to_data
+
+        idata = item.data
+        assert isinstance(idata, bytes)  # only called for raster images, which are unparsed bytes
+        img, fmt = image_and_format_from_data(idata)
+        if f'image/{fmt}' in UNSUPPORTED_IMAGE_TYPES and not img.isNull():
+            self.log.info(f'Converting {fmt.upper()} image {item.href} to PNG')
             item.data = image_to_data(img, fmt='PNG')
             item.media_type = 'image/png'
 
-    def add_extra_images(self):
-        '''
+    def add_extra_images(self) -> None:
+        """
         Add any images that were created after the call to add_resources()
-        '''
+        """
         for item in self.oeb.manifest.values():
-            if (item.media_type not in OEB_RASTER_IMAGES or item.href in self.item_map):
+            if item.media_type not in OEB_RASTER_IMAGES or item.href in self.item_map:
                 continue
-            if item.media_type.lower() in UNSUPPORTED_IMAGE_TYPES:
-                self.convert_unsupported_image(item)
             try:
-                data = self.process_image(item.data)
+                idata = item.data
+                assert isinstance(idata, bytes)  # raster images are unparsed bytes, errors are handled below
+                data = self.process_image(idata)
             except Exception:
-                self.log.warning('Bad image file %r', item.href)
+                self.log.warn(f'Bad image file {item.href!r}')
             else:
                 self.records.append(data)
                 self.item_map[item.href] = len(self.records)
             finally:
                 item.unload_data_from_memory()
 
-    def serialize(self, records, used_images):
-        used_image_indices = self.used_image_indices | {
-                v-1 for k, v in self.item_map.items() if k in used_images}
-        for i in self.image_indices-used_image_indices:
+    def serialize(self, records: list[bytes | None], used_images: set[str]) -> None:
+        used_image_indices = self.used_image_indices | {v - 1 for k, v in self.item_map.items() if k in used_images}
+        for i in self.image_indices - used_image_indices:
             self.records[i] = PLACEHOLDER_GIF
         records.extend(self.records)
 
-    def __bool__(self):
+    def __bool__(self) -> bool:
         return bool(self.records)
+
     __nonzero__ = __bool__

@@ -1,64 +1,76 @@
-import importlib.resources
+# License: GPLv3 Copyright: 2010, Fabian Grassl <fg@jusmeum.de>
+
+from __future__ import annotations
 import os
 import re
 import shutil
+from os.path import abspath, basename, dirname, exists
+from os.path import relpath as _relpath
+from typing import TYPE_CHECKING
 
-from lxml import etree
-
-from ebook_convert.customize.conversion import OutputFormatPlugin, OptionRecommendation
-from ebook_convert.ebooks.oeb.base import element
-from ebook_convert import polyglot
+from ebook_convert import CurrentDir
+from ebook_convert.customize.conversion import InputFormatPlugin, OptionRecommendation, OutputFormatPlugin
 from ebook_convert.ptempfile import PersistentTemporaryDirectory
-from ebook_convert.utils.cleantext import clean_xml_chars
-from ebook_convert.utils import directory
+from ebook_convert.utils.localization import _
+from ebook_convert.utils.resources import get_path as P
+
+if TYPE_CHECKING:
+    from optparse import Values
+
+    from lxml.etree import _Element
+
+    from ebook_convert.ebooks.oeb.base import TOC, OEBBook
+    from ebook_convert.utils.logging import Log
 
 
-def relpath(*args):
-    return os.path.relpath(*args).replace(os.sep, '/')
+def relpath(*args: str) -> str:
+    return _relpath(*args).replace(os.sep, '/')
 
 
 class HTMLOutput(OutputFormatPlugin):
-
     name = 'HTML Output'
     author = 'Fabian Grassl'
     file_type = 'zip'
     commit_name = 'html_output'
 
     options = {
-        OptionRecommendation(name='template_css',
-            help='CSS file used for the output instead of the default file'),
-
-        OptionRecommendation(name='template_html_index',
-            help='Template used for generation of the HTML index file instead of the default file'),
-
-        OptionRecommendation(name='template_html',
-            help='Template used for the generation of the HTML contents of the book instead of the default file'),
-
-        OptionRecommendation(name='extract_to',
-            help='Extract the contents of the generated ZIP file to the '
-                'specified directory. WARNING: The contents of the directory '
-                'will be deleted.'
+        OptionRecommendation(name='template_css', help=_('CSS file used for the output instead of the default CSS.')),
+        OptionRecommendation(
+            name='template_html_index',
+            help=_('Template used for generation of the HTML index file instead of the default template. In Mustache format.'),
+        ),
+        OptionRecommendation(
+            name='template_html',
+            help=_('Template used for the generation of the HTML contents of the book instead of the default template. In Mustache format.'),
+        ),
+        OptionRecommendation(
+            name='extract_to',
+            help=_('Extract the contents of the generated ZIP file to the specified folder. WARNING: The contents of the folder will be deleted.'),
         ),
     }
 
     recommendations = {('pretty_print', True, OptionRecommendation.HIGH)}
 
-    def generate_toc(self, oeb_book, ref_url, output_dir):
-        '''
+    def generate_toc(self, oeb_book: OEBBook, ref_url: str, output_dir: str) -> _Element:
+        """
         Generate table of contents
-        '''
+        """
+        from lxml import etree
 
-        with directory.CurrentDir(output_dir):
-            def build_node(current_node, parent=None):
+        from ebook_convert.ebooks.oeb.base import element
+        from ebook_convert.utils.cleantext import clean_xml_chars
+        from ebook_convert.polyglot.urllib import unquote
+
+        with CurrentDir(output_dir):
+
+            def build_node(current_node: TOC, parent: _Element | None = None) -> _Element:
                 if parent is None:
                     parent = etree.Element('ul')
                 elif len(current_node.nodes):
                     parent = element(parent, ('ul'))
                 for node in current_node.nodes:
                     point = element(parent, 'li')
-                    href = relpath(os.path.abspath(polyglot
-                                                   .unquote(node.href)),
-                                   os.path.dirname(ref_url))
+                    href = relpath(abspath(unquote(node.href)), dirname(ref_url))
                     if isinstance(href, bytes):
                         href = href.decode('utf-8')
                     link = element(point, 'a', href=clean_xml_chars(href))
@@ -67,92 +79,113 @@ class HTMLOutput(OutputFormatPlugin):
                         title = title.decode('utf-8')
                     if title:
                         title = re.sub(r'\s+', ' ', title)
-                    link.text = clean_xml_chars(title)
+                    link.text = clean_xml_chars(title)  # ty: ignore[invalid-argument-type] non-root TOC nodes always have a title
                     build_node(node, point)
                 return parent
+
             wrap = etree.Element('div')
             wrap.append(build_node(oeb_book.toc))
             return wrap
 
-    def generate_html_toc(self, oeb_book, ref_url, output_dir):
+    def generate_html_toc(self, oeb_book: OEBBook, ref_url: str, output_dir: str) -> str:
         from lxml import etree
 
         root = self.generate_toc(oeb_book, ref_url, output_dir)
-        return etree.tostring(root, pretty_print=True, encoding='unicode',
-                xml_declaration=False)
+        # xml_declaration is always off for unicode output, it is not passed as the lxml stubs do not allow it
+        return etree.tostring(root, pretty_print=True, encoding='unicode')
 
-    def convert(self, oeb_book, output_path, input_plugin, opts, log):
+    def convert(self, oeb_book: OEBBook, output: str, input_plugin: InputFormatPlugin, opts: Values, log: Log) -> None:
+        output_path = output
+        import pystache
         from lxml import etree
-        from ebook_convert.utils import zipfile
-        from templite import Templite
+
         from ebook_convert.ebooks.html.meta import EasyMeta
+        from ebook_convert.ebooks.metadata import authors_to_string
+        from ebook_convert.utils import zipfile
+        from ebook_convert.polyglot.urllib import unquote
 
         # read template files
         if opts.template_html_index is not None:
             with open(opts.template_html_index, 'rb') as f:
                 template_html_index_data = f.read()
         else:
-            with open(importlib.resources.files('ebook_convert') /
-                      'data/html_export_default_index.tmpl') as fobj:
-                template_html_index_data = fobj.read().decode()
+            template_html_index_data = P('templates/html_export_default_index.mustache', data=True)
 
         if opts.template_html is not None:
             with open(opts.template_html, 'rb') as f:
                 template_html_data = f.read()
         else:
-            with open(importlib.resources.files('ebook_convert') /
-                      'data/html_export_default.tmpl') as fobj:
-                template_html_data = fobj.read().decode()
+            template_html_data = P('templates/html_export_default.mustache', data=True)
 
         if opts.template_css is not None:
             with open(opts.template_css, 'rb') as f:
                 template_css_data = f.read()
         else:
-            with open(importlib.resources.files('ebook_convert') /
-                      'data/html_export_default.css') as fobj:
-                template_css_data = fobj.read().decode()
+            template_css_data = P('templates/html_export_default.css', data=True)
 
-        template_html_index_data = template_html_index_data.decode('utf-8')
-        template_html_data = template_html_data.decode('utf-8')
+        template_html_index = pystache.parse(template_html_index_data.decode('utf-8'))
+        template_html = pystache.parse(template_html_data.decode('utf-8'))
         template_css_data = template_css_data.decode('utf-8')
+        has_toc = bool(oeb_book.toc.count())
 
-        self.log  = log
+        self.log = log
         self.opts = opts
         meta = EasyMeta(oeb_book.metadata)
 
         tempdir = os.path.realpath(PersistentTemporaryDirectory())
-        output_file = os.path.join(tempdir,
-                os.path.basename(re.sub(r'\.zip', '', output_path)+'.html'))
-        output_dir = re.sub(r'\.html', '', output_file)+'_files'
+        output_file = os.path.join(tempdir, basename(re.sub(r'\.zip', '', output_path) + '.html'))
+        output_dir = re.sub(r'\.html', '', output_file) + '_files'
 
-        if not os.path.exists(output_dir):
+        if not exists(output_dir):
             os.makedirs(output_dir)
 
-        css_path = output_dir+os.sep+'calibreHtmlOutBasicCss.css'
+        css_path = output_dir + os.sep + 'calibreHtmlOutBasicCss.css'
         with open(css_path, 'wb') as f:
             f.write(template_css_data.encode('utf-8'))
+        meta_dict = {
+            'titles': [{'title': x, 'is_first': i == 0} for i, x in enumerate(meta.titles())],
+            'creators': authors_to_string(tuple(meta.creators())),
+            'items': list(meta),
+        }
+        meta_dict['first_title'] = meta_dict['titles'][0]['title'] if meta_dict['titles'] else ''
+        basic_template_vars = {
+            'meta': meta_dict,
+            'has_toc': has_toc,
+            'table_of_contents': _('Table of contents'),
+            'no_toc': _('No table of contents present'),
+            'begin_to_read': _('begin to read'),
+            'start': _('start'),
+            'prev_page': _('previous page'),
+            'next_page': _('next page'),
+            'has_link': None,
+            'prev_link': None,
+            'next_link': None,
+        }
 
         with open(output_file, 'wb') as f:
-            html_toc = self.generate_html_toc(oeb_book, output_file, output_dir)
-            templite = Templite(template_html_index_data)
             nextLink = oeb_book.spine[0].href
-            nextLink = relpath(output_dir+os.sep+nextLink,
-                               os.path.dirname(output_file))
-            cssLink = relpath(os.path.abspath(css_path), os.path.dirname(output_file))
-            tocUrl = relpath(output_file, os.path.dirname(output_file))
-            t = templite.render(has_toc=bool(oeb_book.toc.count()),
-                    toc=html_toc, meta=meta, nextLink=nextLink,
-                    tocUrl=tocUrl, cssLink=cssLink,
-                    firstContentPageLink=nextLink)
+            nextLink = relpath(output_dir + os.sep + nextLink, dirname(output_file))
+            cssLink = relpath(abspath(css_path), dirname(output_file))
+            tocUrl = relpath(output_file, dirname(output_file))
+            toc_as_html = self.generate_html_toc(oeb_book, output_file, output_dir) if has_toc else ''
+            v = basic_template_vars.copy()
+            v.update({
+                'toc': toc_as_html,
+                'css_link': cssLink,
+                'toc_url': tocUrl,
+                'next_link': nextLink,
+                'first_content_page_link': nextLink,
+            })
+            t = pystache.render(template_html_index, v)
             if isinstance(t, str):
                 t = t.encode('utf-8')
             f.write(t)
 
-        with directory.CurrentDir(output_dir):
+        with CurrentDir(output_dir):
             for item in oeb_book.manifest:
-                path = os.path.abspath(polyglot.unquote(item.href))
-                dir = os.path.dirname(path)
-                if not os.path.exists(dir):
+                path = abspath(unquote(item.href))
+                dir = dirname(path)
+                if not exists(dir):
                     os.makedirs(dir)
                 if item.spine_position is not None:
                     with open(path, 'wb') as f:
@@ -163,15 +196,17 @@ class HTMLOutput(OutputFormatPlugin):
                     item.unload_data_from_memory(memory=path)
 
             for item in oeb_book.spine:
-                path = os.path.abspath(polyglot.unquote(item.href))
-                dir = os.path.dirname(path)
-                root = item.data.getroottree()
+                path = abspath(unquote(item.href))
+                dir = dirname(path)
+                data = item.data
+                assert isinstance(data, etree._Element)
+                root = data.getroottree()
 
                 # get & clean HTML <HEAD>-data
                 head = root.xpath('//h:head', namespaces={'h': 'http://www.w3.org/1999/xhtml'})[0]
                 head_content = etree.tostring(head, pretty_print=True, encoding='unicode')
                 head_content = re.sub(r'\<\/?head.*\>', '', head_content)
-                head_content = re.sub(re.compile(r'\<style.*\/style\>', re.M|re.S), '', head_content)
+                head_content = re.sub(re.compile(r'\<style.*\/style\>', re.M | re.S), '', head_content)
                 head_content = re.sub(r'<(title)([^>]*)/>', r'<\1\2></\1>', head_content)
 
                 # get & clean HTML <BODY>-data
@@ -181,48 +216,55 @@ class HTMLOutput(OutputFormatPlugin):
                 ebook_content = re.sub(r'<(div|a|span)([^>]*)/>', r'<\1\2></\1>', ebook_content)
 
                 # generate link to next page
-                if item.spine_position+1 < len(oeb_book.spine):
-                    nextLink = oeb_book.spine[item.spine_position+1].href
-                    nextLink = relpath(os.path.abspath(nextLink), dir)
+                assert item.spine_position is not None  # set for all items in the spine
+                if item.spine_position + 1 < len(oeb_book.spine):
+                    nextLink = oeb_book.spine[item.spine_position + 1].href
+                    nextLink = relpath(abspath(nextLink), dir)
                 else:
                     nextLink = None
 
                 # generate link to previous page
                 if item.spine_position > 0:
-                    prevLink = oeb_book.spine[item.spine_position-1].href
-                    prevLink = relpath(os.path.abspath(prevLink), dir)
+                    prevLink = oeb_book.spine[item.spine_position - 1].href
+                    prevLink = relpath(abspath(prevLink), dir)
                 else:
                     prevLink = None
 
-                cssLink = relpath(os.path.abspath(css_path), dir)
+                cssLink = relpath(abspath(css_path), dir)
                 tocUrl = relpath(output_file, dir)
                 firstContentPageLink = oeb_book.spine[0].href
 
                 # render template
-                templite = Templite(template_html_data)
-                toc = lambda: self.generate_html_toc(oeb_book, path, output_dir)
-                t = templite.render(ebookContent=ebook_content,
-                        prevLink=prevLink, nextLink=nextLink,
-                        has_toc=bool(oeb_book.toc.count()), toc=toc,
-                        tocUrl=tocUrl, head_content=head_content,
-                        meta=meta, cssLink=cssLink,
-                        firstContentPageLink=firstContentPageLink)
+                def toc() -> None:
+                    return
 
+                toc_as_html = self.generate_html_toc(oeb_book, path, output_dir) if has_toc else ''
+                v = basic_template_vars.copy()
+                v['has_link'] = prevLink or nextLink
+                v['prev_link'] = prevLink
+                v['next_link'] = nextLink
+                v['toc_url'] = tocUrl
+                v['head_content'] = head_content
+                v['ebook_content'] = ebook_content
+                v['css_link'] = cssLink
+                v['toc'] = toc_as_html
+                v['first_content_page_link'] = firstContentPageLink
+                t = pystache.render(template_html, v)
                 # write html to file
                 with open(path, 'wb') as f:
                     f.write(t.encode('utf-8'))
                 item.unload_data_from_memory(memory=path)
 
-        zfile = zipfile.ZipFile(output_path, "w")
-        zfile.add_dir(output_dir, os.path.basename(output_dir))
-        zfile.write(output_file, os.path.basename(output_file), zipfile.ZIP_DEFLATED)
+        zfile = zipfile.ZipFile(output_path, 'w')
+        zfile.add_dir(output_dir, basename(output_dir))
+        zfile.write(output_file, basename(output_file), zipfile.ZIP_DEFLATED)
 
         if opts.extract_to:
             if os.path.exists(opts.extract_to):
                 shutil.rmtree(opts.extract_to)
             os.makedirs(opts.extract_to)
             zfile.extractall(opts.extract_to)
-            self.log.info('Zip file extracted to %s', opts.extract_to)
+            self.log('Zip file extracted to', opts.extract_to)
 
         zfile.close()
 

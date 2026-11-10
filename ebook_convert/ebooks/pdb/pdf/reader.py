@@ -1,38 +1,46 @@
+# License: GPLv3 Copyright: 2010, John Schember <john@nachtimwald.com>
+
 """
 Read content from palmdoc pdb file.
 """
+
+from __future__ import annotations
+from typing import IO, TYPE_CHECKING
+
 from ebook_convert.ebooks.pdb.formatreader import FormatReader
 from ebook_convert.ptempfile import PersistentTemporaryFile
 
+if TYPE_CHECKING:
+    from optparse import Values
 
-__license__ = 'GPL v3'
-__copyright__ = '2010, John Schember <john@nachtimwald.com>'
-__docformat__ = 'restructuredtext en'
+    from ebook_convert.ebooks.oeb.base import OEBBook
+    from ebook_convert.ebooks.pdb.header import PdbHeaderReader
+    from ebook_convert.utils.logging import Log
 
 
 class Reader(FormatReader):
-
-    def __init__(self, header, stream, log, options):
+    def __init__(self, header: PdbHeaderReader, stream: IO[bytes], log: Log, options: Values) -> None:
         self.header = header
         self.stream = stream
         self.log = log
         self.options = options
 
-    def extract_content(self, output_dir):
+    def extract_content(self, output_dir: str) -> str | OEBBook | None:
         self.log.info('Extracting PDF...')
 
         pdf = PersistentTemporaryFile('.pdf')
+        pdf_path = pdf.name
         pdf.close()
-        with open(pdf.name, 'wb') as f:
+        with open(pdf_path, 'wb') as pdf_out:
             for x in range(self.header.section_count()):
-                f.write(self.header.section_data(x))
+                pdf_out.write(self.header.section_data(x))
 
         from ebook_convert.customize.ui import plugin_for_input_format
 
         pdf_plugin = plugin_for_input_format('pdf')
+        assert pdf_plugin is not None
         for opt in pdf_plugin.options:
             if not hasattr(self.options, opt.option.name):
                 setattr(self.options, opt.option.name, opt.recommended_value)
 
-        with open(pdf.name, 'rb') as f:
-            return pdf_plugin.convert(f, self.options, 'pdf', self.log, {})
+        return pdf_plugin.convert(open(pdf_path, 'rb'), self.options, 'pdf', self.log, {})

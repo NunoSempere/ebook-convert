@@ -1,11 +1,9 @@
+.venv/
 __pycache__/
 *.pyc
 build/
 dist/
-sdist/
 *.egg-info/
-venv/
-.venv/
 .pytest_cache/
-*.spec.bak
+out*.epub
 .claude/

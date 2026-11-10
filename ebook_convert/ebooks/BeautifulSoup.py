@@ -1,32 +1,37 @@
+#!/usr/bin/env python
 # License: GPLv3 Copyright: 2019, Kovid Goyal <kovid at kovidgoyal.net>
+
+from __future__ import annotations
 import bs4
-from ebook_convert.utils import html5
-
-from ebook_convert.ebooks import chardet
-from ebook_convert.utils import cleantext
+from bs4 import CData, Comment, Declaration, NavigableString, ProcessingInstruction, SoupStrainer, Tag, __version__  # ruff: ignore[unused-import]
 
 
-def parse_html(markup):
+def parse_html(markup: str | bytes) -> bs4.BeautifulSoup:
+    from ebook_convert import xml_replace_entities
+    from ebook_convert.ebooks.chardet import strip_encoding_declarations, xml_to_unicode
+    from ebook_convert.utils.cleantext import clean_xml_chars
+
     if isinstance(markup, str):
-        markup = chardet.strip_encoding_declarations(markup)
-        markup = chardet.substitute_entites(markup)
+        markup = strip_encoding_declarations(markup)
+        markup = xml_replace_entities(markup)
     else:
-        markup = chardet.xml_to_unicode(markup, strip_encoding_pats=True,
-                                        resolve_entities=True)[0]
-    markup = cleantext.clean_xml_chars(markup)
-    return html5.parse_soup(markup)
+        markup = xml_to_unicode(markup, strip_encoding_pats=True, resolve_entities=True)[0]
+    markup = clean_xml_chars(markup)
+    from ebook_convert.html5_parser.soup import parse
+
+    return parse(markup, return_root=False)
 
 
-def prettify(soup):
+def prettify(soup: Tag) -> str:
     ans = soup.prettify()
     if isinstance(ans, bytes):
         ans = ans.decode('utf-8')
     return ans
 
 
-def html5_parser(markup='', *a, **kw):
+def BeautifulSoup(markup: str | bytes = '', *a: object, **kw: object) -> bs4.BeautifulSoup:
     return parse_html(markup)
 
 
-def beautiful_soup_parser(markup='', *a, **kw):
+def BeautifulStoneSoup(markup: str | bytes = '', *a: object, **kw: object) -> bs4.BeautifulSoup:
     return bs4.BeautifulSoup(markup, 'xml')

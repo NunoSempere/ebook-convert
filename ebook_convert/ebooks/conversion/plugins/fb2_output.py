@@ -1,10 +1,20 @@
-import os
+# License: GPLv3 Copyright: 2009, John Schember <john@nachtimwald.com>
 
-from ebook_convert.customize.conversion import OutputFormatPlugin, OptionRecommendation
+from __future__ import annotations
+from typing import TYPE_CHECKING
+
+from ebook_convert.customize.conversion import InputFormatPlugin, OptionRecommendation, OutputFormatPlugin
+from ebook_convert.utils import StreamOrPath
+from ebook_convert.utils.localization import _
+
+if TYPE_CHECKING:
+    from optparse import Values
+
+    from ebook_convert.ebooks.oeb.base import OEBBook
+    from ebook_convert.utils.logging import Log
 
 
 class FB2Output(OutputFormatPlugin):
-
     name = 'FB2 Output'
     author = 'John Schember'
     file_type = 'fb2'
@@ -136,62 +146,58 @@ class FB2Output(OutputFormatPlugin):
         'home_sex',  # Erotica & sex
         'home',  # Other
     ]
-    ui_data = {'sectionize': {'toc': 'Section per entry in the ToC',
-                              'files': 'Section per file',
-                              'nothing': 'A single section'},
-               'genres': FB2_GENRES}
-
-    options = {
-        OptionRecommendation(name='sectionize',
-            recommended_value='files', level=OptionRecommendation.LOW,
-            choices=list(ui_data['sectionize']),
-            help='Specify how sections are created:\n'
-                 ' * nothing: {nothing}\n'
-                 ' * files: {files}\n'
-                 ' * toc: {toc}\n'
-                 'If ToC based generation fails, adjust the "Structure '
-                 'detection" and/or "Table of Contents" settings (turn on '
-                 '"Force use of auto-generated Table of Contents")'
-                 '.'.format(**ui_data['sectionize'])
-        ),
-        OptionRecommendation(name='fb2_genre',
-            recommended_value='antique', level=OptionRecommendation.LOW,
-            choices=FB2_GENRES,
-            help='Genre for the book. Choices: %s\n\n See: http://www.'
-                 'fictionbook.org/index.php/Eng:FictionBook_2.1_genres for a '
-                 'complete list with descriptions.'  % ', '.join(FB2_GENRES)),
-
+    ui_data = {
+        'sectionize': {
+            'toc': _('Section per entry in the ToC'),
+            'files': _('Section per file'),
+            'nothing': _('A single section'),
+        },
+        'genres': FB2_GENRES,
     }
 
-    def convert(self, oeb_book, output_path, input_plugin, opts, log):
+    options = {
+        OptionRecommendation(
+            name='sectionize',
+            recommended_value='files',
+            level=OptionRecommendation.LOW,
+            choices=list(ui_data['sectionize']),
+            help=_(
+                'Specify how sections are created:\n'
+                ' * nothing: {nothing}\n'
+                ' * files: {files}\n'
+                ' * toc: {toc}\n'
+                'If ToC based generation fails, adjust the "Structure detection" and/or "Table of Contents" settings '
+                '(turn on "Force use of auto-generated Table of Contents").'
+            ).format(**ui_data['sectionize']),
+        ),
+        OptionRecommendation(
+            name='fb2_genre',
+            recommended_value='antique',
+            level=OptionRecommendation.LOW,
+            choices=FB2_GENRES,
+            help=(_('Genre for the book. Choices: %s\n\n See: ') % ', '.join(FB2_GENRES))
+            + 'http://www.fictionbook.org/index.php/Eng:FictionBook_2.1_genres '
+            + _('for a complete list with descriptions.'),
+        ),
+    }
+
+    def convert(self, oeb_book: OEBBook, output: str, input_plugin: InputFormatPlugin, opts: Values, log: Log) -> None:
+        from ebook_convert.ebooks.fb2.fb2ml import FB2MLizer
         from ebook_convert.ebooks.oeb.transforms.jacket import linearize_jacket
         from ebook_convert.ebooks.oeb.transforms.rasterize import SVGRasterizer, Unavailable
-        from ebook_convert.ebooks.fb2.fb2ml import FB2MLizer
 
         try:
             rasterizer = SVGRasterizer()
             rasterizer(oeb_book, opts)
         except Unavailable:
-            log.warning('SVG rasterizer unavailable, SVG will not be '
-                        'converted')
+            log.warn('SVG rasterizer unavailable, SVG will not be converted')
 
         linearize_jacket(oeb_book)
 
         fb2mlizer = FB2MLizer(log)
         fb2_content = fb2mlizer.extract_content(oeb_book, opts)
 
-        close = False
-        if not hasattr(output_path, 'write'):
-            close = True
-            if not os.path.exists(os.path.dirname(output_path)) and os.path.dirname(output_path) != '':
-                os.makedirs(os.path.dirname(output_path))
-            out_stream = open(output_path, 'wb')
-        else:
-            out_stream = output_path
-
-        out_stream.seek(0)
-        out_stream.truncate()
-        out_stream.write(fb2_content.encode('utf-8', 'replace'))
-
-        if close:
-            out_stream.close()
+        with StreamOrPath(output, 'wb', makedirs=True) as out_stream:
+            out_stream.seek(0)
+            out_stream.truncate()
+            out_stream.write(fb2_content.encode('utf-8', 'replace'))

@@ -1,15 +1,27 @@
+# License: GPLv3 Copyright: 2009, John Schember <john@nachtimwald.com>
+
 """
 Transform OEB content into plain text
 """
+
+from __future__ import annotations
 import re
+from typing import TYPE_CHECKING
 
 from lxml import etree
 
-from ebook_convert import constants as const
-from ebook_convert.ebooks.oeb import base
-from ebook_convert.ebooks.oeb import parse_utils
-from ebook_convert.ebooks.oeb.stylizer import Stylizer
+from ebook_convert.utils.localization import _
 
+if TYPE_CHECKING:
+    import unittest
+    from collections.abc import Iterable
+    from optparse import Values
+
+    from lxml.etree import _Element
+
+    from ebook_convert.ebooks.oeb.base import TOC, Manifest, OEBBook
+    from ebook_convert.ebooks.oeb.stylizer import Stylizer
+    from ebook_convert.utils.logging import Log
 
 BLOCK_TAGS = [
     'div',
@@ -43,12 +55,11 @@ SPACE_TAGS = [
 ]
 
 
-class TXTMLizer(object):
-
-    def __init__(self, log):
+class TXTMLizer:
+    def __init__(self, log: Log) -> None:
         self.log = log
 
-    def extract_content(self, oeb_book, opts):
+    def extract_content(self, oeb_book: OEBBook, opts: Values) -> str:
         self.log.info('Converting XHTML to TXT...')
         self.oeb_book = oeb_book
         self.opts = opts
@@ -60,21 +71,27 @@ class TXTMLizer(object):
 
         return self.mlize_spine()
 
-    def mlize_spine(self):
-        output = [u'']
+    def mlize_spine(self) -> str:
+        from ebook_convert.ebooks.oeb.base import XHTML
+        from ebook_convert.ebooks.oeb.stylizer import Stylizer
+        from ebook_convert.utils.xml_parse import safe_xml_fromstring
+
+        output = ['']
         output.append(self.get_toc())
         for item in self.oeb_book.spine:
-            self.log.debug('Converting %s to TXT...', item.href)
-            for x in item.data.iterdescendants(etree.Comment):
+            self.log.debug(f'Converting {item.href} to TXT...')
+            root = item.data
+            assert isinstance(root, etree._Element)  # spine items are parsed (X)HTML documents
+            for x in root.iterdescendants(etree.Comment):
                 if x.text and '--' in x.text:
                     x.text = x.text.replace('--', '__')
-            content = etree.tostring(item.data, encoding='unicode')
+            content = etree.tostring(root, encoding='unicode')
             content = self.remove_newlines(content)
-            content = etree.fromstring(content)
-            stylizer = Stylizer(content, item.href, self.oeb_book, self.opts,
-                                self.opts.output_profile)
-            output += self.dump_text(content.find(base.tag('xhtml', 'body')),
-                                     stylizer, item)
+            content = safe_xml_fromstring(content)
+            stylizer = Stylizer(content, item.href, self.oeb_book, self.opts, self.opts.output_profile)
+            body = content.find(XHTML('body'))
+            assert body is not None  # spine items always have a body, see parse_html()
+            output += self.dump_text(body, stylizer, item)
             output += '\n\n\n\n\n\n'
         output = ''.join(output)
         output = '\n'.join(l.rstrip() for l in output.splitlines())
@@ -82,7 +99,7 @@ class TXTMLizer(object):
 
         return output
 
-    def remove_newlines(self, text):
+    def remove_newlines(self, text: str) -> str:
         self.log.debug('\tRemove newlines for processing...')
         text = text.replace('\r\n', ' ')
         text = text.replace('\n', ' ')
@@ -92,35 +109,35 @@ class TXTMLizer(object):
 
         return text
 
-    def get_toc(self):
+    def get_toc(self) -> str:
         toc = ['']
         if getattr(self.opts, 'inline_toc', None):
             self.log.debug('Generating table of contents...')
-            toc.append('%s\n\n' % 'Table of Contents:')
+            toc.append('{}\n\n'.format(_('Table of Contents:')))
             unihandecoder = None
             if getattr(self.opts, 'asciiize', False):
-                # Calibre ee6e7d8d71: the TOC must be transliterated too
                 from ebook_convert.utils.localization import get_udc
+
                 unihandecoder = get_udc()
             for item in self.toc_titles:
                 if unihandecoder is not None:
                     item = unihandecoder.decode(item)
-                toc.append('* %s\n\n' % item)
+                toc.append(f'* {item}\n\n')
         return ''.join(toc)
 
-    def create_flat_toc(self, nodes):
-        '''
+    def create_flat_toc(self, nodes: Iterable[TOC]) -> None:
+        """
         Turns a hierarchical list of TOC href's into a flat list.
-        '''
+        """
         for item in nodes:
             self.toc_titles.append(item.title)
             self.toc_ids.append(item.href)
             self.create_flat_toc(item.nodes)
 
-    def cleanup_text(self, text):
+    def cleanup_text(self, text: str) -> str:
         self.log.debug('\tClean up text...')
         # Replace bad characters.
-        text = text.replace(u'\xa0', ' ')
+        text = text.replace('\xa0', ' ')
 
         # Replace tabs, vertical tags and form feeds with single space.
         text = text.replace('\t+', ' ')
@@ -128,38 +145,36 @@ class TXTMLizer(object):
         text = text.replace('\f+', ' ')
 
         # Single line paragraph.
-        text = re.sub('(?<=.)\n(?=.)', ' ', text)
+        text = re.sub(r'(?<=.)\n(?=.)', ' ', text)
 
         # Remove multiple spaces.
-        text = re.sub('[ ]{2,}', ' ', text)
+        text = re.sub(r'[ ]{2,}', ' ', text)
 
         # Remove excessive newlines.
-        text = re.sub('\n[ ]+\n', '\n\n', text)
+        text = re.sub(r'\n[ ]+\n', '\n\n', text)
         if self.opts.remove_paragraph_spacing:
-            text = re.sub('\n{2,}', '\n', text)
-            text = re.sub(r'(?msu)^(?P<t>[^\t\n]+?)$', lambda mo: u'%s\n\n' %
-                          mo.group('t'), text)
-            text = re.sub(r'(?msu)(?P<b>[^\n])\n+(?P<t>[^\t\n]+?)(?=\n)',
-                          lambda mo: '%s\n\n\n\n\n\n%s' % (mo.group('b'),
-                                                           mo.group('t')),
-                          text)
+            text = re.sub(r'\n{2,}', '\n', text)
+            text = re.sub(r'(?msu)^(?P<t>[^\t\n]+?)$', lambda mo: '{}\n\n'.format(mo.group('t')), text)
+            text = re.sub(
+                r'(?msu)(?P<b>[^\n])\n+(?P<t>[^\t\n]+?)(?=\n)',
+                lambda mo: '{}\n\n\n\n\n\n{}'.format(mo.group('b'), mo.group('t')),
+                text,
+            )
         else:
-            text = re.sub('\n{7,}', '\n\n\n\n\n\n', text)
+            text = re.sub(r'\n{7,}', '\n\n\n\n\n\n', text)
 
         # Replace spaces at the beginning and end of lines
         # We don't replace tabs because those are only added
         # when remove paragraph spacing is enabled.
-        text = re.sub('(?imu)^[ ]+', '', text)
-        text = re.sub('(?imu)[ ]+$', '', text)
+        text = re.sub(r'(?imu)^[ ]+', '', text)
+        text = re.sub(r'(?imu)[ ]+$', '', text)
 
         # Remove empty space and newlines at the beginning of the document.
         text = re.sub(r'(?u)^[ \n]+', '', text)
 
         if self.opts.max_line_length:
-            # Calibre 9b46b4ab76: the option may arrive as a string
             max_length = int(self.opts.max_line_length)
-            if (max_length < 25 and not
-                    self.opts.force_max_line_length):
+            if max_length < 25 and not self.opts.force_max_line_length:
                 max_length = 25
             short_lines = []
             lines = text.splitlines()
@@ -169,38 +184,37 @@ class TXTMLizer(object):
                     if space != -1:
                         # Space was found.
                         short_lines.append(line[:space])
-                        line = line[space + 1:]
+                        line = line[space + 1 :]
+                    # Space was not found.
+                    elif self.opts.force_max_line_length:
+                        # Force breaking at max_lenght.
+                        short_lines.append(line[:max_length])
+                        line = line[max_length:]
                     else:
-                        # Space was not found.
-                        if self.opts.force_max_line_length:
-                            # Force breaking at max_lenght.
-                            short_lines.append(line[:max_length])
-                            line = line[max_length:]
+                        # Look for the first space after max_length.
+                        space = line.find(' ', max_length, len(line))
+                        if space != -1:
+                            # Space was found.
+                            short_lines.append(line[:space])
+                            line = line[space + 1 :]
                         else:
-                            # Look for the first space after max_length.
-                            space = line.find(' ', max_length, len(line))
-                            if space != -1:
-                                # Space was found.
-                                short_lines.append(line[:space])
-                                line = line[space + 1:]
-                            else:
-                                # No space was found cannot break line.
-                                short_lines.append(line)
-                                line = ''
+                            # No space was found cannot break line.
+                            short_lines.append(line)
+                            line = ''
                 # Add the text that was less than max_lengh to the list
                 short_lines.append(line)
             text = '\n'.join(short_lines)
 
         return text
 
-    def is_block(self, elem, stylizer):
-        if (not isinstance(elem.tag, str) or
-                parse_utils.namespace(elem.tag) != const.XHTML_NS):
-            return False
-        return (parse_utils.barename(elem.tag) in BLOCK_TAGS or
-                stylizer.style(elem)['display'] in BLOCK_STYLES)
+    def is_block(self, elem: _Element, stylizer: Stylizer) -> bool:
+        from ebook_convert.ebooks.oeb.base import XHTML_NS, barename, namespace
 
-    def needs_block_separator(self, text):
+        if not isinstance(elem.tag, str) or namespace(elem.tag) != XHTML_NS:
+            return False
+        return barename(elem.tag) in BLOCK_TAGS or stylizer.style(elem)['display'] in BLOCK_STYLES
+
+    def needs_block_separator(self, text: list[str]) -> bool:
         # True if the text output so far ends with non-whitespace content
         # that is not already terminated by a newline
         for chunk in reversed(text):
@@ -209,40 +223,36 @@ class TXTMLizer(object):
                 return not stripped.endswith('\n')
         return False
 
-    def dump_text(self, elem, stylizer, page):
-        '''
+    def dump_text(self, elem: _Element, stylizer: Stylizer, page: Manifest.Item) -> list[str]:
+        """
         @elem: The element in the etree that we are working on.
         @stylizer: The style information attached to the element.
         @page: OEB page used to determine absolute urls.
-        '''
+        """
+        from ebook_convert.ebooks.oeb.base import XHTML_NS, barename, namespace
 
-        if not isinstance(elem.tag, (str, bytes)) \
-           or parse_utils.namespace(elem.tag) != const.XHTML_NS:
+        if not isinstance(elem.tag, str) or namespace(elem.tag) != XHTML_NS:
             p = elem.getparent()
-            if (p is not None and isinstance(p.tag, (str, bytes)) and
-                    parse_utils.namespace(p.tag) == const.XHTML_NS and
-                    elem.tail):
+            if p is not None and isinstance(p.tag, str) and namespace(p.tag) == XHTML_NS and elem.tail:
                 return [elem.tail]
             return ['']
 
         text = ['']
         style = stylizer.style(elem)
 
-        if style['display'] in ('none', 'oeb-page-head', 'oeb-page-foot') \
-           or style['visibility'] == 'hidden':
+        if style['display'] in ('none', 'oeb-page-head', 'oeb-page-foot') or style['visibility'] == 'hidden':
             if hasattr(elem, 'tail') and elem.tail:
                 return [elem.tail]
             return ['']
 
-        tag = parse_utils.barename(elem.tag)
+        tag = barename(elem.tag)
         tag_id = elem.attrib.get('id', None)
         in_block = False
         in_heading = False
 
         # Are we in a heading?
         # This can either be a heading tag or a TOC item.
-        if tag in HEADING_TAGS or '%s#%s' % (page.href,
-                                             tag_id) in self.toc_ids:
+        if tag in HEADING_TAGS or f'{page.href}#{tag_id}' in self.toc_ids:
             in_heading = True
             if not self.last_was_heading:
                 text.append('\n\n\n\n\n\n')
@@ -261,16 +271,14 @@ class TXTMLizer(object):
             text.append('\n\n* * *\n\n')
         # Soft scene breaks.
         try:
-            ems = int(round((float(style.marginTop) / style.fontSize) - 1))
+            ems = round((float(style.marginTop) / style.fontSize) - 1)
             if ems >= 1:
                 text.append('\n' * ems)
         except Exception:
             pass
 
-        if getattr(self.opts, 'use_alt_text_for_images', False) and tag == 'img':
-            alt = elem.get('alt')
-            if alt:
-                text.append('[Image: {}]'.format(alt))
+        if self.opts.use_alt_text_for_images and tag == 'img' and (alt := elem.get('alt')):
+            text.append(_('[Image: {}]').format(alt))
         # Process tags that contain text.
         if hasattr(elem, 'text') and elem.text:
             text.append(elem.text)
@@ -278,9 +286,8 @@ class TXTMLizer(object):
         # Recurse down into tags within the tag we are in.
         for item in elem:
             if self.is_block(item, stylizer) and self.needs_block_separator(text):
-                # Calibre 7dbcbab081: a block nested after inline content,
-                # for example <li>foo<ul><li>bar</li></ul></li>, must start
-                # on a new line
+                # A block nested after inline content, for example:
+                # <li>foo<ul><li>bar</li></ul></li> must start on a new line
                 text.append('\n\n')
             text += self.dump_text(item, stylizer, page)
 
@@ -296,3 +303,31 @@ class TXTMLizer(object):
             text.append(elem.tail)
 
         return text
+
+
+def find_tests() -> unittest.TestSuite:
+    import unittest
+    from pathlib import Path
+    from tempfile import TemporaryDirectory
+
+    from ebook_convert.ebooks.conversion.plumber import Plumber
+    from ebook_convert.utils.logging import DevNull
+
+    def convert(html: str, *recommendations: tuple[str, object, int]) -> str:
+        with TemporaryDirectory() as tdir:
+            src, dest = Path(tdir) / 'input.html', Path(tdir) / 'output.txt'
+            src.write_text(html, encoding='utf-8')
+            plumber = Plumber(str(src), str(dest), DevNull())
+            plumber.merge_ui_recommendations(list(recommendations))
+            plumber.run()
+            return dest.read_text(encoding='utf-8')
+
+    class TXTOutputTest(unittest.TestCase):
+        def test_txt_nested_block_after_text(self) -> None:
+            html = '<html><body><ul><li>foo<ul><li>bar</li></ul></li><li>baz</li></ul><div>x<span>y</span><div>z</div></div></body></html>'
+            lines = [l for l in convert(html).splitlines() if l.strip()]
+            self.assertEqual(lines, ['foo', 'bar', 'baz', 'xy', 'z'])
+            lines = [l.strip() for l in convert(html, ('remove_paragraph_spacing', True, 3)).splitlines() if l.strip()]
+            self.assertEqual(lines, ['foo', 'bar', 'baz', 'xy', 'z'])
+
+    return unittest.defaultTestLoader.loadTestsFromTestCase(TXTOutputTest)

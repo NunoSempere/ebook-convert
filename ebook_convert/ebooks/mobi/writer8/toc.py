@@ -1,16 +1,23 @@
 #!/usr/bin/env python
+# License: GPLv3 Copyright: 2012, Kovid Goyal <kovid@kovidgoyal.net>
 
+from __future__ import annotations
+from typing import TYPE_CHECKING
 
-__license__   = 'GPL v3'
-__copyright__ = '2012, Kovid Goyal <kovid@kovidgoyal.net>'
-__docformat__ = 'restructuredtext en'
+from lxml import etree
 
 from ebook_convert.ebooks.oeb.base import XHTML, XHTML_MIME, XHTML_NS, XPath, css_text, urlnormalize
+from ebook_convert.utils.localization import __
 from ebook_convert.utils.xml_parse import safe_xml_fromstring
 
-_ = lambda x: x
+if TYPE_CHECKING:
+    from optparse import Values
 
-DEFAULT_TITLE = _('Table of Contents')
+    from lxml.etree import _Element
+
+    from ebook_convert.ebooks.oeb.base import TOC, Manifest, OEBBook
+
+DEFAULT_TITLE = __('Table of Contents')
 
 TEMPLATE = '''
 <html xmlns="{xhtmlns}">
@@ -33,19 +40,19 @@ TEMPLATE = '''
 '''
 
 
-def find_previous_calibre_inline_toc(oeb):
+def find_previous_calibre_inline_toc(oeb: OEBBook) -> Manifest.Item | None:
     if 'toc' in oeb.guide:
         href = urlnormalize(oeb.guide['toc'].href.partition('#')[0])
         if href in oeb.manifest.hrefs:
             item = oeb.manifest.hrefs[href]
-            if (hasattr(item.data, 'xpath') and XPath('//h:body[@id="calibre_generated_inline_toc"]')(item.data)):
+            root = item.data
+            if isinstance(root, etree._Element) and XPath('//h:body[@id="calibre_generated_inline_toc"]')(root):  # only parsed XML has xpath()
                 return item
 
 
 class TOCAdder:
-
-    def __init__(self, oeb, opts, replace_previous_inline_toc=True, ignore_existing_toc=False):
-        self.oeb, self.opts = oeb, opts
+    def __init__(self, oeb: OEBBook, opts: Values, replace_previous_inline_toc: bool = True, ignore_existing_toc: bool = False) -> None:
+        self.oeb, self.opts, self.log = oeb, opts, oeb.log
         self.title = opts.toc_title or DEFAULT_TITLE
         self.at_start = opts.mobi_toc_at_start
         self.generated_item = None
@@ -64,8 +71,8 @@ class TOCAdder:
             href = urlnormalize(oeb.guide['toc'].href.partition('#')[0])
             if href in oeb.manifest.hrefs:
                 item = oeb.manifest.hrefs[href]
-                if (hasattr(item.data, 'xpath') and
-                    XPath('//h:a[@href]')(item.data)):
+                root = item.data
+                if isinstance(root, etree._Element) and XPath('//h:a[@href]')(root):  # only parsed XML has xpath()
                     if oeb.spine.index(item) < 0:
                         oeb.spine.add(item, linear=False)
                     return
@@ -74,22 +81,19 @@ class TOCAdder:
             else:
                 oeb.guide.remove('toc')
 
-        if (not self.has_toc or 'toc' in oeb.guide or opts.no_inline_toc or
-            getattr(opts, 'mobi_passthrough', False)):
+        if not self.has_toc or 'toc' in oeb.guide or opts.no_inline_toc or getattr(opts, 'mobi_passthrough', False):
             return
 
-
+        self.log('\tGenerating in-line ToC')
 
         embed_css = ''
         s = getattr(oeb, 'store_embed_font_rules', None)
         if getattr(s, 'body_font_family', None):
-            css = [css_text(x) for x in s.rules] + [
-                    f'body {{ font-family: {s.body_font_family} }}']
+            assert s is not None
+            css = [css_text(x) for x in s.rules] + [f'body {{ font-family: {s.body_font_family} }}']
             embed_css = '\n\n'.join(css)
 
-        root = safe_xml_fromstring(TEMPLATE.format(xhtmlns=XHTML_NS,
-            title=self.title, embed_css=embed_css,
-            extra_css=(opts.extra_css or '')))
+        root = safe_xml_fromstring(TEMPLATE.format(xhtmlns=XHTML_NS, title=self.title, embed_css=embed_css, extra_css=(opts.extra_css or '')))
         parent = XPath('//h:ul')(root)[0]
         parent.text = '\n\t'
         for child in self.oeb.toc:
@@ -102,8 +106,7 @@ class TOCAdder:
             tocitem.data = root
         else:
             id, href = oeb.manifest.generate('contents', 'contents.xhtml')
-            tocitem = self.generated_item = oeb.manifest.add(id, href, XHTML_MIME,
-                    data=root)
+            tocitem = self.generated_item = oeb.manifest.add(id, href, XHTML_MIME, data=root)
         if self.at_start:
             oeb.spine.insert(0, tocitem, linear=True)
         else:
@@ -111,26 +114,26 @@ class TOCAdder:
 
         oeb.guide.add('toc', 'Table of Contents', href)
 
-    def process_toc_node(self, toc, parent, level=0):
+    def process_toc_node(self, toc: TOC, parent: _Element, level: int = 0) -> None:
         li = parent.makeelement(XHTML('li'))
-        li.tail = '\n'+ ('\t'*level)
+        li.tail = '\n' + ('\t' * level)
         parent.append(li)
         href = toc.href
         if self.tocitem is not None and href:
-            href = self.tocitem.relhref(toc.href)
+            href = self.tocitem.relhref(href)
         a = parent.makeelement(XHTML('a'), href=href or '#')
         a.text = toc.title
         li.append(a)
         if toc.count() > 0:
             parent = li.makeelement(XHTML('ul'))
             li.append(parent)
-            a.tail = '\n' + ('\t'*level)
-            parent.text = '\n'+('\t'*(level+1))
-            parent.tail = '\n' + ('\t'*level)
+            a.tail = '\n' + ('\t' * level)
+            parent.text = '\n' + ('\t' * (level + 1))
+            parent.tail = '\n' + ('\t' * level)
             for child in toc:
-                self.process_toc_node(child, parent, level+1)
+                self.process_toc_node(child, parent, level + 1)
 
-    def remove_generated_toc(self):
+    def remove_generated_toc(self) -> None:
         if self.generated_item is not None:
             self.oeb.manifest.remove(self.generated_item)
             self.generated_item = None

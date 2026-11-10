@@ -1,30 +1,33 @@
-from struct import unpack_from
+#!/usr/bin/env python
+# License: GPLv3 Copyright: 2012, Kovid Goyal <kovid at kovidgoyal.net>
+
+from __future__ import annotations
 from functools import partial
+from struct import unpack_from
+from typing import TYPE_CHECKING
 
-from ebook_convert.utils.fonts.sfnt import UnknownTable, FixedProperty
+from ebook_convert.utils.fonts.sfnt import FixedProperty, UnknownTable
+from ebook_convert.utils.fonts.sfnt.common import ExtensionSubstitution, FeatureListTable, LookupTable, ScriptListTable, SimpleListTable, UnknownLookupSubTable
 from ebook_convert.utils.fonts.sfnt.errors import UnsupportedFont
-from ebook_convert.utils.fonts.sfnt.common import (ScriptListTable, FeatureListTable,
-        SimpleListTable, LookupTable, ExtensionSubstitution,
-        UnknownLookupSubTable)
 
+if TYPE_CHECKING:
+    from collections.abc import Iterable
+    from collections.abc import Set as AbstractSet
 
-__license__ = 'GPL v3'
-__copyright__ = '2012, Kovid Goyal <kovid at kovidgoyal.net>'
-__docformat__ = 'restructuredtext en'
+    from ebook_convert.utils.fonts.sfnt.common import Unpackable
 
 
 class SingleSubstitution(UnknownLookupSubTable):
-
     formats = {1, 2}
 
-    def initialize(self, data):
+    def initialize(self, data: Unpackable) -> None:
         if self.format == 1:
             self.delta = data.unpack('h')
         else:
             count = data.unpack('H')
-            self.substitutes = data.unpack('%dH'%count, single_special=False)
+            self.substitutes = data.unpack(f'{count}H', single_special=False)
 
-    def all_substitutions(self, glyph_ids):
+    def all_substitutions(self, glyph_ids: AbstractSet[int]) -> set[int]:
         gid_index_map = self.coverage.coverage_indices(glyph_ids)
         if self.format == 1:
             return {gid + self.delta for gid in gid_index_map}
@@ -32,13 +35,12 @@ class SingleSubstitution(UnknownLookupSubTable):
 
 
 class MultipleSubstitution(UnknownLookupSubTable):
-
     formats = {1}
 
-    def initialize(self, data):
+    def initialize(self, data: Unpackable) -> None:
         self.coverage_to_subs_map = self.read_sets(data, set_is_index=True)
 
-    def all_substitutions(self, glyph_ids):
+    def all_substitutions(self, glyph_ids: AbstractSet[int]) -> set[int]:
         gid_index_map = self.coverage.coverage_indices(glyph_ids)
         ans = set()
         for index in gid_index_map.values():
@@ -52,18 +54,17 @@ class AlternateSubstitution(MultipleSubstitution):
 
 
 class LigatureSubstitution(UnknownLookupSubTable):
-
     formats = {1}
 
-    def initialize(self, data):
+    def initialize(self, data: Unpackable) -> None:
         self.coverage_to_lig_map = self.read_sets(data, self.read_ligature)
 
-    def read_ligature(self, data):
+    def read_ligature(self, data: Unpackable) -> tuple[int, tuple[int, ...]]:
         lig_glyph, count = data.unpack('HH')
-        components = data.unpack('%dH'%(count-1), single_special=False)
-        return (lig_glyph, components)
+        components = data.unpack(f'{count - 1}H', single_special=False)
+        return lig_glyph, components
 
-    def all_substitutions(self, glyph_ids):
+    def all_substitutions(self, glyph_ids: AbstractSet[int]) -> set[int]:
         gid_index_map = self.coverage.coverage_indices(glyph_ids)
         ans = set()
         for start_glyph_id, index in gid_index_map.items():
@@ -75,108 +76,94 @@ class LigatureSubstitution(UnknownLookupSubTable):
 
 
 class ContexttualSubstitution(UnknownLookupSubTable):
-
     formats = {1, 2, 3}
 
     @property
-    def has_initial_coverage(self):
+    def has_initial_coverage(self) -> bool:
         return self.format != 3
 
-    def initialize(self, data):
+    def initialize(self, data: Unpackable) -> None:
         pass  # TODO
 
-    def all_substitutions(self, glyph_ids):
+    def all_substitutions(self, glyph_ids: AbstractSet[int]) -> set[int]:
         # This table only defined substitution in terms of other tables
         return set()
 
 
 class ChainingContextualSubstitution(UnknownLookupSubTable):
-
     formats = {1, 2, 3}
 
     @property
-    def has_initial_coverage(self):
+    def has_initial_coverage(self) -> bool:
         return self.format != 3
 
-    def initialize(self, data):
+    def initialize(self, data: Unpackable) -> None:
         pass  # TODO
 
-    def all_substitutions(self, glyph_ids):
+    def all_substitutions(self, glyph_ids: AbstractSet[int]) -> set[int]:
         # This table only defined substitution in terms of other tables
         return set()
 
 
 class ReverseChainSingleSubstitution(UnknownLookupSubTable):
-
     formats = {1}
 
-    def initialize(self, data):
+    def initialize(self, data: Unpackable) -> None:
         backtrack_count = data.unpack('H')
-        backtrack_offsets = data.unpack('%dH'%backtrack_count,
-                single_special=False)
+        backtrack_offsets = data.unpack(f'{backtrack_count}H', single_special=False)
         lookahead_count = data.unpack('H')
-        lookahead_offsets = data.unpack('%dH'%lookahead_count,
-                single_special=False)
+        lookahead_offsets = data.unpack(f'{lookahead_count}H', single_special=False)
         backtrack_offsets = [data.start_pos + x for x in backtrack_offsets]
         lookahead_offsets = [data.start_pos + x for x in lookahead_offsets]
-        backtrack_offsets, lookahead_offsets  # TODO: Use these
+        backtrack_offsets, lookahead_offsets  # ruff: ignore[useless-expression] # TODO: Use these
         count = data.unpack('H')
-        self.substitutes = data.unpack('%dH'%count)
+        self.substitutes = data.unpack(f'{count}H')
 
-    def all_substitutions(self, glyph_ids):
+    def all_substitutions(self, glyph_ids: AbstractSet[int]) -> set[int]:
         gid_index_map = self.coverage.coverage_indices(glyph_ids)
         return {self.substitutes[i] for i in gid_index_map.values()}
 
 
 subtable_map = {
-        1: SingleSubstitution,
-        2: MultipleSubstitution,
-        3: AlternateSubstitution,
-        4: LigatureSubstitution,
-        5: ContexttualSubstitution,
-        6: ChainingContextualSubstitution,
-        8: ReverseChainSingleSubstitution,
+    1: SingleSubstitution,
+    2: MultipleSubstitution,
+    3: AlternateSubstitution,
+    4: LigatureSubstitution,
+    5: ContexttualSubstitution,
+    6: ChainingContextualSubstitution,
+    8: ReverseChainSingleSubstitution,
 }
 
 
 class GSUBLookupTable(LookupTable):
-
-    def set_child_class(self):
+    def set_child_class(self) -> None:
         if self.lookup_type == 7:
-            self.child_class = partial(ExtensionSubstitution,
-                    subtable_map=subtable_map)
+            self.child_class = partial(ExtensionSubstitution, subtable_map=subtable_map)
         else:
             self.child_class = subtable_map[self.lookup_type]
 
 
 class LookupListTable(SimpleListTable):
-
     child_class = GSUBLookupTable
 
 
 class GSUBTable(UnknownTable):
-
     version = FixedProperty('_version')
 
-    def decompile(self):
-        (self._version, self.scriptlist_offset, self.featurelist_offset,
-                self.lookuplist_offset) = unpack_from(b'>L3H', self.raw)
+    def decompile(self) -> None:
+        (self._version, self.scriptlist_offset, self.featurelist_offset, self.lookuplist_offset) = unpack_from(b'>L3H', self.raw)
         if self._version != 0x10000:
-            raise UnsupportedFont('The GSUB table has unknown version: 0x%x'%
-                    self._version)
+            raise UnsupportedFont(f'The GSUB table has unknown version: 0x{self._version:x}')
 
-        self.script_list_table = ScriptListTable(self.raw,
-                self.scriptlist_offset)
+        self.script_list_table = ScriptListTable(self.raw, self.scriptlist_offset)
         # self.script_list_table.dump()
 
-        self.feature_list_table = FeatureListTable(self.raw,
-                self.featurelist_offset)
+        self.feature_list_table = FeatureListTable(self.raw, self.featurelist_offset)
         # self.feature_list_table.dump()
 
-        self.lookup_list_table = LookupListTable(self.raw,
-                self.lookuplist_offset)
+        self.lookup_list_table = LookupListTable(self.raw, self.lookuplist_offset)
 
-    def all_substitutions(self, glyph_ids):
+    def all_substitutions(self, glyph_ids: Iterable[int]) -> set[int]:
         glyph_ids = frozenset(glyph_ids)
         ans = set(glyph_ids)
         for lookup_table in self.lookup_list_table:

@@ -1,0 +1,156 @@
+from __future__ import annotations
+import os
+import sys
+from typing import Literal
+
+from . import open_for_read
+
+type ConfigDict = dict[str, str | int | None]
+
+
+class Configure:
+    def __init__(
+        self,
+        configuration_file: str | None,
+        bug_handler: type[Exception],
+        debug_dir: str | None = None,
+        show_config_file: int | None = None,
+    ) -> None:
+        """
+        Requires:
+            file --file to be read
+            output --file to output to
+        Returns:
+            Nothing. Outputs a file
+        Logic:
+        """
+        self.__configuration_file = configuration_file
+        self.__debug_dir = debug_dir
+        self.__bug_handler = bug_handler
+        self.__show_config_file = show_config_file
+
+    def get_configuration(self, type: str) -> ConfigDict:
+        self.__configuration_file = self.__get_file_name()
+        return_dict: ConfigDict = {}
+        return_dict['config-location'] = self.__configuration_file
+        if self.__show_config_file and self.__configuration_file:
+            sys.stderr.write(f'configuration file is "{self.__configuration_file}"\n')
+        if self.__show_config_file and not self.__configuration_file:
+            sys.stderr.write('No configuration file found; using default values\n')
+        if self.__configuration_file:
+            read_obj = open_for_read(self.__configuration_file)
+            line_to_read = 1
+            line_num = 0
+            while line_to_read:
+                line_num += 1
+                line_to_read = read_obj.readline()
+                line = line_to_read
+                line = line.strip()
+                if line[0:1] == '#':
+                    continue
+                if not line:
+                    continue
+                fields = line.split('=')
+                if len(fields) != 2:
+                    msg = line
+                    msg += f'Error in configuration.txt, line {line_num}\n'
+                    msg += 'Options take the form of option = value.\n'
+                    msg += f'Please correct the configuration file "{self.__configuration_file}" before continuing\n'
+                    raise self.__bug_handler(msg)
+                att = fields[0]
+                value = fields[1]
+                att = att.strip()
+                value = value.strip()
+                return_dict[att] = value
+        parsed_dict = self.__parse_dict(return_dict)
+        if parsed_dict == 1:
+            msg = f'Please correct the configuration file "{self.__configuration_file}" before continuing\n'
+            raise self.__bug_handler(msg)
+        return parsed_dict
+
+    def __get_file_name(self) -> str | None:
+        home_var = os.environ.get('HOME')
+        if home_var:
+            home_config = os.path.join(home_var, '.rtf2xml')
+            if os.path.isfile(home_config):
+                return home_config
+        home_var = os.environ.get('USERPROFILE')
+        if home_var:
+            home_config = os.path.join(home_var, '.rtf2xml')
+            if os.path.isfile(home_config):
+                return home_config
+        script_file = os.path.join(sys.path[0], '.rtf2xml')
+        if os.path.isfile(script_file):
+            return script_file
+        return self.__configuration_file
+
+    def __parse_dict(self, return_dict: ConfigDict) -> ConfigDict | Literal[1]:
+        allowable = [
+            'configuration-directory',
+            'smart-output',  # = false
+            'level',  # = 1
+            'convert-symbol',  # = true
+            'convert-wingdings',  # = true
+            'convert-zapf-dingbats',  # = true
+            'convert-caps',  # true
+            'indent',  # = 1
+            'group-styles',
+            'group-borders',
+            'headings-to-sections',
+            'lists',
+            'raw-dtd-path',
+            'write-empty-paragraphs',
+            'config-location',
+            'script-name',
+        ]
+        the_keys = return_dict.keys()
+        for the_key in the_keys:
+            if the_key not in allowable:
+                sys.stderr.write(f'options "{the_key}" not a legal option.\n')
+                return 1
+        configuration_dir = return_dict.get('configuration-directory')
+        if configuration_dir is None:
+            return_dict['configure-directory'] = None
+        elif not os.path.isdir(configuration_dir):
+            sys.stderr.write(f'The directory "{configuration_dir}" does not appear to be a directory.\n')
+            return 1
+        else:
+            return_dict['configure-directory'] = configuration_dir
+        smart_output = return_dict.get('smart-output')
+        if not smart_output:
+            return_dict['smart-output'] = 0
+        elif smart_output not in {'true', 'false'}:
+            sys.stderr.write('"smart-output" must be true or false.\n')
+            return 1
+        elif smart_output == 'false':
+            return_dict['smart-output'] = 0
+        int_options = ['level', 'indent']
+        for int_option in int_options:
+            value = return_dict.get(int_option)
+            if not value:
+                if int_option == 'level':
+                    return_dict['level'] = 1
+                else:
+                    return_dict['indent'] = 0
+            else:
+                try:
+                    int_num = int(value)
+                    return_dict[int_option] = int_num
+                except Exception:
+                    sys.stderr.write(f'"{int_option}" must be a number\n')
+                    sys.stderr.write(f'You choose "{return_dict[int_option]}" ')
+                    return 1
+        fonts = ['convert-symbol', 'convert-wingdings', 'convert-zapf-dingbats', 'convert-caps']
+        for font in fonts:
+            value = return_dict.get(font)
+            if not value:
+                return_dict[font] = 0
+            elif value not in {'true', 'false'}:
+                sys.stderr.write(f'"{font}" must be true or false.\n')
+            elif value == 'false':
+                return_dict[font] = 0
+        return_dict['xslt-processor'] = None
+        return_dict['no-namespace'] = None
+        return_dict['format'] = 'raw'
+        return_dict['no-pyxml'] = 'true'
+        return return_dict

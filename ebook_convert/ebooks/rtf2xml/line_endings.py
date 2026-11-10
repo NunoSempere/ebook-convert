@@ -10,23 +10,25 @@
 #                                                                       #
 #                                                                       #
 #########################################################################
+from __future__ import annotations
 import os
 
 from ebook_convert.ebooks.rtf2xml import copy
-from ebook_convert.utils.cleantext import clean_ascii_chars
 from ebook_convert.ptempfile import better_mktemp
+from ebook_convert.utils.cleantext import clean_ascii_chars
 
 
 class FixLineEndings:
     """Fix line endings"""
 
-    def __init__(self,
-            bug_handler,
-            in_file=None,
-            copy=None,
-            run_level=1,
-            replace_illegals=1,
-            ):
+    def __init__(
+        self,
+        bug_handler: type[Exception],
+        in_file: str | None = None,
+        copy: int | None = None,
+        run_level: int = 1,
+        replace_illegals: int = 1,
+    ) -> None:
         self.__file = in_file
         self.__bug_handler = bug_handler
         self.__copy = copy
@@ -34,8 +36,9 @@ class FixLineEndings:
         self.__write_to = better_mktemp()
         self.__replace_illegals = replace_illegals
 
-    def fix_endings(self):
+    def fix_endings(self) -> None:
         # read
+        assert self.__file is not None
         with open(self.__file, 'rb') as read_obj:
             input_file = read_obj.read()
         # calibre go from win and mac to unix
@@ -50,6 +53,6 @@ class FixLineEndings:
         # copy
         copy_obj = copy.Copy(bug_handler=self.__bug_handler)
         if self.__copy:
-            copy_obj.copy_file(self.__write_to, "line_endings.data")
+            copy_obj.copy_file(self.__write_to, 'line_endings.data')
         copy_obj.rename(self.__write_to, self.__file)
         os.remove(self.__write_to)

@@ -1,30 +1,114 @@
+#!/usr/bin/env python
+# License: GPLv3 Copyright: 2012, Kovid Goyal <kovid@kovidgoyal.net>
+
+from __future__ import annotations
 import struct
-from collections import OrderedDict, namedtuple
+from collections import OrderedDict
+from typing import TYPE_CHECKING, NamedTuple, NotRequired, Protocol, TypedDict, cast
 
-from ebook_convert.ebooks.mobi.utils import (decint, count_set_bits,
-        decode_string)
+from ebook_convert.ebooks.mobi.utils import count_set_bits, decint, decode_string
 
+if TYPE_CHECKING:
+    from collections.abc import ItemsView, Iterable, Iterator, Mapping, Sequence
 
-__license__ = 'GPL v3'
-__copyright__ = '2012, Kovid Goyal <kovid@kovidgoyal.net>'
-__docformat__ = 'restructuredtext en'
+    type TagMap = dict[int, list[int]]
+    type IndexTable = dict[str, TagMap]
 
-TagX = namedtuple('TagX', 'tag num_of_values bitmask eof')
-PTagX = namedtuple('PTagX', 'tag value_count value_bytes num_of_values')
 INDEX_HEADER_FIELDS = (
-            'len', 'nul1', 'type', 'gen', 'start', 'count', 'code',
-            'lng', 'total', 'ordt', 'ligt', 'nligt', 'ncncx'
-    ) + tuple('unknown%d'%i for i in range(27)) + ('ocnt', 'oentries',
-            'ordt1', 'ordt2', 'tagx')
+    ('len', 'nul1', 'type', 'gen', 'start', 'count', 'code', 'lng', 'total', 'ordt', 'ligt', 'nligt', 'ncncx')
+    + tuple(f'unknown{i}' for i in range(27))
+    + ('ocnt', 'oentries', 'ordt1', 'ordt2', 'tagx')
+)
+
+
+class IndexHeader(TypedDict):
+    len: int
+    nul1: int
+    type: int
+    gen: int
+    start: int
+    count: int
+    code: int
+    lng: int
+    total: int
+    ordt: int
+    ligt: int
+    nligt: int
+    ncncx: int
+    unknown0: int
+    unknown1: int
+    unknown2: int
+    unknown3: int
+    unknown4: int
+    unknown5: int
+    unknown6: int
+    unknown7: int
+    unknown8: int
+    unknown9: int
+    unknown10: int
+    unknown11: int
+    unknown12: int
+    unknown13: int
+    unknown14: int
+    unknown15: int
+    unknown16: int
+    unknown17: int
+    unknown18: int
+    unknown19: int
+    unknown20: int
+    unknown21: int
+    unknown22: int
+    unknown23: int
+    unknown24: int
+    unknown25: int
+    unknown26: int
+    ocnt: int
+    oentries: int
+    ordt1: int
+    ordt2: int
+    tagx: int
+    idx_header_end_pos: int
+    ordt1_raw: bytes | list[int]
+    ordt2_raw: bytearray | list[int]
+    ordt_map: str
+    # The following are added by the MOBI debug code
+    tagx_block_size: NotRequired[int]
+    tagx_block: NotRequired[bytes]
+    indices: NotRequired[list[tuple[bytes, int]]]
+
+
+class TagXLike(Protocol):
+    @property
+    def tag(self) -> int: ...
+    @property
+    def num_of_values(self) -> int: ...
+    @property
+    def bitmask(self) -> int: ...
+    @property
+    def eof(self) -> int: ...
+
+
+class TagX(NamedTuple):
+    tag: int
+    num_of_values: int
+    bitmask: int
+    eof: int
+
+
+class PTagX(NamedTuple):
+    tag: int
+    value_count: int | None
+    value_bytes: int | None
+    num_of_values: int
 
 
 class InvalidFile(ValueError):
     pass
 
 
-def check_signature(data, signature):
-    if data[:len(signature)] != signature:
-        raise InvalidFile('Not a valid %r section'%signature)
+def check_signature(data: bytes, signature: bytes) -> None:
+    if data[: len(signature)] != signature:
+        raise InvalidFile(f'Not a valid {signature!r} section')
 
 
 class NotAnINDXRecord(InvalidFile):
@@ -35,29 +119,28 @@ class NotATAGXSection(InvalidFile):
     pass
 
 
-def format_bytes(byts):
-    byts = bytearray(byts)
-    byts = [hex(b)[2:] for b in byts]
-    return ' '.join(byts)
+def format_bytes(byts: bytes | bytearray) -> str:
+    hexvals = [f'{b:x}' for b in bytearray(byts)]
+    return ' '.join(hexvals)
 
 
-def parse_indx_header(data):
+def parse_indx_header(data: bytes) -> IndexHeader:
     check_signature(data, b'INDX')
     words = INDEX_HEADER_FIELDS
     num = len(words)
-    values = struct.unpack('>%dL' % num, data[4:4*(num+1)])
-    ans = dict(zip(words, values))
-    ans['idx_header_end_pos'] = 4 * (num+1)
+    values = struct.unpack(f'>{num}L', data[4 : 4 * (num + 1)])
+    ans = cast('IndexHeader', dict(zip(words, values)))
+    ans['idx_header_end_pos'] = 4 * (num + 1)
     ordt1, ordt2 = ans['ordt1'], ans['ordt2']
     ans['ordt1_raw'], ans['ordt2_raw'] = [], []
     ans['ordt_map'] = ''
 
-    if ordt1 > 0 and data[ordt1:ordt1+4] == b'ORDT':
-        # I dont know what this is, but using it seems to be unnecessary, so
+    if ordt1 > 0 and data[ordt1 : ordt1 + 4] == b'ORDT':
+        # I don't know what this is, but using it seems to be unnecessary, so
         # just leave it as the raw bytestring
-        ans['ordt1_raw'] = data[ordt1+4:ordt1+4+ans['oentries']]
-    if ordt2 > 0 and data[ordt2:ordt2+4] == b'ORDT':
-        ans['ordt2_raw'] = raw = bytearray(data[ordt2+4:ordt2+4+2*ans['oentries']])
+        ans['ordt1_raw'] = data[ordt1 + 4 : ordt1 + 4 + ans['oentries']]
+    if ordt2 > 0 and data[ordt2 : ordt2 + 4] == b'ORDT':
+        ans['ordt2_raw'] = raw = bytearray(data[ordt2 + 4 : ordt2 + 4 + 2 * ans['oentries']])
         if ans['code'] == 65002:
             # This appears to be EBCDIC-UTF (65002) encoded. I can't be
             # bothered to write a decoder for this (see
@@ -70,25 +153,24 @@ def parse_indx_header(data):
             # ascii character. If we cannot, we map to the ? char.
 
             parsed = bytearray(ans['oentries'])
-            for i in range(0, 2*ans['oentries'], 2):
-                parsed[i//2] = raw[i+1] if 0x20 < raw[i+1] < 0x7f else ord(b'?')
+            for i in range(0, 2 * ans['oentries'], 2):
+                parsed[i // 2] = raw[i + 1] if 0x20 < raw[i + 1] < 0x7F else ord(b'?')
             ans['ordt_map'] = bytes(parsed).decode('ascii')
         else:
-            ans['ordt_map'] = '?'*ans['oentries']
+            ans['ordt_map'] = '?' * ans['oentries']
 
     return ans
 
 
-class CNCX(object):  # {{{
-
-    '''
+class CNCX:  # {{{
+    """
     Parses the records that contain the compiled NCX (all strings from the
     NCX). Presents a simple offset : string mapping interface to access the
     data.
-    '''
+    """
 
-    def __init__(self, records, codec):
-        self.records = OrderedDict()
+    def __init__(self, records: Iterable[bytes], codec: str) -> None:
+        self.records: dict[int, str] = OrderedDict()
         record_offset = 0
         for raw in records:
             pos = 0
@@ -96,50 +178,51 @@ class CNCX(object):  # {{{
                 length, consumed = decint(raw[pos:])
                 if length > 0:
                     try:
-                        self.records[pos+record_offset] = raw[
-                            pos+consumed:pos+consumed+length].decode(codec)
-                    except:
+                        self.records[pos + record_offset] = raw[pos + consumed : pos + consumed + length].decode(codec)
+                    except Exception:
                         byts = raw[pos:]
                         r = format_bytes(byts)
-                        print('CNCX entry at offset %d has unknown format %s'%(
-                            pos+record_offset, r))
-                        self.records[pos+record_offset] = r
+                        print(f'CNCX entry at offset {pos + record_offset} has unknown format {r}')
+                        self.records[pos + record_offset] = r
                         pos = len(raw)
-                pos += consumed+length
+                pos += consumed + length
             record_offset += 0x10000
 
-    def __getitem__(self, offset):
+    def __getitem__(self, offset: int) -> str | None:
         return self.records.get(offset)
 
-    def get(self, offset, default=None):
+    def get(self, offset: int, default: object = None) -> object:
         return self.records.get(offset, default)
 
-    def __bool__(self):
+    def __bool__(self) -> bool:
         return bool(self.records)
+
     __nonzero__ = __bool__
 
-    def iteritems(self):
+    def iteritems(self) -> Iterator[tuple[int, str]]:
+        return iter(self.records.items())
+
+    def items(self) -> ItemsView[int, str]:
         return self.records.items()
 
-    def items(self):
-        return self.records.items()
+
 # }}}
 
 
-def parse_tagx_section(data):
+def parse_tagx_section(data: bytes) -> tuple[int, list[TagX]]:
     check_signature(data, b'TAGX')
 
     tags = []
-    first_entry_offset, = struct.unpack_from(b'>L', data, 4)
-    control_byte_count, = struct.unpack_from(b'>L', data, 8)
+    (first_entry_offset,) = struct.unpack_from(b'>L', data, 4)
+    (control_byte_count,) = struct.unpack_from(b'>L', data, 8)
 
     for i in range(12, first_entry_offset, 4):
-        vals = list(bytearray(data[i:i+4]))
+        vals = list(bytearray(data[i : i + 4]))
         tags.append(TagX(*vals))
     return control_byte_count, tags
 
 
-def get_tag_map(control_byte_count, tagx, data, strict=False):
+def get_tag_map(control_byte_count: int, tagx: Iterable[TagXLike], data: bytes, strict: bool = False) -> TagMap:
     ptags = []
     ans = {}
     control_bytes = list(bytearray(data[:control_byte_count]))
@@ -170,8 +253,7 @@ def get_tag_map(control_byte_count, tagx, data, strict=False):
                     mask >>= 1
                     value >>= 1
                 value_count = value
-            ptags.append(PTagX(x.tag, value_count, value_bytes,
-                x.num_of_values))
+            ptags.append(PTagX(x.tag, value_count, value_bytes, x.num_of_values))
 
     for x in ptags:
         values = []
@@ -182,6 +264,7 @@ def get_tag_map(control_byte_count, tagx, data, strict=False):
                 data = data[consumed:]
                 values.append(byts)
         else:  # value_bytes is not None
+            assert x.value_bytes is not None  # value_bytes is always set when value_count is None
             # Convert value_bytes to variable width values.
             total_consumed = 0
             while total_consumed < x.value_bytes:
@@ -191,8 +274,7 @@ def get_tag_map(control_byte_count, tagx, data, strict=False):
                 total_consumed += consumed
                 values.append(byts)
             if total_consumed != x.value_bytes:
-                err = ("Error: Should consume %s bytes, but consumed %s" %
-                        (x.value_bytes, total_consumed))
+                err = f'Error: Should consume {x.value_bytes} bytes, but consumed {total_consumed}'
                 if strict:
                     raise ValueError(err)
                 else:
@@ -200,8 +282,7 @@ def get_tag_map(control_byte_count, tagx, data, strict=False):
         ans[x.tag] = values
     # Test that all bytes have been processed
     if data.replace(b'\0', b''):
-        err = ("Warning: There are unprocessed index bytes left: %s" %
-                format_bytes(data))
+        err = f'Warning: There are unprocessed index bytes left: {format_bytes(data)}'
         if strict:
             raise ValueError(err)
         else:
@@ -210,18 +291,25 @@ def get_tag_map(control_byte_count, tagx, data, strict=False):
     return ans
 
 
-def parse_index_record(table, data, control_byte_count, tags, codec,
-        ordt_map, strict=False):
+def parse_index_record(
+    table: IndexTable,
+    data: bytes,
+    control_byte_count: int,
+    tags: Iterable[TagXLike],
+    codec: str,
+    ordt_map: Sequence[str] | Mapping[int, str],
+    strict: bool = False,
+) -> IndexHeader:
     header = parse_indx_header(data)
     idxt_pos = header['start']
-    if data[idxt_pos:idxt_pos+4] != b'IDXT':
+    if data[idxt_pos : idxt_pos + 4] != b'IDXT':
         print('WARNING: Invalid INDX record')
     entry_count = header['count']
 
     # loop through to build up the IDXT position starts
-    idx_positions= []
+    idx_positions = []
     for j in range(entry_count):
-        pos, = struct.unpack_from(b'>H', data, idxt_pos + 4 + (2 * j))
+        (pos,) = struct.unpack_from(b'>H', data, idxt_pos + 4 + (2 * j))
         idx_positions.append(pos)
     # The last entry ends before the IDXT tag (but there might be zero fill
     # bytes we need to ignore!)
@@ -230,7 +318,7 @@ def parse_index_record(table, data, control_byte_count, tags, codec,
     # For each entry in the IDXT build up the tag map and any associated
     # text
     for j in range(entry_count):
-        start, end = idx_positions[j:j+2]
+        start, end = idx_positions[j : j + 2]
         rec = data[start:end]
         # Sometimes (in the guide table if the type attribute has non ascii
         # values) the ident is UTF-16 encoded. Try to handle that.
@@ -238,31 +326,29 @@ def parse_index_record(table, data, control_byte_count, tags, codec,
             ident, consumed = decode_string(rec, codec=codec, ordt_map=ordt_map)
         except UnicodeDecodeError:
             ident, consumed = decode_string(rec, codec='utf-16', ordt_map=ordt_map)
-        if u'\x00' in ident:
+        if '\x00' in ident:
             try:
-                ident, consumed = decode_string(rec, codec='utf-16',
-                        ordt_map=ordt_map)
+                ident, consumed = decode_string(rec, codec='utf-16', ordt_map=ordt_map)
             except UnicodeDecodeError:
-                ident = ident.replace('u\x00', u'')
+                ident = ident.replace('u\x00', '')
         rec = rec[consumed:]
         tag_map = get_tag_map(control_byte_count, tags, rec, strict=strict)
         table[ident] = tag_map
     return header
 
 
-def get_tag_section_start(data, indx_header):
-    # Some files have an incorrect TAGX offset in the INDX header, so verify
-    # it and search for the literal TAGX marker if needed (aec2c1a551)
+def get_tag_section_start(data: bytes, indx_header: IndexHeader) -> int:
     tag_section_start = indx_header['tagx']
-    if data[tag_section_start:tag_section_start + 4] != b'TAGX':
+    if data[tag_section_start : tag_section_start + 4] != b'TAGX':
         tpos = data.find(b'TAGX', indx_header['idx_header_end_pos'])
         if tpos > -1:
             tag_section_start = tpos
     return tag_section_start
 
 
-def read_index(sections, idx, codec):
-    table, cncx = OrderedDict(), CNCX([], codec)
+def read_index(sections: Sequence[tuple[bytes, object]], idx: int, codec: str) -> tuple[IndexTable, CNCX]:
+    table: IndexTable = OrderedDict()
+    cncx = CNCX([], codec)
 
     data = sections[idx][0]
 
@@ -271,7 +357,7 @@ def read_index(sections, idx, codec):
 
     if indx_header['ncncx'] > 0:
         off = idx + indx_count + 1
-        cncx_records = [x[0] for x in sections[off:off+indx_header['ncncx']]]
+        cncx_records = [x[0] for x in sections[off : off + indx_header['ncncx']]]
         cncx = CNCX(cncx_records, codec)
 
     tag_section_start = get_tag_section_start(data, indx_header)
@@ -280,6 +366,5 @@ def read_index(sections, idx, codec):
     for i in range(idx + 1, idx + 1 + indx_count):
         # Index record
         data = sections[i][0]
-        parse_index_record(table, data, control_byte_count, tags, codec,
-                indx_header['ordt_map'])
+        parse_index_record(table, data, control_byte_count, tags, codec, indx_header['ordt_map'])
     return table, cncx

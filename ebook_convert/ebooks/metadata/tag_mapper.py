@@ -1,0 +1,208 @@
+#!/usr/bin/env python
+# License: GPLv3 Copyright: 2015, Kovid Goyal <kovid at kovidgoyal.net>
+
+from __future__ import annotations
+from collections import deque
+from typing import TYPE_CHECKING, Protocol
+
+from ebook_convert.utils.icu import lower as icu_lower
+from ebook_convert.utils.icu import upper as icu_upper
+from ebook_convert.polyglot.builtins import as_unicode
+
+if TYPE_CHECKING:
+    import unittest
+    from collections.abc import Callable, Collection, Hashable, Iterable, Mapping, Sequence
+
+type Rule = Mapping[str, str]
+type Matcher = Callable[[str], bool]
+
+
+class RegexPattern(Protocol):
+    "The subset of the interface of compiled patterns from the regex module used here"
+
+    def match(self, string: str, /) -> object: ...
+    def sub(self, repl: str, string: str, /) -> str: ...
+
+
+def compile_pat(pat: str) -> RegexPattern:
+    import regex
+
+    REGEX_FLAGS = regex.VERSION1 | regex.WORD | regex.FULLCASE | regex.IGNORECASE | regex.UNICODE
+    return regex.compile(pat, flags=REGEX_FLAGS)
+
+
+def matcher(rule: Rule, separator: str = ',') -> Matcher:
+    import unicodedata
+
+    def n(x: str | bytes | None) -> str:
+        return unicodedata.normalize('NFC', as_unicode(x or '', errors='replace'))
+
+    mt = rule['match_type']
+    if mt == 'one_of':
+        if separator:
+            tags = {icu_lower(n(x.strip())) for x in rule['query'].split(separator)}
+            return tags.__contains__
+        return icu_lower(n(rule['query'].strip())).__eq__
+
+    if mt == 'not_one_of':
+        if separator:
+            tags = {icu_lower(n(x.strip())) for x in rule['query'].split(',')}
+            return lambda x: x not in tags
+        return icu_lower(n(rule['query'].strip())).__ne__
+
+    if mt == 'matches':
+        pat = compile_pat(n(rule['query']))
+        return lambda x: pat.match(x) is not None
+
+    if mt == 'not_matches':
+        pat = compile_pat(n(rule['query']))
+        return lambda x: pat.match(x) is None
+
+    if mt == 'has':
+        s = icu_lower(n(rule['query']))
+        return lambda x: s in x
+
+    return lambda x: False
+
+
+def apply_rules(tag: str, rules: Iterable[tuple[Rule, Matcher]], separator: str = ',') -> list[str]:
+    ans: list[str] = []
+    tags: deque[str] = deque()
+    tags.append(tag)
+    maxiter = 20
+    while tags and maxiter > 0:
+        tag = tags.popleft()
+        ltag = icu_lower(tag)
+        maxiter -= 1
+        for rule, matches in rules:
+            if matches(ltag):
+                ac = rule['action']
+                if ac == 'remove':
+                    break
+                if ac == 'keep':
+                    ans.append(tag)
+                    break
+                if ac == 'replace':
+                    if 'matches' in rule['match_type']:
+                        tag = compile_pat(rule['query']).sub(rule['replace'], tag)
+                    else:
+                        tag = rule['replace']
+                    if separator and separator in tag:
+                        replacement_tags: list[str] = []
+                        self_added = False
+                        for rtag in (x.strip() for x in tag.split(',')):
+                            if icu_lower(rtag) == ltag:
+                                if not self_added:
+                                    ans.append(rtag)
+                                    self_added = True
+                            else:
+                                replacement_tags.append(rtag)
+                        tags.extendleft(reversed(replacement_tags))
+                    else:
+                        if icu_lower(tag) == ltag:
+                            # Case change or self replacement
+                            ans.append(tag)
+                            break
+                        tags.appendleft(tag)
+                    break
+                if ac == 'capitalize':
+                    ans.append(tag.capitalize())
+                    break
+                if ac == 'titlecase':
+                    from ebook_convert.utils.titlecase import titlecase
+
+                    ans.append(titlecase(tag))
+                    break
+                if ac == 'lower':
+                    ans.append(icu_lower(tag))
+                    break
+                if ac == 'upper':
+                    ans.append(icu_upper(tag))
+                    break
+                if ac == 'split':
+                    stags = list(filter(None, (x.strip() for x in tag.split(rule['replace']))))
+                    if stags:
+                        if stags[0] == tag:
+                            ans.append(tag)
+                        else:
+                            tags.extendleft(reversed(stags))
+                    break
+        else:  # no rule matched, default keep
+            ans.append(tag)
+
+    ans.extend(tags)
+    return ans
+
+
+def uniq(vals: Sequence[str] | None, kmap: Callable[[str], Hashable] = icu_lower) -> list[str]:
+    """Remove all duplicates from vals, while preserving order. kmap must be a
+    callable that returns a hashable value for every item in vals"""
+    vals = vals or ()
+    lvals = (kmap(x) for x in vals)
+    seen: set[Hashable] = set()
+    seen_add = seen.add
+    return [x for x, k in zip(vals, lvals) if k not in seen and not seen_add(k)]  # ty: ignore[redundant-condition]
+
+
+def map_tags(tags: Iterable[str] | None, rules: Collection[Rule] = (), separator: str = ',') -> list[str]:
+    if not tags:
+        return []
+    if not rules:
+        return list(tags)
+    compiled_rules = [(r, matcher(r, separator)) for r in rules]
+    ans: list[str] = []
+    for t in tags:
+        ans.extend(apply_rules(t, compiled_rules, separator))
+    return uniq(list(filter(None, ans)))
+
+
+def find_tests() -> unittest.TestSuite:
+    import unittest
+
+    class TestTagMapper(unittest.TestCase):
+        def test_tag_mapper(self) -> None:
+
+            def rule(action: str, query: str, replace: str | None = None, match_type: str = 'one_of') -> dict[str, str]:
+                ans = {'action': action, 'query': query, 'match_type': match_type}
+                if replace is not None:
+                    ans['replace'] = replace
+                return ans
+
+            def run(rules: dict[str, str] | list[dict[str, str]], tags: str | list[str], expected: str | list[str], sep: str = ',') -> None:
+                if isinstance(rules, dict):
+                    rules = [rules]
+                if isinstance(tags, str):
+                    tags = [x.strip() for x in tags.split(sep)] if sep else [tags]
+                if isinstance(expected, str):
+                    expected = [x.strip() for x in expected.split(sep)] if sep else [expected]
+                ans = map_tags(tags, rules, sep)
+                self.assertEqual(ans, expected)
+
+            run(rule('capitalize', 't1,t2'), 't1,x1', 'T1,x1')
+            run(rule('titlecase', 'some tag'), 'some tag,x1', 'Some Tag,x1')
+            run(rule('upper', 'ta,t2'), 'ta,x1', 'TA,x1')
+            run(rule('lower', 'ta,x1'), 'TA,X1', 'ta,x1')
+            run(rule('replace', 't1', 't2'), 't1,x1', 't2,x1')
+            run(rule('replace', '(.)1', r'\g<1>2', 'matches'), 't1,x1', 't2,x2')
+            run(rule('replace', '(.)1', r'\g<1>2,3', 'matches'), 't1,x1', 't2,3,x2')
+            run(rule('replace', 't1', 't2, t3'), 't1,x1', 't2,t3,x1')
+            run([rule('replace', 't1', 't2,t3'), rule('remove', 't2')], 't1,x1', 't3,x1')
+            run(rule('replace', 't1', 't1'), 't1,x1', 't1,x1')
+            run([rule('replace', 't1', 't2'), rule('replace', 't2', 't1')], 't1,t2', 't1,t2')
+            run(rule('replace', 'a', 'A'), 'a,b', 'A,b')
+            run(rule('replace', 'a,b', 'A,B'), 'a,b', 'A,B')
+            run(rule('replace', 'L', 'T', 'has'), 'L', 'T')
+            run(rule('split', '/', '/', 'has'), 'a/b/c,d', 'a,b,c,d')
+            run(rule('split', '/', '/', 'has'), '/,d', 'd')
+            run(rule('split', '/', '/', 'has'), '/a/', 'a')
+            run(rule('split', 'a,b', '/'), 'a,b', 'a,b')
+            run(rule('split', 'a b', ' ', 'has'), 'a b', 'a,b')
+            run(rule('upper', 'a, b, c'), 'a, b, c', 'A, B, C', sep='')
+
+    return unittest.defaultTestLoader.loadTestsFromTestCase(TestTagMapper)
+
+
+if __name__ == '__main__':
+    from ebook_convert.utils.run_tests import run_cli
+
+    run_cli(find_tests())

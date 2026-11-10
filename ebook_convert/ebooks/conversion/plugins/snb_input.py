@@ -1,78 +1,87 @@
-import os
+# License: GPLv3 Copyright: 2010, Li Fanxi <lifanxi@freemindworld.com>
 
-from lxml import etree
+from __future__ import annotations
+import os
+from typing import IO, TYPE_CHECKING
 
 from ebook_convert.customize.conversion import InputFormatPlugin
 from ebook_convert.ptempfile import TemporaryDirectory
 from ebook_convert.utils.filenames import ascii_filename
+from ebook_convert.utils.localization import _
+
+if TYPE_CHECKING:
+    from optparse import Values
+
+    from ebook_convert.ebooks.oeb.base import OEBBook
+    from ebook_convert.utils.logging import Log
+
+HTML_TEMPLATE = '<html><head><meta http-equiv="Content-Type" content="text/html; charset=utf-8"/><title>%s</title></head><body>\n%s\n</body></html>'
 
 
-HTML_TEMPLATE = ('<html><head><meta http-equiv="Content-Type" '
-                 'content="text/html; charset=utf-8"/><title>%s</title>'
-                 '</head><body>\n%s\n</body></html>')
-
-
-def html_encode(s):
-    return (s.replace('&', '&amp;')
-            .replace('<', '&lt;')
-            .replace('>', '&gt;')
-            .replace('"', '&quot;')
-            .replace("'", '&apos;')
-            .replace('\n', '<br/>')
-            .replace(' ', '&nbsp;'))
+def html_encode(s: str) -> str:
+    return (
+        s
+        .replace('&', '&amp;')
+        .replace('<', '&lt;')
+        .replace('>', '&gt;')
+        .replace('"', '&quot;')
+        .replace("'", '&apos;')
+        .replace('\n', '<br/>')
+        .replace(' ', '&nbsp;')
+    )
 
 
 class SNBInput(InputFormatPlugin):
-
     name = 'SNB Input'
     author = 'Li Fanxi'
-    description = 'Convert SNB files to OEB'
+    description = _('Convert SNB files to OEB')
     file_types = {'snb'}
     commit_name = 'snb_input'
 
     options = set()
 
-    def convert(self, stream, options, file_ext, log,
-                accelerators):
+    def convert(self, stream: IO[bytes], options: Values, file_ext: str, log: Log, accelerators: dict[str, str]) -> OEBBook:
         import uuid
 
         from ebook_convert.ebooks.oeb.base import DirContainer
         from ebook_convert.ebooks.snb.snbfile import SNBFile
+        from ebook_convert.utils.xml_parse import safe_xml_fromstring
 
-        log.debug("Parsing SNB file...")
+        log.debug('Parsing SNB file...')
         snbFile = SNBFile()
         try:
             snbFile.Parse(stream)
         except Exception:
-            raise ValueError("Invalid SNB file")
+            raise ValueError('Invalid SNB file')
         if not snbFile.IsValid():
-            log.debug("Invalid SNB file")
-            raise ValueError("Invalid SNB file")
-        log.debug("Handle meta data ...")
+            log.debug('Invalid SNB file')
+            raise ValueError('Invalid SNB file')
+        log.debug('Handle meta data ...')
         from ebook_convert.ebooks.conversion.plumber import create_oebbook
-        oeb = create_oebbook(log, None, options,
-                             encoding=options.input_encoding, populate=False)
+
+        oeb = create_oebbook(log, None, options, encoding=options.input_encoding, populate=False)
         meta = snbFile.GetFileStream('snbf/book.snbf')
         if meta is not None:
-            meta = etree.fromstring(meta)
-            item_map = {'title': './/head/name',
-                        'creator': './/head/author',
-                        'language': './/head/language',
-                        'generator': './/head/generator',
-                        'publisher': './/head/publisher',
-                        'cover': './/head/cover'}
+            meta = safe_xml_fromstring(meta)
+            l = {
+                'title': './/head/name',
+                'creator': './/head/author',
+                'language': './/head/language',
+                'generator': './/head/generator',
+                'publisher': './/head/publisher',
+                'cover': './/head/cover',
+            }
             d = {}
-            for key, item in item_map.items():
-                node = meta.find(item)
+            for item, path in l.items():
+                node = meta.find(path)
                 if node is not None:
-                    d[key] = node.text if node.text is not None else ''
+                    d[item] = node.text if node.text is not None else ''
                 else:
-                    d[key] = ''
+                    d[item] = ''
 
             oeb.metadata.add('title', d['title'])
             oeb.metadata.add('creator', d['creator'], attrib={'role': 'aut'})
-            oeb.metadata.add('language',
-                             d['language'].lower().replace('_', '-'))
+            oeb.metadata.add('language', d['language'].lower().replace('_', '-'))
             oeb.metadata.add('generator', d['generator'])
             oeb.metadata.add('publisher', d['publisher'])
             if d['cover'] != '':
@@ -90,39 +99,36 @@ class SNBInput(InputFormatPlugin):
             toc = snbFile.GetFileStream('snbf/toc.snbf')
             oeb.container = DirContainer(tdir, log)
             if toc is not None:
-                toc = etree.fromstring(toc)
+                toc = safe_xml_fromstring(toc)
                 i = 1
-                for ch in toc.find('.//body'):
+                toc_body = toc.find('.//body')
+                for ch in toc_body if toc_body is not None else []:
                     chapterName = ch.text
                     chapterSrc = ch.get('src')
-                    fname = 'ch_%d.htm' % i
+                    fname = f'ch_{i}.htm'
+                    assert isinstance(chapterSrc, str)
                     data = snbFile.GetFileStream('snbc/' + chapterSrc)
                     if data is None:
                         continue
-                    snbc = etree.fromstring(data)
+                    snbc = safe_xml_fromstring(data)
                     lines = []
-                    for line in snbc.find('.//body'):
+                    snbc_body = snbc.find('.//body')
+                    for line in snbc_body if snbc_body is not None else []:
                         if line.tag == 'text':
-                            lines.append('<p>%s</p>' % html_encode(line.text))
+                            lines.append(f'<p>{html_encode(line.text or "")}</p>')
                         elif line.tag == 'img':
-                            lines.append('<p><img src="%s" /></p>' %
-                                         html_encode(line.text))
+                            lines.append(f'<p><img src="{html_encode(line.text or "")}" /></p>')
                     with open(os.path.join(tdir, fname), 'wb') as f:
-                        f.write((HTML_TEMPLATE %
-                                 (chapterName,
-                                  '\n'.join(lines))).encode('utf-8',
-                                                            'replace'))
+                        f.write((HTML_TEMPLATE % (chapterName, '\n'.join(lines))).encode('utf-8', 'replace'))
                     oeb.toc.add(ch.text, fname)
-                    id, href = oeb.manifest.generate(
-                        id='html', href=ascii_filename(fname))
+                    id, href = oeb.manifest.generate(id='html', href=ascii_filename(fname))
                     item = oeb.manifest.add(id, href, 'text/html')
                     item.html_input_href = fname
                     oeb.spine.add(item, True)
                     i = i + 1
                 imageFiles = snbFile.OutputImageFiles(tdir)
                 for f, m in imageFiles:
-                    id, href = oeb.manifest.generate(id='image',
-                                                     href=ascii_filename(f))
+                    id, href = oeb.manifest.generate(id='image', href=ascii_filename(f))
                     item = oeb.manifest.add(id, href, m)
                     item.html_input_href = f
 

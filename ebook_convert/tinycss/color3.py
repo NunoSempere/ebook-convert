@@ -1,3 +1,4 @@
+# coding: utf8
 """
     tinycss.colors3
     ---------------
@@ -11,11 +12,19 @@
     :copyright: (c) 2012 by Simon Sapin.
     :license: BSD, see LICENSE for more details.
 """
+
+
+from __future__ import annotations
 import collections
 import itertools
 import re
 
 from .tokenizer import tokenize_grouped
+
+try:
+    from ebook_convert.calibre_extensions.tokenizer import parse_color_string as c_parse_color_string
+except ImportError:
+    c_parse_color_string = None
 
 
 class RGBA(collections.namedtuple('RGBA', ['red', 'green', 'blue', 'alpha'])):
@@ -26,6 +35,13 @@ class RGBA(collections.namedtuple('RGBA', ['red', 'green', 'blue', 'alpha'])):
     the same values.
 
     """
+
+
+def py_parse_color_string(css_string):
+    """Pure python implementation of :func:`parse_color_string`."""
+    tokens = list(tokenize_grouped(css_string.strip()))
+    if len(tokens) == 1:
+        return parse_color(tokens[0])
 
 
 def parse_color_string(css_string):
@@ -40,9 +56,11 @@ def parse_color_string(css_string):
         Same as :func:`parse_color`.
 
     """
-    tokens = list(tokenize_grouped(css_string.strip()))
-    if len(tokens) == 1:
-        return parse_color(tokens[0])
+    if c_parse_color_string is not None:
+        ans = c_parse_color_string(css_string)
+        if ans is not NotImplemented:
+            return RGBA._make(ans) if isinstance(ans, tuple) else ans
+    return py_parse_color_string(css_string)
 
 
 def parse_color(token):
@@ -94,7 +112,7 @@ def parse_color(token):
 def parse_alpha(args):
     """
     If args is a list of a single INTEGER or NUMBER token,
-    retur its value clipped to the 0..1 range
+    return its value clipped to the 0..1 range
     Otherwise, return None.
     """
     if len(args) == 1 and args[0].type in ('NUMBER', 'INTEGER'):

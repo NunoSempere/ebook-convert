@@ -1,3 +1,4 @@
+# coding: utf8
 """
     tinycss.tokenizer
     -----------------
@@ -10,6 +11,9 @@
     :copyright: (c) 2012 by Simon Sapin.
     :license: BSD, see LICENSE for more details.
 """
+
+
+from __future__ import annotations
 from ebook_convert.tinycss import token_data
 
 
@@ -209,4 +213,4 @@ except (ImportError, RuntimeError):
     c_tokenize_flat = None
 else:
     # Use the c tokenizer by default
-    c_tokenize_flat = tokenize_flat = lambda s, ignore_comments=False:tok.tokenize_flat(s, ignore_comments)
+    c_tokenize_flat = tokenize_flat = lambda s, ignore_comments=False:tok.tokenize_flat(s, ignore_comments)  # type: ignore

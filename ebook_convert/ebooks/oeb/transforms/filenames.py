@@ -1,39 +1,50 @@
+#!/usr/bin/env python
+# License: GPLv3 Copyright: 2010, Kovid Goyal <kovid@kovidgoyal.net>
+
+from __future__ import annotations
 import posixpath
-import urllib.parse
+from typing import TYPE_CHECKING
+from urllib.parse import urldefrag, urlparse
 
 from lxml import etree
 
 from ebook_convert.ebooks.oeb.base import rewrite_links, urlnormalize
 
+if TYPE_CHECKING:
+    from optparse import Values
 
-class RenameFiles(object):  # {{{
+    from ebook_convert.ebooks.oeb.base import TOC, Manifest, OEBBook
 
-    '''
+
+class RenameFiles:  # {{{
+    """
     Rename files and adjust all links pointing to them. Note that the spine
     and manifest are not touched by this transform.
-    '''
+    """
 
-    def __init__(self, rename_map, renamed_items_map=None):
+    def __init__(self, rename_map: dict[str, str], renamed_items_map: dict[str, Manifest.Item] | None = None) -> None:
         self.rename_map = rename_map
         self.renamed_items_map = renamed_items_map
 
-    def __call__(self, oeb, opts):
+    def __call__(self, oeb: OEBBook, opts: Values) -> None:
         import css_parser
+
         self.log = oeb.logger
         self.opts = opts
         self.oeb = oeb
 
         for item in oeb.manifest.items:
             self.current_item = item
-            if etree.iselement(item.data):
-                rewrite_links(self.current_item.data, self.url_replacer)
+            data = item.data
+            if isinstance(data, etree._Element):
+                rewrite_links(data, self.url_replacer)
             elif hasattr(item.data, 'cssText'):
                 css_parser.replaceUrls(item.data, self.url_replacer)
 
         if self.oeb.guide:
             for ref in self.oeb.guide.values():
                 href = urlnormalize(ref.href)
-                href, frag = urllib.parse.urldefrag(href)
+                href, frag = urldefrag(href)
                 replacement = self.rename_map.get(href, None)
                 if replacement is not None:
                     nhref = replacement
@@ -44,28 +55,28 @@ class RenameFiles(object):  # {{{
         if self.oeb.toc:
             self.fix_toc_entry(self.oeb.toc)
 
-    def fix_toc_entry(self, toc):
+    def fix_toc_entry(self, toc: TOC) -> None:
         if toc.href:
             href = urlnormalize(toc.href)
-            href, frag = urllib.parse.urldefrag(href)
+            href, frag = urldefrag(href)
             replacement = self.rename_map.get(href, None)
 
             if replacement is not None:
                 nhref = replacement
                 if frag:
-                    nhref = '#'.join((nhref, frag))
+                    nhref = f'{nhref}#{frag}'
                 toc.href = nhref
 
         for x in toc:
             self.fix_toc_entry(x)
 
-    def url_replacer(self, orig_url):
+    def url_replacer(self, orig_url: str) -> str:
         url = urlnormalize(orig_url)
-        parts = urllib.parse.urlparse(url)
+        parts = urlparse(url)
         if parts.scheme:
             # Only rewrite local URLs
             return orig_url
-        path, frag = urllib.parse.urldefrag(url)
+        path, frag = urldefrag(url)
         if self.renamed_items_map:
             orig_item = self.renamed_items_map.get(self.current_item.href, self.current_item)
         else:
@@ -77,20 +88,20 @@ class RenameFiles(object):  # {{{
             replacement += '#' + frag
         return replacement
 
+
 # }}}
 
 
-class UniqueFilenames(object):  # {{{
+class UniqueFilenames:  # {{{
+    "Ensure that every item in the manifest has a unique filename"
 
-    'Ensure that every item in the manifest has a unique filename'
-
-    def __call__(self, oeb, opts):
+    def __call__(self, oeb: OEBBook, opts: Values) -> None:
         self.log = oeb.logger
         self.opts = opts
         self.oeb = oeb
 
-        self.seen_filenames = set()
-        self.rename_map = {}
+        self.seen_filenames: set[str] = set()
+        self.rename_map: dict[str, str] = {}
 
         for item in list(oeb.manifest.items):
             fname = posixpath.basename(item.href)
@@ -102,8 +113,7 @@ class UniqueFilenames(object):  # {{{
                 nhref = oeb.manifest.generate(href=nhref)[1]
                 spine_pos = item.spine_position
                 oeb.manifest.remove(item)
-                nitem = oeb.manifest.add(item.id, nhref, item.media_type, data=data,
-                        fallback=item.fallback)
+                nitem = oeb.manifest.add(item.id, nhref, item.media_type, data=data, fallback=item.fallback)
                 self.seen_filenames.add(posixpath.basename(nhref))
                 self.rename_map[item.href] = nhref
                 if spine_pos is not None:
@@ -112,43 +122,43 @@ class UniqueFilenames(object):  # {{{
                 self.seen_filenames.add(fname)
 
         if self.rename_map:
-            self.log.info('Found non-unique filenames, renaming to support '
-                          'broken EPUB readers like FBReader, Aldiko and '
-                          'Stanza...')
+            self.log('Found non-unique filenames, renaming to support broken EPUB readers like FBReader, Aldiko and Stanza...')
             from pprint import pformat
+
             self.log.debug(pformat(self.rename_map))
 
             renamer = RenameFiles(self.rename_map)
             renamer(oeb, opts)
 
-    def unique_suffix(self, fname):
+    def unique_suffix(self, fname: str) -> str:
         base, ext = posixpath.splitext(fname)
         c = 0
         while True:
             c += 1
-            suffix = '_u%d'%c
+            suffix = f'_u{c}'
             candidate = base + suffix + ext
             if candidate not in self.seen_filenames:
                 return suffix
+
+
 # }}}
 
 
-class FlatFilenames(object):  # {{{
+class FlatFilenames:  # {{{
+    "Ensure that every item in the manifest has a unique filename without subfolders."
 
-    'Ensure that every item in the manifest has a unique filename without subdirectories.'
-
-    def __call__(self, oeb, opts):
+    def __call__(self, oeb: OEBBook, opts: Values) -> None:
         self.log = oeb.logger
         self.opts = opts
         self.oeb = oeb
 
-        self.rename_map = {}
-        self.renamed_items_map = {}
+        self.rename_map: dict[str, str] = {}
+        self.renamed_items_map: dict[str, Manifest.Item] = {}
 
         for item in list(oeb.manifest.items):
             # Flatten URL by removing directories.
             # Example: a/b/c/index.html -> a_b_c_index.html
-            nhref = item.href.replace("/", "_")
+            nhref = item.href.replace('/', '_')
 
             if item.href == nhref:
                 # URL hasn't changed, skip item.
@@ -161,20 +171,21 @@ class FlatFilenames(object):  # {{{
                 oeb.spine.remove(item)
             oeb.manifest.remove(item)
 
-            nitem = oeb.manifest.add(item.id, nhref, item.media_type, data=data,
-                                     fallback=item.fallback)
+            nitem = oeb.manifest.add(item.id, nhref, item.media_type, data=data, fallback=item.fallback)
             self.rename_map[item.href] = nhref
             self.renamed_items_map[nhref] = item
             if isp is not None:
                 oeb.spine.insert(isp, nitem, item.linear)
 
         if self.rename_map:
-            self.log.info('Found non-flat filenames, renaming to support '
-                          'broken EPUB readers like FBReader...')
+            self.log('Found non-flat filenames, renaming to support broken EPUB readers like FBReader...')
             from pprint import pformat
+
             self.log.debug(pformat(self.rename_map))
             self.log.debug(pformat(self.renamed_items_map))
 
             renamer = RenameFiles(self.rename_map, self.renamed_items_map)
             renamer(oeb, opts)
+
+
 # }}}

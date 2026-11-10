@@ -106,20 +106,27 @@ def _reroot(root, prefixes, namespaced):
     return new_root
 
 
-def parse(data, transport_encoding=None, maybe_xhtml=False,
+def parse(data=None, transport_encoding=None, maybe_xhtml=False,
           namespace_elements=False, keep_doctype=True, sanitize_names=True,
-          line_number_attr=None, return_root=True, **kwargs):
+          line_number_attr=None, return_root=True, fragment_context=None,
+          html=None, **kwargs):
     """Parse HTML/XHTML markup with the HTML5 algorithm into an lxml tree.
 
     :param data: markup, as ``str`` or ``bytes``.  Bytes are decoded using
         ``transport_encoding`` if given, otherwise a BOM or ``<meta>``
         declaration, falling back to UTF-8 (not windows-1252 as a browser
-        would; ebook content is overwhelmingly UTF-8).
+        would; ebook content is overwhelmingly UTF-8).  ``html=`` is accepted
+        as an alias, like ``html5-parser``.
     :param maybe_xhtml: when true (or ``namespace_elements`` is set) HTML
         elements are placed in the XHTML namespace, as ``html5-parser`` did.
+    :param fragment_context: parse ``data`` as a fragment inside this
+        element (e.g. ``'div'``); the result is a wrapper element of that
+        name containing the parsed nodes.
     :param return_root: return the ``<html>`` element (default) or the
         enclosing ``ElementTree``.
     """
+    if data is None:
+        data = html if html is not None else ''
     namespaced = bool(maybe_xhtml or namespace_elements)
     encodings = {}
     if isinstance(data, bytes):
@@ -128,6 +135,26 @@ def parse(data, transport_encoding=None, maybe_xhtml=False,
                          default_encoding='utf-8')
     with warnings.catch_warnings():
         warnings.simplefilter('ignore', DataLossWarning)
+        if fragment_context:
+            parser = html5lib.HTMLParser(
+                tree=html5lib.getTreeBuilder('lxml'),
+                namespaceHTMLElements=namespaced)
+            fragment = parser.parseFragment(data, container=fragment_context,
+                                            **encodings)
+            tag = ('{%s}%s' % (XHTML_NS, fragment_context) if namespaced
+                   else fragment_context)
+            root = etree.Element(tag, nsmap={None: XHTML_NS} if namespaced
+                                 else None)
+            # html5lib returns a document fragment: leading text, then nodes
+            text = getattr(fragment, 'text', None)
+            if text:
+                root.text = text
+            for child in list(fragment):
+                root.append(child)
+            prefixes = _collect_declarations(root)
+            _restore_names(root, prefixes)
+            root = _reroot(root, prefixes, namespaced)
+            return root if return_root else etree.ElementTree(root)
         tree = html5lib.parse(data, treebuilder='lxml',
                               namespaceHTMLElements=namespaced, **encodings)
     root = tree.getroot()

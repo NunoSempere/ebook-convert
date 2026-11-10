@@ -1,15 +1,21 @@
+# License: GPLv3 Copyright: 2008, Kovid Goyal kovid@kovidgoyal.net
+
 """
 Conversion to EPUB.
 """
-from ebook_convert.utils.zipfile import ZipFile, ZIP_STORED
+
+from __future__ import annotations
+from typing import TYPE_CHECKING
+
+from ebook_convert.utils.zipfile import ZIP_STORED, ZipFile
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable, Iterator, Sequence
+
+    from css_parser.css import CSSStyleRule, CSSStyleSheet
 
 
-__license__ = 'GPL v3'
-__copyright__ = '2008, Kovid Goyal kovid@kovidgoyal.net'
-__docformat__ = 'restructuredtext en'
-
-
-def rules(stylesheets):
+def rules(stylesheets: Iterable[CSSStyleSheet]) -> Iterator[CSSStyleRule]:
     for s in stylesheets:
         if hasattr(s, 'cssText'):
             for r in s:
@@ -17,27 +23,29 @@ def rules(stylesheets):
                     yield r
 
 
-def simple_container_xml(opf_path, extra_entries=''):
-    return '''\
+def simple_container_xml(opf_path: str, extra_entries: str = '') -> str:
+    return f'''\
 <?xml version="1.0"?>
 <container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
    <rootfiles>
-      <rootfile full-path="{0}" media-type="application/oebps-package+xml"/>
+      <rootfile full-path="{opf_path}" media-type="application/oebps-package+xml"/>
       {extra_entries}
    </rootfiles>
 </container>
-    '''.format(opf_path, extra_entries=extra_entries)
-
-
-def initialize_container(path_to_container, opf_name='metadata.opf',
-        extra_entries=[]):
     '''
+
+
+def initialize_container(
+    path_to_container: str, opf_name: str = 'metadata.opf', extra_entries: Sequence[tuple[str, str, bytes | str]] | None = None
+) -> ZipFile:
+    """
     Create an empty EPUB document, with a default skeleton.
-    '''
+    """
+    if extra_entries is None:
+        extra_entries = []
     rootfiles = ''
     for path, mimetype, _ in extra_entries:
-        rootfiles += '<rootfile full-path="{0}" media-type="{1}"/>'.format(
-                path, mimetype)
+        rootfiles += f'<rootfile full-path="{path}" media-type="{mimetype}"/>'
     CONTAINER = simple_container_xml(opf_name, rootfiles).encode('utf-8')
     zf = ZipFile(path_to_container, 'w')
     zf.writestr('mimetype', b'application/epub+zip', compression=ZIP_STORED)

@@ -1,15 +1,69 @@
-import importlib.resources
-import json
+#!/usr/bin/env python
+# License: GPLv3 Copyright: 2009, Kovid Goyal <kovid at kovidgoyal.net>
+
+from __future__ import annotations
+import io
+import locale
+import os
+import re
+from typing import TYPE_CHECKING, Any, NotRequired, TypedDict, overload
+
+from ebook_convert.utils.resources import get_path as P
+from ebook_convert.calibre_extensions.translator import Translator
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Iterable, Iterator
+
+    from ebook_convert.ebooks.unihandecode import Unihandecoder
+
+    class TranslatorsForLang(TypedDict):
+        translator: Translator
+        iso639_translator: Translator | None
+        iso3166_translator: Translator | None
+        lcdata: dict[str, Any] | None
+
+    ISO639Data = TypedDict(
+        'ISO639Data',
+        {
+            'by_2': dict[str, str],
+            'by_3': dict[str, str],
+            'by_3t': NotRequired[dict[str, str]],
+            'codes2': set[str],
+            'codes3': set[str],
+            '2to3': dict[str, str],
+            '3to2': dict[str, str],
+            'name_map': dict[str, str],
+        },
+    )
+
+    class ISO3166Data(TypedDict):
+        names: dict[str, str]
+        codes: set[str]
+        three_map: dict[str, str]
 
 
-default_envvars_for_langcode = ('LC_ALL', 'LC_CTYPE', 'LANG', 'LANGUAGE')
+_available_translations = None
 
 
-def getlangcode_from_envvars(envvars=default_envvars_for_langcode):
-    '''Language code from the environment, replacing the removed
-    locale.getdefaultlocale() (Calibre 2026)'''
-    import locale
-    import os
+def available_translations() -> list[str]:
+    global _available_translations
+    if _available_translations is None:
+        stats = P('localization/stats.calibre_msgpack', allow_user_override=False)
+        if os.path.exists(stats):
+            from ebook_convert.utils.serialize import msgpack_loads
+
+            with open(stats, 'rb') as f:
+                stats = msgpack_loads(f.read())
+        else:
+            stats = {}
+        _available_translations = [x for x in stats if stats[x] > 0.1]
+    return _available_translations
+
+
+default_envvars_for_langcode = ('LANGUAGE', 'LC_ALL', 'LC_CTYPE', 'LC_MESSAGES', 'LANG')
+
+
+def getlangcode_from_envvars(envvars: Iterable[str] = default_envvars_for_langcode) -> str | None:
     lookup = os.environ.get
     for k in envvars:
         localename = lookup(k)
@@ -19,65 +73,440 @@ def getlangcode_from_envvars(envvars=default_envvars_for_langcode):
             break
     else:
         localename = 'C'
-    parse = getattr(locale, '_parse_localename', None)
-    if parse is not None:
+    return getattr(locale, '_parse_localename')(localename)[0]
+
+
+def get_system_locale() -> str | None:
+    from ebook_convert.constants import ismacos, iswindows
+
+    lang = None
+    if iswindows:
         try:
-            return parse(localename)[0]
-        except ValueError:
-            pass
-    localename = localename.split('.')[0].split('@')[0]
-    return None if localename in ('C', 'POSIX', '') else localename
+            from ebook_convert.constants import get_windows_user_locale_name
+
+            lang = get_windows_user_locale_name()
+            lang = lang.strip()
+            if not lang:
+                lang = None
+        except Exception:
+            pass  # Windows XP does not have the GetUserDefaultLocaleName fn
+    elif ismacos:
+        from ebook_convert.calibre_extensions.usbobserver import user_locale
+
+        try:
+            lang = user_locale() or None
+        except Exception:
+            # Fallback to environment vars if something bad happened
+            import traceback
+
+            traceback.print_exc()
+    if lang is None:
+        try:
+            lang = getlangcode_from_envvars()
+
+            # lang is None in two cases: either the environment variable is not
+            # set or it's "C". Stop looking for a language in the latter case.
+            if lang is None:
+                for var in default_envvars_for_langcode:
+                    if os.environ.get(var) == 'C':
+                        lang = 'en_US'
+                        break
+        except Exception:
+            pass  # This happens on Ubuntu apparently
+        if lang is None and 'LANG' in os.environ:  # Needed for OS X
+            try:
+                lang = os.environ['LANG']
+            except Exception:
+                pass
+    if lang:
+        lang = lang.replace('-', '_')
+        lang = '_'.join(lang.split('_')[:2])
+    return lang
 
 
-def get_lang():
-    return 'en_US'
+def sanitize_lang(lang: str | None) -> str:
+    if lang:
+        # Split off the script modifier first so that the encoding can be
+        # discarded while the modifier is kept, turning a system locale such as
+        # sr_RS.UTF-8@latin into sr_RS@latin. The modifier distinguishes
+        # translations like sr@latin from sr, so it must survive.
+        base, sep, modifier = lang.partition('@')
+        match = re.match(r'[a-z]{2,3}(_[A-Z]{2}){0,1}', base.partition('.')[0])
+        if match:
+            lang = match.group()
+            if sep:
+                match = re.match(r'[A-Za-z]+', modifier)
+                if match:
+                    lang += '@' + match.group()
+    if lang == 'zh':
+        lang = 'zh_CN'
+    if not lang:
+        lang = 'en'
+    return lang
 
 
-def is_rtl():
+def get_lang() -> str:
+    "Try to figure out what language to display the interface in"
+    from ebook_convert.utils.config_base import prefs
+
+    lang = prefs['language']
+    lang = os.environ.get('CALIBRE_OVERRIDE_LANG', lang)
+    if lang:
+        return lang
+    try:
+        lang = get_system_locale()
+    except Exception:
+        import traceback
+
+        traceback.print_exc()
+        lang = None
+    return sanitize_lang(lang)
+
+
+def is_rtl() -> bool:
     return get_lang()[:2].lower() in {'he', 'ar'}
 
 
-lcdata = {'abday': ('Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'),
-          'abmon': ('Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug',
-                    'Sep', 'Oct', 'Nov', 'Dec'),
-          'd_fmt': '%m/%d/%Y',
-          'd_t_fmt': '%a %d %b %Y %r %Z',
-          'day': ('Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday',
-                  'Friday', 'Saturday'),
-          'mon': ('January', 'February', 'March', 'April', 'May', 'June',
-                  'July', 'August', 'September', 'October', 'November',
-                  'December'),
-          'noexpr': '^[nN].*',
-          'radixchar': '.',
-          't_fmt': '%r',
-          't_fmt_ampm': '%I:%M:%S %p',
-          'thousep': ',',
-          'yesexpr': '^[yY].*'}
+def locale_fallbacks(lang: str) -> list[str]:
+    """Locale names to look for translation data under, most specific first.
 
+    A script modifier (the ``@latin`` in ``sr@latin``) identifies a different
+    writing system, so it is more significant than a country code: ``sr_RS@latin``
+    prefers ``sr@latin`` over ``sr_RS``.
+    """
+    base, sep, modifier = lang.partition('@')
+    modifier = '@' + modifier if sep and modifier else ''
+    primary = base.partition('_')[0].lower()
+    ans = []
+    for candidate in (lang, primary + modifier, base, primary):
+        if candidate and candidate not in ans:
+            ans.append(candidate)
+    return ans
+
+
+# The gettext locale modifiers that name a writing system rather than some
+# other variation such as a currency or a collation order.
+_script_modifiers = {'latin': 'Latn', 'latn': 'Latn', 'cyrillic': 'Cyrl', 'cyrl': 'Cyrl'}
+
+
+def bcp47_locale_name(lang: str = '') -> str:
+    """Convert a calibre locale name into the form understood by Qt and ICU.
+
+    calibre follows gettext in marking a script variant with an @modifier, as in
+    ``sr@latin``. Both Qt and ICU truncate a locale name at the ``@``, so
+    ``sr@latin`` resolves to plain Serbian, which is written in Cyrillic. They
+    want the script as a subtag instead: ``sr_Latn``/``sr_Latn_RS``.
+    """
+    lang = lang or get_lang()
+    base, sep, modifier = lang.partition('@')
+    if not sep:
+        return lang
+    script = _script_modifiers.get(modifier.lower())
+    if script is None:
+        # Not a script variant, and passing the modifier on would be
+        # misinterpreted, so use the plain locale.
+        return base
+    parts = base.split('_')
+    parts.insert(1, script)
+    return '_'.join(parts)
+
+
+def get_lc_messages_path(lang: str) -> str | None:
+    if zf_exists():
+        available = available_translations()
+        for candidate in locale_fallbacks(lang):
+            if candidate in available:
+                return candidate
+    return None
+
+
+def zf_exists() -> bool:
+    return os.path.exists(P('localization/locales.zip', allow_user_override=False))
+
+
+_lang_trans = _country_trans = None
+
+
+def get_all_translators() -> Iterator[tuple[str, Translator]]:
+    from zipfile import ZipFile
+
+    with ZipFile(P('localization/locales.zip', allow_user_override=False), 'r') as zf:
+        for lang in available_translations():
+            mpath = get_lc_messages_path(lang)
+            if mpath is not None:
+                buf = zf.read(mpath + '/messages.mo')
+                yield lang, Translator(buf)
+
+
+def get_single_translator(mpath: str, which: str = 'messages') -> Translator:
+    from zipfile import ZipFile
+
+    with ZipFile(P('localization/locales.zip', allow_user_override=False), 'r') as zf:
+        path = f'{mpath}/{which}.mo'
+        data = zf.read(path)
+        buf = data
+        try:
+            return Translator(buf)
+        except Exception as e:
+            import traceback
+
+            traceback.print_exc()
+            import hashlib
+
+            sig = hashlib.sha1(data).hexdigest()
+            raise ValueError(f'Failed to load translations for: {path} (size: {len(data)} and signature: {sig}) with error: {e}')
+
+
+def get_iso639_translator(lang: str | None) -> Translator | None:
+    lang = sanitize_lang(lang)
+    mpath = get_lc_messages_path(lang) if lang else None
+    return get_single_translator(mpath, 'iso639') if mpath else None
+
+
+def get_translator(bcp_47_code: str) -> tuple[bool, str, Translator]:
+    parts = bcp_47_code.replace('-', '_').split('_')[:2]
+    parts[0] = lang_as_iso639_1(parts[0].lower()) or 'en'
+    if len(parts) > 1:
+        parts[1] = parts[1].upper()
+    lang = '_'.join(parts)
+    lang = {'pt': 'pt_BR', 'zh': 'zh_CN'}.get(lang, lang)
+    available = available_translations()
+    found = True
+    if lang == 'en' or lang.startswith('en_'):
+        return found, lang, Translator()
+    if lang not in available:
+        lang = {'pt': 'pt_BR', 'zh': 'zh_CN'}.get(parts[0], parts[0])
+        if lang not in available:
+            lang = get_lang()
+            if lang not in available:
+                lang = 'en'
+            found = False
+    if lang == 'en':
+        return True, lang, Translator()
+    return found, lang, get_single_translator(lang)
+
+
+lcdata = {
+    'abday': ('Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'),
+    'abmon': ('Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'),
+    'd_fmt': '%m/%d/%Y',
+    'd_t_fmt': '%a %d %b %Y %r %Z',
+    'day': ('Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'),
+    'mon': (
+        'January',
+        'February',
+        'March',
+        'April',
+        'May',
+        'June',
+        'July',
+        'August',
+        'September',
+        'October',
+        'November',
+        'December',
+    ),
+    'noexpr': '^[nN].*',
+    'radixchar': '.',
+    't_fmt': '%r',
+    't_fmt_ampm': '%I:%M:%S %p',
+    'thousep': ',',
+    'yesexpr': '^[yY].*',
+}
+
+
+def load_po(path: str) -> bytes | None:
+    from ebook_convert.translations.msgfmt import make
+
+    buf = io.BytesIO()
+    try:
+        make(path, buf)
+    except Exception:
+        print(f'Failed to compile translations file: {path}, ignoring')
+        return
+    return buf.getvalue()
+
+
+def translator_for_lang(lang: str) -> TranslatorsForLang:
+    buf = iso639_data = iso3166_data = lcdata = None
+    t: Translator | None = None
+    iso639: Translator | None = None
+    iso3166: Translator | None = None
+    if 'CALIBRE_TEST_TRANSLATION' in os.environ:
+        buf = load_po(os.path.expanduser(os.environ['CALIBRE_TEST_TRANSLATION']))
+
+    mpath = get_lc_messages_path(lang)
+    if buf is None and mpath and os.access(mpath + '.po', os.R_OK):
+        buf = load_po(mpath + '.po')
+
+    if mpath is not None:
+        from zipfile import ZipFile
+
+        with ZipFile(P('localization/locales.zip', allow_user_override=False), 'r') as zf:
+            if buf is None:
+                buf = zf.read(mpath + '/messages.mo')
+            if mpath == 'nds':
+                mpath = 'de'
+            isof = mpath + '/iso639.mo'
+            try:
+                iso639_data = zf.read(isof)
+            except Exception:
+                pass  # No iso639 translations for this lang
+            isof = mpath + '/iso3166.mo'
+            try:
+                iso3166_data = zf.read(isof)
+            except Exception:
+                pass  # No iso3166 translations for this lang
+            if buf is not None:
+                from ebook_convert.utils.serialize import msgpack_loads
+
+                try:
+                    lcdata = msgpack_loads(zf.read(mpath + '/lcdata.calibre_msgpack'))
+                except Exception:
+                    pass  # No lcdata
+
+    if buf is not None:
+        try:
+            t = Translator(buf)
+        except Exception:
+            import traceback
+
+            traceback.print_exc()
+            t = None
+        if iso639_data is not None:
+            try:
+                iso639 = Translator(iso639_data)
+            except Exception:
+                iso639 = None
+            else:
+                if t is not None:
+                    t.add_fallback(iso639)
+        if iso3166_data is not None:
+            try:
+                iso3166 = Translator(iso3166_data)
+            except Exception:
+                iso3166 = None
+            else:
+                if t is not None:
+                    t.add_fallback(iso3166)
+
+    if t is None:
+        t = Translator()
+
+    return {'translator': t, 'iso639_translator': iso639, 'iso3166_translator': iso3166, 'lcdata': lcdata}
+
+
+default_translator = Translator()
+
+
+def _(x: str) -> str:
+    return default_translator.gettext(x)
+
+
+def __(x: str) -> str:
+    return x
+
+
+def ngettext(singular: str, plural: str, n: int) -> str:
+    return default_translator.ngettext(singular, plural, n)
+
+
+def pgettext(context: str, msg: str) -> str:
+    return default_translator.pgettext(context, msg)
+
+
+class _SetTranslators:
+    lang: str | None = None
+
+    def __call__(self) -> None:
+        global _lang_trans, _country_trans, lcdata, default_translator
+        # To test different translations invoke as
+        # CALIBRE_OVERRIDE_LANG=de_DE.utf8 program
+        lang = get_lang()
+
+        if lang:
+            q = translator_for_lang(lang)
+            default_translator = q['translator']
+            _lang_trans = q['iso639_translator']
+            _country_trans = q['iso3166_translator']
+            if q['lcdata']:
+                lcdata = q['lcdata']
+        else:
+            default_translator = Translator()
+        try:
+            self.lang = default_translator.info().get('language')
+        except Exception:
+            pass
+        default_translator.install(names=('ngettext',))
+        # Now that we have installed a translator, we have to retranslate the help
+        # for the global prefs object as it was instantiated in get_lang(), before
+        # the translator was installed.
+        from ebook_convert.utils.config_base import prefs
+
+        prefs.retranslate_help()
+
+
+set_translators = _SetTranslators()
 
 _iso639 = None
+_extra_lang_codes = {
+    'pt_BR': _('Brazilian Portuguese'),
+    'zh_CN': _('Simplified Chinese'),
+    'zh_TW': _('Traditional Chinese'),
+    'bn_IN': _('Indian Bengali'),
+    'bn_BD': _('Bangladeshi Bengali'),
+    'sr@latin': _('Serbian (Latin)'),
+    'en': _('English'),
+    'und': _('Unknown'),
+}
+
+if False:
+    # Extra strings needed for Qt
+
+    # NOTE: Ante Meridian (i.e. like 10:00 AM)
+    _('AM')
+    # NOTE: Post Meridian (i.e. like 10:00 PM)
+    _('PM')
+    # NOTE: Ante Meridian (i.e. like 10:00 am)
+    _('am')
+    # NOTE: Post Meridian (i.e. like 10:00 pm)
+    _('pm')
+    _('&Copy')
+    _('Select All')
+    _('Copy Link')
+    _('&Select All')
+    _('Copy &Link Location')
+    _('&Undo')
+    _('&Redo')
+    _('Cu&t')
+    _('&Paste')
+    _('Paste and Match Style')
+    _('Directions')
+    _('Left to Right')
+    _('Right to Left')
+    _('Fonts')
+    _('&Step up')
+    _('Step &down')
+    _('Close without Saving')
+    _('Close Tab')
+    _('Ukraine')
+
+_lcase_map = {}
+for k in _extra_lang_codes:
+    _lcase_map[k.lower()] = k
 
 
-def _load_iso639():
+def _load_iso639() -> ISO639Data:
+    # ebook-convert: built from the iso-codes JSON shipped in data/, the same
+    # way calibre's setup/translations.py builds iso639.calibre_msgpack
     global _iso639
-    # NOTE(gryf): msgpacked data was originally added for speed purposes. In
-    # my tests, I cannot see any speed gain either on python2 or python3. It
-    # is even slower (around 4-8 times), than just using code below (which is
-    # excerpt form Calibre transform code which is executed during Calibre
-    # build).
     if _iso639 is None:
-        with open(importlib.resources.files('ebook_convert') /
-                  'data/iso_639-3.json', 'rb') as f:
-            root = json.load(f)
+        import json
 
-        entries = root['639-3']
-        by_2 = {}
-        by_3 = {}
-        m2to3 = {}
-        m3to2 = {}
-        nm = {}
+        root = json.loads(P('iso_639-3.json', allow_user_override=False, data=True))
+        by_2, by_3, m2to3, m3to2, nm = {}, {}, {}, {}, {}
         codes2, codes3 = set(), set()
-        for x in entries:
+        for x in root['639-3']:
             two = x.get('alpha_2')
             threeb = x.get('alpha_3')
             if threeb is None:
@@ -85,7 +514,6 @@ def _load_iso639():
             name = x.get('inverted_name') or x.get('name')
             if not name or name[0] in '!~=/\'"':
                 continue
-
             if two is not None:
                 by_2[two] = name
                 codes2.add(two)
@@ -93,30 +521,87 @@ def _load_iso639():
                 m3to2[threeb] = two
             codes3.add(threeb)
             by_3[threeb] = name
-            base_name = name.lower()
-            nm[base_name] = threeb
-
-        _iso639 = {'by_2': by_2,
-                   'by_3': by_3,
-                   'codes2': codes2,
-                   'codes3': codes3,
-                   '2to3': m2to3,
-                   '3to2': m3to2,
-                   'name_map': nm}
-
+            nm[name.lower()] = threeb
+        _iso639 = {'by_2': by_2, 'by_3': by_3, 'codes2': codes2, 'codes3': codes3, '2to3': m2to3, '3to2': m3to2, 'name_map': nm}
     return _iso639
 
 
-def langcode_to_name(lc, localize=True):
+_iso3166_cache = None
+
+
+def load_iso3166() -> ISO3166Data:
+    global _iso3166_cache
+    if _iso3166_cache is None:
+        # ebook-convert: no country code data is bundled
+        _iso3166_cache = {'names': {}, 'codes': frozenset(), 'three_map': {}}
+    return _iso3166_cache
+
+
+def get_iso_language(lang_trans: Callable[[str], str], lang: str) -> str:
     iso639 = _load_iso639()
+    ans = lang
+    lang = lang.split('_')[0].lower()  # ruff: ignore[missing-maxsplit-arg]
+    if len(lang) == 2:
+        ans = iso639['by_2'].get(lang, ans)
+    elif len(lang) == 3:
+        if lang in iso639['by_3']:
+            ans = iso639['by_3'][lang]
+    return lang_trans(ans)
+
+
+def get_language(lang: str, gettext_func: Callable[[str], str] | None = None) -> str:
+    translate = gettext_func or _
+    lang = _lcase_map.get(lang, lang)
+    if lang in _extra_lang_codes:
+        # The translator was not active when _extra_lang_codes was defined, so
+        # re-translate
+        return translate(_extra_lang_codes[lang])
+    if gettext_func is None:
+        gettext_func = getattr(_lang_trans, 'gettext', translate)
+    return get_iso_language(gettext_func, lang)
+
+
+@overload
+def calibre_langcode_to_name(lc: str, localize: bool = True) -> str: ...
+@overload
+def calibre_langcode_to_name(lc: None, localize: bool = True) -> None: ...
+@overload
+def calibre_langcode_to_name(lc: str | None, localize: bool = True) -> str | None: ...
+def calibre_langcode_to_name(lc: str | None, localize: bool = True) -> str | None:
+    iso639 = _load_iso639()
+    translate = _ if localize else lambda x: x
     try:
-        return iso639['by_3'][lc]
+        if lc is not None:
+            return translate(iso639['by_3'][lc])
     except Exception:
         pass
     return lc
 
 
-def canonicalize_lang(raw):
+def ui_language_as_english() -> str:
+    return calibre_langcode_to_name(canonicalize_lang(get_lang()) or 'eng', localize=False) or 'English'
+
+
+def countrycode_to_name(cc: str, localize: bool = True) -> str:
+    iso3166 = load_iso3166()
+    q = cc.upper()
+    if len(q) == 3:
+        q = iso3166['three_map'].get(q, q)
+    try:
+        name = iso3166['names'][q]
+    except Exception:
+        if q == 'UK':
+            name = 'Ukraine'
+        else:
+            return cc
+    translate = _ if localize else lambda x: x
+    try:
+        return translate(name)
+    except Exception:
+        return name
+
+
+def canonicalize_lang(raw: str | bytes | None) -> str | None:
     if not raw:
         return None
     if not isinstance(raw, str):
@@ -141,53 +626,171 @@ def canonicalize_lang(raw):
     return iso639['name_map'].get(raw, None)
 
 
-def lang_as_iso639_1(name_or_code):
+_lang_map = None
+
+
+def lang_map() -> dict[str, str]:
+    "Return mapping of ISO 639 3 letter codes to localized language names"
+    iso639 = _load_iso639()
+    translate = _
+    global _lang_map
+    if _lang_map is None:
+        _lang_map = {k: translate(v) for k, v in iso639['by_3'].items()}
+    return _lang_map
+
+
+_lang_map_for_ui_cache: dict | None = None
+_reverse_lang_map_for_ui_cache: dict | None = None
+
+
+def lang_map_for_ui() -> dict[str, str]:
+    global _lang_map_for_ui_cache
+    if _lang_map_for_ui_cache is None:
+        ans = lang_map().copy()
+        for x in ('zxx', 'mis', 'mul'):
+            ans.pop(x, None)
+        _lang_map_for_ui_cache = ans
+    return _lang_map_for_ui_cache
+
+
+def reverse_lang_map_for_ui() -> dict[str, str]:
+    global _reverse_lang_map_for_ui_cache
+    if _reverse_lang_map_for_ui_cache is None:
+        _reverse_lang_map_for_ui_cache = {v: k for k, v in lang_map_for_ui().items()}
+    return _reverse_lang_map_for_ui_cache
+
+
+def langnames_to_langcodes(names: Iterable[str]) -> dict[str, str | None]:
+    """
+    Given a list of localized language names return a mapping of the names to 3
+    letter ISO 639 language codes. If a name is not recognized, it is mapped to
+    None.
+    """
+    iso639 = _load_iso639()
+    translate = _
+    ans = {}
+    names = set(names)
+    for k, v in iso639['by_3'].items():
+        tv = translate(v)
+        if tv in names:
+            names.remove(tv)
+            ans[tv] = k
+        if not names:
+            break
+    for x in names:
+        ans[x] = None
+
+    return ans
+
+
+def lang_as_iso639_1(name_or_code: str | bytes | None) -> str | None:
     code = canonicalize_lang(name_or_code)
     if code is not None:
         iso639 = _load_iso639()
         return iso639['3to2'].get(code, None)
 
 
-def lang_as_bcp47(raw):
+def lang_as_bcp47(raw: str) -> str | None:
     # Convert a language as found in book metadata to a BCP 47 language tag,
     # for use in lang attributes. Returns None for languages that are not
     # actual languages, such as und.
-    if not raw:
-        return None
-    if isinstance(raw, bytes):
-        raw = raw.decode('utf-8', 'ignore')
     primary, *subtags = raw.strip().replace('_', '-').split('-')
-    # canonicalize_lang() also accepts language names, which are not valid in
-    # tags
-    code = (canonicalize_lang(primary)
-            if primary.isalpha() and len(primary) in (2, 3) else None)
+    # canonicalize_lang() also accepts language names, which are not valid in tags
+    code = canonicalize_lang(primary) if primary.isalpha() and len(primary) in (2, 3) else None
     if code and code not in ('und', 'mul', 'zxx'):
-        # Three letter codes that have a two letter equivalent are not valid
-        # language tags
+        # Three letter codes that have a two letter equivalent are not valid language tags
         return '-'.join([lang_as_iso639_1(code) or code, *subtags])
     return None
-
-
-def is_rtl_lang(lang):
-    """True if ``lang`` (a language code or name, optionally with a region)
-    is written right-to-left."""
-    lang = canonicalize_lang(lang)
-    # Arabic, Hebrew, Azeri, Dhivehi, Aramaic (arc/syc/myz), Sorani, Urdu,
-    # Farsi, Yiddish
-    return bool(lang and lang in ('ara', 'heb', 'aze', 'div', 'arc', 'syc',
-                                  'myz', 'ckb', 'urd', 'fas', 'yid'))
 
 
 _udc = None
 
 
-def get_udc():
+def get_udc() -> Unihandecoder:
     global _udc
     if _udc is None:
         from ebook_convert.ebooks.unihandecode import Unihandecoder
-        _udc = Unihandecoder(lang=get_lang())
+        from ebook_convert.utils.config_base import tweaks
+
+        lang = tweaks.get('east_asian_base_language', '')
+        lang = lang if lang in ('ja', 'kr', 'vn', 'zh') else get_lang()
+        _udc = Unihandecoder(lang=lang)
     return _udc
 
 
-def localize_user_manual_link(url):
-    return url
+_user_manual_stats_cache: dict | None = None
+
+
+def user_manual_stats() -> dict[str, float]:
+    global _user_manual_stats_cache
+    if _user_manual_stats_cache is None:
+        import json
+
+        try:
+            _user_manual_stats_cache = json.loads(P('user-manual-translation-stats.json', allow_user_override=False, data=True))
+        except OSError:
+            _user_manual_stats_cache = {}
+    return _user_manual_stats_cache
+
+
+def lang_code_for_user_manual() -> str | None:
+    lc = lang_as_iso639_1(get_lang())
+    if lc == 'en':
+        return ''
+    stats = user_manual_stats()
+    if stats.get(lc, 0) < 0.3:
+        return ''
+    return lc
+
+
+def localize_user_manual_link(url: str) -> str:
+    lc = lang_code_for_user_manual()
+    if not lc:
+        return url
+    from urllib.parse import urlparse, urlunparse
+
+    parts = urlparse(url)
+    path = re.sub(r'/generated/[a-z]+/', f'/generated/{lc}/', parts.path or '')
+    path = f'/{lc}{path}'
+    parts = list(parts)
+    parts[2] = path
+    return urlunparse(parts)
+
+
+_website_languages_cache: frozenset | None = None
+
+
+def website_languages() -> frozenset[str]:
+    global _website_languages_cache
+    if _website_languages_cache is None:
+        try:
+            _website_languages_cache = frozenset(P('localization/website-languages.txt', allow_user_override=False, data=True).decode('utf-8').split())
+        except OSError:
+            _website_languages_cache = frozenset()
+    return _website_languages_cache
+
+
+def localize_website_link(url: str) -> str:
+    lc = lang_as_iso639_1(get_lang())
+    langs = website_languages()
+    if lc == 'en' or lc not in langs:
+        return url
+    from urllib.parse import urlparse, urlunparse
+
+    parts = urlparse(url)
+    path = f'/{lc}{parts.path}'
+    parts = list(parts)
+    parts[2] = path
+    return urlunparse(parts)
+
+
+def is_rtl_lang(lang: str | bytes | None) -> bool | str | None:
+    lang = canonicalize_lang(lang)
+    # Aramaic, Arabic, Azeri, Hebrew, Dhivehi, Sorani, Urdu, Farsi
+    return lang and lang in ('ara', 'heb', 'aze', 'div', 'arc', 'syc', 'myz', 'ckb', 'urd', 'fas')
+
+
+def install_qt_translator() -> None:
+    from ebook_convert.calibre_extensions.progress_indicator import install_qt_translator as install
+
+    install(default_translator.set_as_qt_translator())

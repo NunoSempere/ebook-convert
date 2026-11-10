@@ -22,7 +22,7 @@ from PIL import ImageChops, ImageFilter, ImageOps
 
 from ebook_convert.ptempfile import TemporaryDirectory
 from ebook_convert.utils.config_base import tweaks
-from ebook_convert.utils import encoding as uenc
+from ebook_convert import force_unicode
 from ebook_convert.utils.filenames import atomic_rename
 from ebook_convert.utils.imghdr import what
 
@@ -39,9 +39,6 @@ def fit_image(width, height, pwidth, pheight):
     @return: scaled, new_width, new_height. scaled is True iff new_width
              and/or new_height is different from width or height.
     """
-    if height < 1 or width < 1:
-        # zero sized images cannot be scaled
-        return False, int(width), int(height)
     scaled = height > pheight or width > pwidth
     if height > pheight:
         corrf = pheight / float(height)
@@ -196,12 +193,7 @@ class AnimatedGIF(ValueError):
 
 def gif_data_to_png_data(data, discard_animation=False):
     img = PILImage.open(BytesIO(data))
-    try:
-        # Calibre 1a87b70c12: PIL can raise when checking this
-        is_animated = img.is_animated
-    except Exception:
-        is_animated = False
-    if is_animated and not discard_animation:
+    if getattr(img, 'is_animated', False) and not discard_animation:
         raise AnimatedGIF()
     buf = BytesIO()
     img.save(buf, 'png')
@@ -382,12 +374,8 @@ def save_cover_data_to(
         changed = True
         img = img.scaled(resize_to[0], resize_to[1])
     owidth, oheight = img.width(), img.height()
-    if minify_to is None:
-        nwidth, nheight = tweaks['maximum_cover_size']
-        # Calibre 34743e4807: never minify to an empty image
-        nwidth, nheight = max(1, nwidth), max(1, nheight)
-    else:
-        nwidth, nheight = minify_to
+    nwidth, nheight = (tweaks['maximum_cover_size'] if minify_to is None
+                       else minify_to)
     if letterbox:
         img = blend_on_canvas(img, nwidth, nheight, bgcolor='#000000')
         # Check if we were minified
@@ -752,7 +740,7 @@ def run_optimizer(file_path, cmd, as_filter=False, input_data=None):
                           args=(p.stdout, outf))
             outw.daemon = True
             outw.start()
-        raw = uenc.force_unicode(stderr.read())
+        raw = force_unicode(stderr.read())
         if p.wait() != 0:
             return raw
         else:
@@ -806,4 +794,133 @@ def encode_jpeg(file_path, quality=80):
     ppm = image_to_data(img, fmt='PPM')
     return run_optimizer(file_path, cmd, as_filter=True,
                          input_data=BytesIO(ppm))
+# }}}
+
+
+# WebP, alt text (added for current Calibre; pure Pillow/lxml) {{{
+def set_image_allocation_limit(size_in_mb=1024):
+    ''' Qt limits image memory; Pillow uses a pixel count limit instead. '''
+    PILImage.MAX_IMAGE_PIXELS = max(PILImage.MAX_IMAGE_PIXELS or 0, int(size_in_mb) * 1024 * 1024 // 4)
+
+
+def run_cwebp(file_path, lossless, q, m, metadata):
+    exe = get_exe_path('cwebp')
+    q = max(0, min(q, 100))
+    m = max(0, min(m, 6))
+    cmd = [exe] + '-mt -metadata {} -q {} -m {} -o'.format(metadata, q, m).split() + [False, True]
+    if lossless:
+        cmd.insert(1, '-lossless')
+    return run_optimizer(file_path, cmd)
+
+
+def _pillow_webp(file_path, lossless, quality):
+    ''' Fallback used when cwebp is not installed: re-encode with Pillow. '''
+    try:
+        img = image_from_path(file_path)
+        data = image_to_data(img, fmt='WEBP', compression_quality=quality)
+        if lossless:
+            buf = BytesIO()
+            _prepare_for_save(img.pil, 'WEBP').save(buf, 'WEBP', lossless=True)
+            data = buf.getvalue()
+        with open(file_path, 'wb') as f:
+            f.write(data)
+    except Exception as e:
+        return str(e)
+
+
+def optimize_webp(file_path, q=100, m=6, metadata='all'):
+    "metadata can be a comma separated list of all, none, exif, icc, xmp"
+    ret = run_cwebp(file_path, True, q, m, metadata)
+    if ret is not None and 'not found' in ret.lower():
+        return _pillow_webp(file_path, True, q)
+    return ret
+
+
+def encode_webp(file_path, quality=75, m=6, metadata='all'):
+    ret = run_cwebp(file_path, False, quality, m, metadata)
+    if ret is not None and 'not found' in ret.lower():
+        return _pillow_webp(file_path, False, quality)
+    return ret
+
+
+def read_xmp_from_pil_image(im):
+    fmt = (im.format or '').lower()
+    xml = ''
+    if fmt == 'jpeg':
+        for segment, content in getattr(im, 'applist', ()):
+            if segment == 'APP1':
+                marker, xmp_tags = content.split(b'\x00')[:2]
+                if marker == b'http://ns.adobe.com/xap/1.0/':
+                    xml = xmp_tags
+                    break
+    elif fmt == 'png':
+        xml = im.info.get('XML:com.adobe.xmp', '')
+    elif fmt == 'webp':
+        xml = im.info.get('xmp', '')
+    elif fmt == 'tiff':
+        xml = im.tag_v2.get(700, '')
+    return xml
+
+
+def read_text_from_container(container, target_lang=''):
+    lang_map = {}
+    for li in container.xpath('descendant::*[local-name()="li"]'):
+        if li.text:
+            lang = li.attrib.get('{http://www.w3.org/XML/1998/namespace}lang', 'x-default')
+            lang_map[lang] = li.text
+    if not target_lang and 'x-default' in lang_map:
+        return lang_map['x-default']
+    if target_lang in lang_map:
+        return lang_map[target_lang]
+    from ebook_convert.utils.localization import canonicalize_lang
+
+    target_lang = canonicalize_lang(target_lang)
+    if target_lang:
+        for lang, ans in lang_map.items():
+            if canonicalize_lang(lang) == target_lang:
+                return ans
+    return lang_map.get('x-default', '')
+
+
+def read_alt_text_from_xmp(xmp, target_lang=''):
+    from lxml import etree
+
+    from ebook_convert.utils.xml_parse import safe_xml_fromstring
+
+    try:
+        root = safe_xml_fromstring(xmp)
+    except Exception:
+        return ''
+    for a in root.xpath('//*[local-name()="AltTextAccessibility"]'):
+        ans = read_text_from_container(a, target_lang)
+        if ans:
+            return ans
+    for d in etree.XPath('//dc:description', namespaces={'dc': 'http://purl.org/dc/elements/1.1/'})(root):
+        ans = read_text_from_container(d, target_lang)
+        if ans:
+            return ans
+    return ''
+
+
+def read_alt_text(pil_im_or_path, target_lang=''):
+    if isinstance(pil_im_or_path, str):
+        im = PILImage.open(pil_im_or_path)
+    elif isinstance(pil_im_or_path, Image):
+        im = pil_im_or_path.pil
+    else:
+        im = pil_im_or_path
+    xmp = read_xmp_from_pil_image(im)
+    if xmp:
+        alt = read_alt_text_from_xmp(xmp, target_lang).strip()
+        if alt:
+            return alt
+    try:
+        exif = im.getexif()
+    except Exception:
+        exif = None
+    if exif:
+        desc = exif.get(270)
+        if desc:
+            return str(desc).strip()
+    return ''
 # }}}

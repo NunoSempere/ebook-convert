@@ -1,133 +1,147 @@
+# License: GPLv3 Copyright: 2009, John Schember <john@nachtimwald.com>
+
+from __future__ import annotations
 import os
+from typing import IO, TYPE_CHECKING, cast
 
-from ebook_convert.customize.conversion import InputFormatPlugin
-from ebook_convert.customize.conversion import OptionRecommendation
-from ebook_convert.utils import entities
+from ebook_convert import walk, xml_replace_entities
+from ebook_convert.customize.conversion import InputFormatPlugin, OptionRecommendation
+from ebook_convert.ebooks.conversion.plugins.archive_input import archive_file_data
+from ebook_convert.utils.localization import _
 
+if TYPE_CHECKING:
+    import unittest
+    from optparse import Values
+
+    from ebook_convert.ebooks.oeb.base import OEBBook
+    from ebook_convert.utils.logging import Log
 
 MD_EXTENSIONS = {
-    'abbr': 'Abbreviations',
-    'admonition': 'Support admonitions',
-    'attr_list': 'Add attribute to HTML tags',
-    'codehilite': 'Add code highlighting via Pygments',
-    'def_list': 'Definition lists',
-    'extra': 'Enables various common extensions',
-    'fenced_code': 'Alternative code block syntax',
-    'footnotes': 'Footnotes',
-    'legacy_attrs': 'Use legacy element attributes',
-    'legacy_em': 'Use legacy underscore handling for connected words',
-    'meta': 'Metadata in the document',
-    'nl2br': 'Treat newlines as hard breaks',
-    'sane_lists': 'Do not allow mixing list types',
-    'smarty': 'Use markdown\'s internal smartypants parser',
-    'tables': 'Support tables',
-    'toc': 'Generate a table of contents',
-    'wikilinks': 'Wiki style links',
+    'abbr': _('Abbreviations'),
+    'admonition': _('Support admonitions'),
+    'attr_list': _('Add attribute to HTML tags'),
+    'codehilite': _('Add code highlighting via Pygments'),
+    'def_list': _('Definition lists'),
+    'extra': _('Enables various common extensions'),
+    'fenced_code': _('Alternative code block syntax'),
+    'footnotes': _('Footnotes'),
+    'legacy_attrs': _('Use legacy element attributes'),
+    'legacy_em': _('Use legacy underscore handling for connected words'),
+    'meta': _('Metadata in the document'),
+    'nl2br': _('Treat newlines as hard breaks'),
+    'sane_lists': _('Do not allow mixing list types'),
+    'smarty': _("Use Markdown's internal smartypants parser"),
+    'tables': _('Support tables'),
+    'toc': _('Generate a table of contents'),
+    'wikilinks': _('Wiki style links'),
 }
-
 
 TXTZ_FORMATTING_FOR_EXTENSION = {'md': 'markdown', 'markdown': 'markdown', 'textile': 'textile'}
 
 
-def txtz_file_ext(path):
+def txtz_file_ext(path: str) -> str:
     return os.path.splitext(path)[1].lower().lstrip('.')
 
 
-def txtz_formatting_for_extension(file_ext):
+def txtz_formatting_for_extension(file_ext: str) -> str | None:
     return TXTZ_FORMATTING_FOR_EXTENSION.get(file_ext.lower().lstrip('.'))
 
 
 class TXTInput(InputFormatPlugin):
-
-    name        = 'TXT Input'
-    author      = 'John Schember'
-    description = 'Convert TXT files to HTML'
-    file_types  = {'txt', 'txtz', 'text', 'md', 'textile', 'markdown'}
+    name = 'TXT Input'
+    author = 'John Schember'
+    description = _('Convert TXT files to HTML')
+    file_types = {'txt', 'txtz', 'text', 'md', 'textile', 'markdown'}
     commit_name = 'txt_input'
     ui_data = {
         'md_extensions': MD_EXTENSIONS,
         'paragraph_types': {
-            'auto': 'Try to auto detect paragraph type',
-            'block': 'Treat a blank line as a paragraph break',
-            'single': 'Assume every line is a paragraph',
-            'print': 'Assume every line starting with 2+ spaces or a tab '
-                     'starts a paragraph',
-            'unformatted': 'Most lines have hard line breaks, few/no blank '
-                           'lines or indents',
-            'off': 'Don\'t modify the paragraph structure',
+            'auto': _('Try to auto detect paragraph type'),
+            'block': _('Treat a blank line as a paragraph break'),
+            'single': _('Assume every line is a paragraph'),
+            'print': _('Assume every line starting with 2+ spaces or a tab starts a paragraph'),
+            'unformatted': _('Most lines have hard line breaks, few/no blank lines or indents'),
+            'off': _("Don't modify the paragraph structure"),
         },
         'formatting_types': {
-            'auto': 'Automatically decide which formatting processor to use',
-            'plain': 'No formatting',
-            'heuristic': 'Use heuristics to determine chapter headings, '
-                         'italics, etc.',
-            'textile': 'Use the TexTile markup language',
-            'markdown': 'Use the Markdown markup language'
+            'auto': _('Automatically decide which formatting processor to use'),
+            'plain': _('No formatting'),
+            'heuristic': _('Use heuristics to determine chapter headings, italics, etc.'),
+            'textile': _('Use the Textile markup language'),
+            'markdown': _('Use the Markdown markup language'),
         },
     }
 
     options = {
-        OptionRecommendation(name='formatting_type', recommended_value='auto',
+        OptionRecommendation(
+            name='formatting_type',
+            recommended_value='auto',
             choices=list(ui_data['formatting_types']),
-            help='Formatting used within the document.\n'
-                 '* auto: {auto}\n'
-                 '* plain: {plain}\n'
-                 '* heuristic: {heuristic}\n'
-                 '* textile: {textile}\n'
-                 '* markdown: {markdown}\n'
-                 'To learn more about markdown see '
-                 '{url}'.format(url='https://daringfireball.net/projects/'
-                                    'markdown/',
-                                **ui_data['formatting_types'])
+            help=_(
+                'Formatting used within the document.\n'
+                '* auto: {auto}\n'
+                '* plain: {plain}\n'
+                '* heuristic: {heuristic}\n'
+                '* textile: {textile}\n'
+                '* markdown: {markdown}\n'
+                'To learn more about Markdown see {url}'
+            ).format(url='https://daringfireball.net/projects/markdown/', **ui_data['formatting_types']),
         ),
-        OptionRecommendation(name='paragraph_type', recommended_value='auto',
+        OptionRecommendation(
+            name='paragraph_type',
+            recommended_value='auto',
             choices=list(ui_data['paragraph_types']),
-            help='Paragraph structure to assume. The value of "off" is useful '
-                 'for formatted documents such as Markdown or Textile. '
-                 'Choices are:\n'
-                 '* auto: {auto}\n'
-                 '* block: {block}\n'
-                 '* single: {single}\n'
-                 '* print:  {print}\n'
-                 '* unformatted: {unformatted}\n'
-                 '* off: {off}'.format(**ui_data['paragraph_types'])
+            help=_(
+                'Paragraph structure to assume. The value of "off" is useful for formatted documents such as Markdown or Textile. '
+                'Choices are:\n'
+                '* auto: {auto}\n'
+                '* block: {block}\n'
+                '* single: {single}\n'
+                '* print:  {print}\n'
+                '* unformatted: {unformatted}\n'
+                '* off: {off}'
+            ).format(**ui_data['paragraph_types']),
         ),
-        OptionRecommendation(name='preserve_spaces', recommended_value=False,
-            help='Normally extra spaces are condensed into a single space. '
-                 'With this option all spaces will be displayed.'),
-        OptionRecommendation(name='txt_in_remove_indents', recommended_value=False,
-            help='Normally extra space at the beginning of lines is retained. '
-                 'With this option they will be removed.'),
-        OptionRecommendation(name="markdown_extensions",
+        OptionRecommendation(
+            name='preserve_spaces',
+            recommended_value=False,
+            help=_('Normally extra spaces are condensed into a single space. With this option all spaces will be displayed.'),
+        ),
+        OptionRecommendation(
+            name='txt_in_remove_indents',
+            recommended_value=False,
+            help=_('Normally extra space at the beginning of lines is retained. With this option they will be removed.'),
+        ),
+        OptionRecommendation(
+            name='markdown_extensions',
             recommended_value='footnotes, tables, toc',
-            help='Enable extensions to markdown syntax. Extensions are '
-                 'formatting that is not part of the standard markdown '
-                 'format. The extensions enabled by default: %default.\nTo '
-                 'learn more about markdown extensions, see {}\nThis should '
-                 'be a comma separated list of extensions to enable:'
-                 '\n'.format('https://python-markdown.github.io/extensions/') +
-                             '\n'.join('* %s: %s' % (k, MD_EXTENSIONS[k])
-                                       for k in sorted(MD_EXTENSIONS))),
+            help=_(
+                'Enable extensions to Markdown syntax. Extensions are formatting that is not part '
+                'of the standard Markdown format. The extensions enabled by default: %default.\n'
+                'To learn more about Markdown extensions, see {}\n'
+                'This should be a comma separated list of extensions to enable:\n'
+            ).format('https://python-markdown.github.io/extensions/')
+            + '\n'.join(f'* {k}: {MD_EXTENSIONS[k]}' for k in sorted(MD_EXTENSIONS)),
+        ),
     }
 
-    def shift_file(self, fname, data):
+    def shift_file(self, fname: str, data: bytes) -> str:
         name, ext = os.path.splitext(fname)
         candidate = os.path.join(self.output_dir, fname)
         c = 0
         while os.path.exists(candidate):
             c += 1
-            candidate = os.path.join(self.output_dir, '{}-{}{}'.format(name, c, ext))
+            candidate = os.path.join(self.output_dir, f'{name}-{c}{ext}')
         ans = candidate
         with open(ans, 'wb') as f:
             f.write(data)
         return f.name
 
-    def fix_resources(self, html, base_dir):
-        from ebook_convert.utils.html5 import parse
+    def fix_resources(self, html: str, base_dir: str) -> str:
+        from ebook_convert.html5_parser import parse
+
         root = parse(html)
         changed = False
-        # Calibre 9efcc37f16/c43f347837/71547e8a11: only pick up images that
-        # live inside the book's own directory.
         base_dir = os.path.normcase(os.path.abspath(base_dir)) + os.sep
         for img in root.xpath('//img[@src]'):
             src = img.get('src')
@@ -142,20 +156,28 @@ class TXTInput(InputFormatPlugin):
                     img.set('src', os.path.basename(f))
         if changed:
             from lxml import etree
+
             html = etree.tostring(root, encoding='unicode')
         return html
 
-    def convert(self, stream, options, file_ext, log,
-                accelerators):
-        from ebook_convert.ebooks.conversion.preprocess import DocAnalysis, Dehyphenator
+    def convert(self, stream: IO[bytes], options: Values, file_ext: str, log: Log, accelerators: dict[str, str]) -> OEBBook:
         from ebook_convert.ebooks.chardet import detect
+        from ebook_convert.ebooks.conversion.preprocess import Dehyphenator, DocAnalysis
+        from ebook_convert.ebooks.txt.processor import (
+            block_to_single_line,
+            convert_basic,
+            convert_markdown_with_metadata,
+            convert_textile,
+            detect_formatting_type,
+            detect_paragraph_type,
+            normalize_line_endings,
+            preserve_spaces,
+            remove_indents,
+            separate_hard_scene_breaks,
+            separate_paragraphs_print_formatted,
+            separate_paragraphs_single_line,
+        )
         from ebook_convert.utils.zipfile import ZipFile
-        from ebook_convert.ebooks.txt.processor import (convert_basic,
-                convert_markdown_with_metadata, separate_paragraphs_single_line,
-                separate_paragraphs_print_formatted, preserve_spaces,
-                detect_paragraph_type, detect_formatting_type,
-                normalize_line_endings, convert_textile, remove_indents,
-                block_to_single_line, separate_hard_scene_breaks)
 
         self.log = log
         txt = b''
@@ -163,29 +185,23 @@ class TXTInput(InputFormatPlugin):
         length = 0
         base_dir = self.output_dir = os.getcwd()
         cover_path = None
-        # file_ext may be changed to that of the text inside a TXTZ, keep
-        # the container's extension for the metadata reader
-        container_ext = file_ext
 
         # Extract content from zip archive.
+        container_ext = file_ext  # ebook-convert: metadata must be read from the archive, not the inner .txt
         if file_ext == 'txtz':
             options.input_encoding = 'utf-8'
             zf = ZipFile(stream)
             zf.extractall('.')
 
-            # Calibre 2eec10786e: honour .md/.markdown/.textile inside TXTZ
-            for root, _, fnames in os.walk('.'):
-                for x in fnames:
-                    x = os.path.join(root, x)
-                    ext = txtz_file_ext(x)
-                    if ext in {'txt', 'text', 'textile', 'md', 'markdown'}:
-                        file_ext = ext
-                        with open(x, 'rb') as tf:
-                            txt += tf.read() + b'\n\n'
-            # Calibre 17be87e85a / c86de09698: use the text formatting and
-            # cover recorded in metadata.opf by TXTZ output
+            for x in walk('.'):
+                ext = txtz_file_ext(x)
+                if ext in {'txt', 'text', 'textile', 'md', 'markdown'}:
+                    file_ext = ext
+                    with open(x, 'rb') as tf:
+                        txt += tf.read() + b'\n\n'
             if os.path.exists('metadata.opf'):
                 from ebook_convert.utils.xml_parse import safe_xml_fromstring
+
                 with open('metadata.opf', 'rb') as mf:
                     raw = mf.read()
                 try:
@@ -197,7 +213,7 @@ class TXTInput(InputFormatPlugin):
                     if txt_formatting is not None and txt_formatting.text:
                         txt_formatting = txt_formatting.text.strip()
                         if txt_formatting in ('plain', 'textile', 'markdown') and options.formatting_type == 'auto':
-                            log.info('Using metadata from TXTZ archive to set text formatting type to: %s', txt_formatting)
+                            log.info(f'Using metadata from TXTZ archive to set text formatting type to: {txt_formatting}')
                             options.formatting_type = txt_formatting
                             if txt_formatting != 'plain':
                                 options.paragraph_type = 'off'
@@ -216,43 +232,52 @@ class TXTInput(InputFormatPlugin):
             txt = stream.read()
             if file_ext in {'md', 'textile', 'markdown'}:
                 options.formatting_type = {'md': 'markdown'}.get(file_ext, file_ext)
-                log.info('File extension indicates particular formatting. '
-                         'Forcing formatting type to: %s',
-                         options.formatting_type)
+                log.info(f'File extension indicates particular formatting. Forcing formatting type to: {options.formatting_type}')
                 options.paragraph_type = 'off'
 
         # Get the encoding of the document.
         if options.input_encoding:
             ienc = options.input_encoding
-            log.debug('Using user specified input encoding of %s', ienc)
+            log.debug(f'Using user specified input encoding of {ienc}')
         else:
             det_encoding = detect(txt[:4096])
             det_encoding, confidence = det_encoding['encoding'], det_encoding['confidence']
             if det_encoding and det_encoding.lower().replace('_', '-').strip() in (
-                    'gb2312', 'chinese', 'csiso58gb231280', 'euc-cn', 'euccn',
-                    'eucgb2312-cn', 'gb2312-1980', 'gb2312-80', 'iso-ir-58'):
+                'gb2312',
+                'chinese',
+                'csiso58gb231280',
+                'euc-cn',
+                'euccn',
+                'eucgb2312-cn',
+                'gb2312-1980',
+                'gb2312-80',
+                'iso-ir-58',
+            ):
                 # Microsoft Word exports to HTML with encoding incorrectly set to
                 # gb2312 instead of gbk. gbk is a superset of gb2312, anyway.
                 det_encoding = 'gbk'
             ienc = det_encoding
-            log.debug('Detected input encoding as %s with a confidence of '
-                      '%s%%', ienc, confidence * 100)
+            log.debug(f'Detected input encoding as {ienc} with a confidence of {confidence * 100}%')
         if not ienc or ienc == 'ascii':
-            # Calibre fb66fe243b: ascii is a subset of utf-8, so a detected
-            # ascii encoding should not mangle stray non-ascii bytes
             ienc = 'utf-8'
-            log.debug('No input encoding specified and could not auto detect '
-                      'using %s', ienc)
+            log.debug(f'No input encoding specified and could not auto detect using {ienc}')
         # Remove BOM from start of txt as its presence can confuse markdown
         import codecs
-        for bom in (codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE, codecs.BOM_UTF8, codecs.BOM_UTF32_LE, codecs.BOM_UTF32_BE):
+
+        for bom in (
+            codecs.BOM_UTF16_LE,
+            codecs.BOM_UTF16_BE,
+            codecs.BOM_UTF8,
+            codecs.BOM_UTF32_LE,
+            codecs.BOM_UTF32_BE,
+        ):
             if txt.startswith(bom):
-                txt = txt[len(bom):]
+                txt = txt[len(bom) :]
                 break
         txt = txt.decode(ienc, 'replace')
 
         # Replace entities
-        txt = entities.ENT_PAT.sub(entities.xml_entity_to_unicode, txt)
+        txt = xml_replace_entities(txt)
 
         # Normalize line endings
         txt = normalize_line_endings(txt)
@@ -261,23 +286,20 @@ class TXTInput(InputFormatPlugin):
         if options.paragraph_type == 'auto':
             options.paragraph_type = detect_paragraph_type(txt)
             if options.paragraph_type == 'unknown':
-                log.debug('Could not reliably determine paragraph type using '
-                          'block')
+                log.debug('Could not reliably determine paragraph type using block')
                 options.paragraph_type = 'block'
             else:
-                log.debug('Auto detected paragraph type as %s',
-                          options.paragraph_type)
+                log.debug(f'Auto detected paragraph type as {options.paragraph_type}')
 
         # Detect formatting
         if options.formatting_type == 'auto':
             options.formatting_type = detect_formatting_type(txt)
-            log.debug('Auto detected formatting as %s',
-                      options.formatting_type)
+            log.debug(f'Auto detected formatting as {options.formatting_type}')
 
         if options.formatting_type == 'heuristic':
-            setattr(options, 'enable_heuristics', True)
-            setattr(options, 'unwrap_lines', False)
-            setattr(options, 'smarten_punctuation', True)
+            options.enable_heuristics = True
+            options.unwrap_lines = False
+            options.smarten_punctuation = True
 
         # Reformat paragraphs to block formatting based on the detected type.
         # We don't check for block because the processor assumes block.
@@ -290,9 +312,10 @@ class TXTInput(InputFormatPlugin):
             txt = block_to_single_line(txt)
         elif options.paragraph_type == 'unformatted':
             from ebook_convert.ebooks.conversion.utils import HeuristicProcessor
+
             # unwrap lines based on punctuation
             docanalysis = DocAnalysis('txt', txt)
-            length = docanalysis.line_length(.5)
+            length = docanalysis.line_length(0.5)
             preprocessor = HeuristicProcessor(options, log=getattr(self, 'log', None))
             txt = preprocessor.punctuation_unwrap(length, txt, 'txt')
             txt = separate_paragraphs_single_line(txt)
@@ -303,9 +326,9 @@ class TXTInput(InputFormatPlugin):
         if getattr(options, 'enable_heuristics', False) and getattr(options, 'dehyphenate', False):
             docanalysis = DocAnalysis('txt', txt)
             if not length:
-                length = docanalysis.line_length(.5)
+                length = docanalysis.line_length(0.5)
             dehyphenator = Dehyphenator(options.verbose, log=self.log)
-            txt = dehyphenator(txt,'txt', length)
+            txt = dehyphenator(txt, 'txt', length)
 
         # User requested transformation on the text.
         if options.txt_in_remove_indents:
@@ -326,8 +349,9 @@ class TXTInput(InputFormatPlugin):
                 try:
                     input_mi, html = convert_markdown_with_metadata(txt, extensions=[x.strip() for x in options.markdown_extensions.split(',') if x.strip()])
                 except RuntimeError:
-                    raise ValueError('This txt file has malformed markup, it cannot be'
-                        ' converted by calibre. See https://daringfireball.net/projects/markdown/syntax')
+                    raise ValueError(
+                        'This txt file has malformed markup, it cannot be converted by calibre. See https://daringfireball.net/projects/markdown/syntax'
+                    )
                 html = self.fix_resources(html, base_dir)
             elif options.formatting_type == 'textile':
                 log.debug('Running text through textile conversion...')
@@ -340,7 +364,9 @@ class TXTInput(InputFormatPlugin):
 
             # Run the HTMLized text through the html processing plugin.
             from ebook_convert.customize.ui import plugin_for_input_format
+
             html_input = plugin_for_input_format('html')
+            assert html_input is not None
             for opt in html_input.options:
                 setattr(options, opt.option.name, opt.recommended_value)
             options.input_encoding = 'utf-8'
@@ -348,7 +374,9 @@ class TXTInput(InputFormatPlugin):
             odi = options.debug_pipeline
             options.debug_pipeline = None
             # Generate oeb from html conversion.
-            oeb = html_input.convert(open(htmlfile, 'rb'), options, 'html', log, {})
+            with open(htmlfile, 'rb') as f:
+                oeb = html_input.convert(f, options, 'html', log, {})
+                assert oeb is not None and not isinstance(oeb, str)  # HTML input returns an OEBBook
             options.debug_pipeline = odi
         finally:
             for x in self.shifted_files:
@@ -357,25 +385,50 @@ class TXTInput(InputFormatPlugin):
         # Set metadata from file.
         if input_mi is None:
             from ebook_convert.customize.ui import get_file_type_metadata
+
             input_mi = get_file_type_metadata(stream, container_ext)
+        from ebook_convert import guess_type
         from ebook_convert.ebooks.oeb.transforms.metadata import meta_info_to_oeb_metadata
+
         meta_info_to_oeb_metadata(input_mi, oeb.metadata, log)
         self.html_postprocess_title = input_mi.title
         if cover_path:
-            import mimetypes
-            from ebook_convert.utils.filenames import archive_file_data
             cover_data = archive_file_data(base_dir, cover_path)
             if cover_data is not None:
                 cover_name, cdata = cover_data
                 id, href = oeb.manifest.generate('cover', cover_name)
-                oeb.manifest.add(id, href, mimetypes.guess_type(cover_name)[0], data=cdata)
+                oeb.manifest.add(id, href, cast('str', guess_type(cover_name)[0]), data=cdata)
                 oeb.guide.add('cover', 'Cover', href)
 
         return oeb
 
-    def postprocess_book(self, oeb, opts, log):
+    def postprocess_book(self, oeb: OEBBook, opts: Values, log: Log) -> None:
+        from lxml import etree
+
         for item in oeb.spine:
-            if hasattr(item.data, 'xpath'):
-                for title in item.data.xpath('//*[local-name()="title"]'):
-                    if title.text == 'Unknown':
+            root = item.data
+            if isinstance(root, etree._Element):
+                for title in root.xpath('//*[local-name()="title"]'):
+                    if title.text == _('Unknown'):
                         title.text = self.html_postprocess_title
+
+
+def find_tests() -> unittest.TestSuite:
+    import unittest
+
+    class TXTInputTest(unittest.TestCase):
+        def test_txtz_extension_formatting(self) -> None:
+            self.assertEqual(txtz_file_ext('book.md'), 'md')
+            self.assertEqual(txtz_file_ext('book.MARKDOWN'), 'markdown')
+            self.assertEqual(txtz_formatting_for_extension('.md'), 'markdown')
+            self.assertEqual(txtz_formatting_for_extension('markdown'), 'markdown')
+            self.assertEqual(txtz_formatting_for_extension('.textile'), 'textile')
+            self.assertIsNone(txtz_formatting_for_extension('.txt'))
+
+    return unittest.defaultTestLoader.loadTestsFromTestCase(TXTInputTest)
+
+
+if __name__ == '__main__':
+    from ebook_convert.utils.run_tests import run_tests
+
+    run_tests(find_tests)

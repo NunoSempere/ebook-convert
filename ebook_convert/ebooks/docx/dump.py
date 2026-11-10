@@ -1,29 +1,31 @@
+#!/usr/bin/env python
+# License: GPLv3 Copyright: 2013, Kovid Goyal <kovid at kovidgoyal.net>
+
+from __future__ import annotations
 import os
 import shutil
+import sys
 
 from lxml import etree
 
-from ebook_convert.utils.zipfile import ZipFile
+from ebook_convert import walk
 from ebook_convert.utils.xml_parse import safe_xml_fromstring
+from ebook_convert.utils.zipfile import ZipFile
 
 
-def pretty_all_xml_in_dir(path):
-    for root, _, fnames in os.walk(path):
-        for f in fnames:
-            f = os.path.join(root, f)
-            if f.endswith('.xml') or f.endswith('.rels'):
-                with open(f, 'r+b') as stream:
-                    raw = stream.read()
-                    if raw:
-                        root = safe_xml_fromstring(raw)
-                        stream.seek(0)
-                        stream.truncate()
-                        stream.write(etree.tostring(root, pretty_print=True,
-                                                    encoding='utf-8',
-                                                    xml_declaration=True))
+def pretty_all_xml_in_dir(path: str) -> None:
+    for f in walk(path):
+        if f.endswith(('.xml', '.rels')):
+            with open(f, 'r+b') as stream:
+                raw = stream.read()
+                if raw:
+                    root = safe_xml_fromstring(raw)
+                    stream.seek(0)
+                    stream.truncate()
+                    stream.write(etree.tostring(root, pretty_print=True, encoding='utf-8', xml_declaration=True))
 
 
-def do_dump(path, dest):
+def do_dump(path: str, dest: str) -> None:
     if os.path.exists(dest):
         shutil.rmtree(dest)
     with ZipFile(path) as zf:
@@ -31,9 +33,13 @@ def do_dump(path, dest):
     pretty_all_xml_in_dir(dest)
 
 
-def dump(path):
+def dump(path: str) -> None:
     dest = os.path.splitext(os.path.basename(path))[0]
     dest += '-dumped'
     do_dump(path, dest)
 
     print(path, 'dumped to', dest)
+
+
+if __name__ == '__main__':
+    dump(sys.argv[-1])

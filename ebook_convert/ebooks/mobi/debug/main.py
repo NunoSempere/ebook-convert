@@ -1,0 +1,49 @@
+#!/usr/bin/env python
+# License: GPLv3 Copyright: 2012, Kovid Goyal <kovid@kovidgoyal.net>
+
+from __future__ import annotations
+import os
+import shutil
+import sys
+from typing import IO
+
+from ebook_convert.ebooks.mobi.debug.headers import MOBIFile
+from ebook_convert.ebooks.mobi.debug.mobi6 import inspect_mobi as inspect_mobi6
+from ebook_convert.ebooks.mobi.debug.mobi8 import inspect_mobi as inspect_mobi8
+from ebook_convert.utils import StreamOrPath
+
+
+def inspect_mobi(path_or_stream: str | IO[bytes], ddir: str | None = None) -> None:  # {{{
+    with StreamOrPath(path_or_stream, 'rb') as stream:
+        f = MOBIFile(stream)
+        if ddir is None:
+            ddir = 'decompiled_' + os.path.splitext(os.path.basename(stream.name))[0]
+    try:
+        shutil.rmtree(ddir)
+    except Exception:
+        pass
+    os.makedirs(ddir)
+    if f.kf8_type is None:
+        inspect_mobi6(f, ddir)
+    elif f.kf8_type == 'joint':
+        p6 = os.path.join(ddir, 'mobi6')
+        os.mkdir(p6)
+        inspect_mobi6(f, p6)
+        p8 = os.path.join(ddir, 'mobi8')
+        os.mkdir(p8)
+        inspect_mobi8(f, p8)
+    else:
+        inspect_mobi8(f, ddir)
+
+    print('Debug data saved to:', ddir)
+
+
+# }}}
+
+
+def main() -> None:
+    inspect_mobi(sys.argv[1])
+
+
+if __name__ == '__main__':
+    main()

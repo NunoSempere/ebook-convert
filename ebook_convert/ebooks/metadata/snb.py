@@ -1,0 +1,64 @@
+# License: GPLv3 Copyright: 2010, Li Fanxi <lifanxi@freemindworld.com>
+
+"""Read meta information from SNB files"""
+
+from __future__ import annotations
+import io
+import os
+from typing import IO, TYPE_CHECKING
+
+from ebook_convert.ebooks.metadata import MetaInformation
+from ebook_convert.ebooks.snb.snbfile import SNBFile
+from ebook_convert.utils.localization import _
+from ebook_convert.utils.xml_parse import safe_xml_fromstring
+
+if TYPE_CHECKING:
+    from ebook_convert.ebooks.metadata.book.base import Metadata
+
+
+def get_metadata(stream: IO[bytes], extract_cover: bool = True) -> Metadata:
+    """Return metadata as a L{MetaInfo} object"""
+    mi = MetaInformation(_('Unknown'), [_('Unknown')])
+    snbFile = SNBFile()
+
+    try:
+        if not hasattr(stream, 'write'):
+            snbFile.Parse(io.BytesIO(stream), True)
+        else:
+            stream.seek(0)
+            snbFile.Parse(stream, True)
+
+        meta = snbFile.GetFileStream('snbf/book.snbf')
+
+        if meta is not None:
+            meta = safe_xml_fromstring(meta)
+            _name = meta.find('.//head/name')
+            assert _name is not None
+            mi.set('title', _name.text)  # None is converted to the null value
+            _author = meta.find('.//head/author')
+            assert _author is not None
+            if _author.text:
+                mi.authors = [_author.text]
+            _language = meta.find('.//head/language')
+            assert _language is not None
+            lang_text = _language.text
+            assert lang_text is not None
+            mi.language = lang_text.lower().replace('_', '-')
+            _publisher = meta.find('.//head/publisher')
+            assert _publisher is not None
+            mi.publisher = _publisher.text
+
+            if extract_cover:
+                cover = meta.find('.//head/cover')
+                if cover is not None and cover.text is not None:
+                    root, ext = os.path.splitext(cover.text)
+                    if ext == '.jpeg':
+                        ext = '.jpg'
+                    mi.cover_data = (ext[-3:], snbFile.GetFileStream('snbc/images/' + cover.text))
+
+    except Exception:
+        import traceback
+
+        traceback.print_exc()
+
+    return mi

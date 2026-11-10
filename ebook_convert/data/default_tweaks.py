@@ -1,3 +1,8 @@
+#!/usr/bin/env python
+# vim:fileencoding=UTF-8:ts=4:sw=4:sta:et:sts=4:ai
+# License: GPLv3 Copyright: 2010, Kovid Goyal <kovid at kovidgoyal.net>
+
+
 # Contains various tweaks that affect calibre behavior. Only edit this file if
 # you know what you are doing. If you delete this file, it will be recreated from
 # defaults.
@@ -27,17 +32,15 @@
 # Note that the use_series_auto_increment_tweak_when_importing tweak is used
 # only when a value is not provided during import. If the importing regular
 # expression produces a value for series_index, or if you are reading metadata
-# from books and the import plugin produces a value, than that value will
+# from books and the import plugin produces a value, then that value will
 # be used irrespective of the setting of the tweak.
 series_index_auto_increment = 'next'
 use_series_auto_increment_tweak_when_importing = False
 
 #: Add separator after completing an author name
-# Should the completion separator be append
-# to the end of the completed text to
-# automatically begin a new completion operation
-# for authors.
-# Can be either True or False
+# Set this if the completion separator should be appended to the end of the
+# completed text to automatically begin a new completion operation for authors.
+# It can be either True or False
 authors_completer_append_separator = False
 
 #: Author sort name algorithm
@@ -48,22 +51,49 @@ authors_completer_append_separator = False
 #  comma : use 'copy' if there is a ',' in the name, otherwise use 'invert'
 #  nocomma : "fn ln" -> "ln fn" (without the comma)
 # When this tweak is changed, the author_sort values stored with each author
-# must be recomputed by right-clicking on an author in the left-hand tags pane,
-# selecting 'manage authors', and pressing 'Recalculate all author sort values'.
-# The author name suffixes are words that are ignored when they occur at the
+# must be recomputed by right-clicking on an author in the left-hand tags
+# panel, selecting 'Manage authors', and pressing
+# 'Recalculate all author sort values'.
+#
+# The author_name_suffixes are words that are ignored when they occur at the
 # end of an author name. The case of the suffix is ignored and trailing
-# periods are automatically handled. The same is true for prefixes.
-# The author name copy words are a set of words which if they occur in an
-# author name cause the automatically generated author sort string to be
-# identical to the author name. This means that the sort for a string like Acme
-# Inc. will be Acme Inc. instead of Inc., Acme
+# periods are automatically handled.
+#
+# The same is true for author_name_prefixes.
+#
+# The author_name_copywords are a set of words which, if they occur in an
+# author name, cause the automatically generated author sort string to be
+# identical to the author's name. This means that the sort for a string like
+# "Acme Inc." will be "Acme Inc." instead of "Inc., Acme".
+#
+# If author_use_surname_prefixes is enabled, any of the words in
+# author_surname_prefixes will be treated as a prefix to the surname, if they
+# occur before the surname. So for example, "John von Neumann" would be sorted
+# as "von Neumann, John" and not "Neumann, John von".
 author_sort_copy_method = 'comma'
-author_name_suffixes = ('Jr', 'Sr', 'Inc', 'Ph.D', 'Phd',
-                        'MD', 'M.D', 'I', 'II', 'III', 'IV',
-                        'Junior', 'Senior')
+author_name_suffixes = ('Jr', 'Sr', 'Inc', 'Ph.D', 'Phd', 'MD', 'M.D', 'I', 'II', 'III', 'IV', 'Junior', 'Senior')
 author_name_prefixes = ('Mr', 'Mrs', 'Ms', 'Dr', 'Prof')
-author_name_copywords = ('Corporation', 'Company', 'Co.', 'Agency', 'Council',
-        'Committee', 'Inc.', 'Institute', 'Society', 'Club', 'Team')
+author_name_copywords = (
+    'Agency',
+    'Corporation',
+    'Company',
+    'Co.',
+    'Council',
+    'Committee',
+    'Inc.',
+    'Institute',
+    'National',
+    'Society',
+    'Club',
+    'Team',
+    'Software',
+    'Games',
+    'Entertainment',
+    'Media',
+    'Studios',
+)
+author_use_surname_prefixes = False
+author_surname_prefixes = ('da', 'de', 'di', 'la', 'le', 'van', 'von')
 
 #: Splitting multiple author names
 # By default, calibre splits a string containing multiple author names on
@@ -73,23 +103,27 @@ author_name_copywords = ('Corporation', 'Company', 'Co.', 'Agency', 'Council',
 # Default: r'(?i),?\s+(and|with)\s+'
 authors_split_regex = r'(?i),?\s+(and|with)\s+'
 
-#: Use author sort in Tag browser
-# Set which author field to display in the tags pane (the list of authors,
-# series, publishers etc on the left hand side). The choices are author and
-# author_sort. This tweak affects only what is displayed under the authors
-# category in the tags pane and Content server. Please note that if you set this
-# to author_sort, it is very possible to see duplicate names in the list because
-# although it is guaranteed that author names are unique, there is no such
-# guarantee for author_sort values. Showing duplicates won't break anything, but
-# it could lead to some confusion. When using 'author_sort', the tooltip will
-# show the author's name.
+#: Use author_sort and/or series_sort for names in Tag browser
+# Set which author or series field is used to display as the item name in the
+# Tag browser (the list of authors, series, publishers etc on the left hand
+# side). The choices for author are 'author' and 'author_sort'. The choices for
+# series are 'series' and 'series_sort'. This tweak affects only what is
+# displayed under the category in the Tag browser and Content server. Please
+# note that if you set this to …_sort, it is possible to see duplicate names in
+# the list because although it is guaranteed that author and series names are
+# unique, there is no such guarantee for their sort values. Showing duplicates
+# won't break anything but it could lead to some confusion. The tooltip for an
+# item will show the item's name no matter how you set this tweak.
 # Examples:
 #   categories_use_field_for_author_name = 'author'
 #   categories_use_field_for_author_name = 'author_sort'
+#   categories_use_field_for_series_name = 'series'
+#   categories_use_field_for_series_name = 'series_sort'
 categories_use_field_for_author_name = 'author'
+categories_use_field_for_series_name = 'series'
 
 #: Control partitioning of Tag browser
-# When partitioning the tags browser, the format of the subcategory label is
+# When partitioning the Tag browser, the format of the subcategory label is
 # controlled by a template: categories_collapsed_name_template if sorting by
 # name, categories_collapsed_rating_template if sorting by average rating, and
 # categories_collapsed_popularity_template if sorting by popularity. There are
@@ -110,17 +144,6 @@ categories_collapsed_name_template = r'{first.sort:shorten(4,,0)} - {last.sort:s
 categories_collapsed_rating_template = r'{first.avg_rating:4.2f:ifempty(0)} - {last.avg_rating:4.2f:ifempty(0)}'
 categories_collapsed_popularity_template = r'{first.count:d} - {last.count:d}'
 
-#: Control order of categories in the Tag browser
-# Change the following dict to change the order that categories are displayed in
-# the Tag browser. Items are named using their lookup name, and will be sorted
-# using the number supplied. The lookup name '*' stands for all names that
-# otherwise do not appear. Two names with the same value will be sorted
-# using the default order; the one used when the dict is empty.
-# Example: tag_browser_category_order = {'series':1, 'tags':2, '*':3}
-# resulting in the order series, tags, then everything else in default order.
-tag_browser_category_order = {'*':1}
-
-
 #: Specify columns to sort the booklist by on startup
 # Provide a set of columns to be sorted on when calibre starts.
 # The argument is None if saved sort history is to be used
@@ -136,22 +159,24 @@ sort_columns_at_startup = None
 #  A string controlling how the publication date is displayed in the GUI
 #  d     the day as number without a leading zero (1 to 31)
 #  dd    the day as number with a leading zero (01 to 31)
-#  ddd   the abbreviated localized day name (e.g. 'Mon' to 'Sun').
-#  dddd  the long localized day name (e.g. 'Monday' to 'Sunday').
+#  ddd   the abbreviated localized day name (e.g. 'Mon' to 'Sun')
+#  dddd  the long localized day name (e.g. 'Monday' to 'Sunday')
 #  M     the month as number without a leading zero (1-12)
 #  MM    the month as number with a leading zero (01-12)
-#  MMM   the abbreviated localized month name (e.g. 'Jan' to 'Dec').
-#  MMMM  the long localized month name (e.g. 'January' to 'December').
+#  MMM   the abbreviated localized month name (e.g. 'Jan' to 'Dec')
+#  MMMM  the long localized month name (e.g. 'January' to 'December')
 #  yy    the year as two digit number (00-99)
 #  yyyy  the year as four digit number
-#  h     the hours without a leading 0 (0 to 11 or 0 to 23, depending on am/pm) '
-#  hh    the hours with a leading 0 (00 to 11 or 00 to 23, depending on am/pm) '
-#  m     the minutes without a leading 0 (0 to 59) '
-#  mm    the minutes with a leading 0 (00 to 59) '
-#  s     the seconds without a leading 0 (0 to 59) '
-#  ss    the seconds with a leading 0 (00 to 59) '
-#  ap    use a 12-hour clock instead of a 24-hour clock, with "ap" replaced by the localized string for am or pm
-#  AP    use a 12-hour clock instead of a 24-hour clock, with "AP" replaced by the localized string for AM or PM
+#  h     the hours without a leading 0 (0 to 11 or 0 to 23, depending on am/pm)
+#  hh    the hours with a leading 0 (00 to 11 or 00 to 23, depending on am/pm)
+#  m     the minutes without a leading 0 (0 to 59)
+#  mm    the minutes with a leading 0 (00 to 59)
+#  s     the seconds without a leading 0 (0 to 59)
+#  ss    the seconds with a leading 0 (00 to 59)
+#  ap    use a 12-hour clock instead of a 24-hour clock, with "ap" replaced by the lowercase localized string for am or pm
+#  AP    use a 12-hour clock instead of a 24-hour clock, with "AP" replaced by the uppercase localized string for AM or PM
+#  aP    use a 12-hour clock instead of a 24-hour clock, with "aP" replaced by the localized string for am or pm
+#  Ap    use a 12-hour clock instead of a 24-hour clock, with "Ap" replaced by the localized string for AM or PM
 #  iso   the date with time and timezone. Must be the only format present
 #  For example, given the date of 9 Jan 2010, the following formats show
 #  MMM yyyy ==> Jan 2010    yyyy ==> 2010       dd MMM yyyy ==> 09 Jan 2010
@@ -174,7 +199,7 @@ gui_last_modified_display_format = 'dd MMM yyyy'
 # book will sort under 'T'.
 # This flag affects calibre's library display. It has no effect on devices. In
 # addition, titles for books added before changing the flag will retain their
-# order until the title is edited. Editing a title and hitting return
+# order until the title is edited. Editing a title and hitting Enter
 # without changing anything is sufficient to change the sort. Or you can use
 # the 'Update title sort' action in the Bulk metadata edit dialog to update
 # it for many books at once.
@@ -208,48 +233,61 @@ save_template_title_series_sorting = 'library_order'
 # interface language is used. The setting title_sort_articles is ignored
 # (present only for legacy reasons).
 per_language_title_sort_articles = {
-        # English
-        'eng'  : (r'A\s+', r'The\s+', r'An\s+'),
-        # Esperanto
-        'epo': (r'La\s+', r"L'", 'L´'),
-        # Spanish
-        'spa'  : (r'El\s+', r'La\s+', r'Lo\s+', r'Los\s+', r'Las\s+', r'Un\s+',
-                  r'Una\s+', r'Unos\s+', r'Unas\s+'),
-        # French
-        'fra'  : (r'Le\s+', r'La\s+', r"L'", u'L´', u'L’', r'Les\s+', r'Un\s+', r'Une\s+',
-                  r'Des\s+', r'De\s+La\s+', r'De\s+', r"D'", u'D´', u'L’'),
-        # Italian
-        'ita': ('Lo\\s+', 'Il\\s+', "L'", 'L´', 'La\\s+', 'Gli\\s+',
-                'I\\s+', 'Le\\s+', 'Uno\\s+', 'Un\\s+', 'Una\\s+', "Un'",
-                'Un´', 'Dei\\s+', 'Degli\\s+', 'Delle\\s+', 'Del\\s+',
-                'Della\\s+', 'Dello\\s+', "Dell'", 'Dell´'),
-        # Portuguese
-        'por'  : (r'A\s+', r'O\s+', r'Os\s+', r'As\s+', r'Um\s+', r'Uns\s+',
-                  r'Uma\s+', r'Umas\s+', ),
-        # Romanian
-        'ron'  : (r'Un\s+', r'O\s+', r'Nişte\s+', ),
-        # German
-        'deu'  : (r'Der\s+', r'Die\s+', r'Das\s+', r'Den\s+', r'Ein\s+',
-                  r'Eine\s+', r'Einen\s+', r'Dem\s+', r'Des\s+', r'Einem\s+',
-                  r'Eines\s+'),
-        # Dutch
-        'nld'  : (r'De\s+', r'Het\s+', r'Een\s+', r"'n\s+", r"'s\s+", r'Ene\s+',
-                  r'Ener\s+', r'Enes\s+', r'Den\s+', r'Der\s+', r'Des\s+',
-                  r"'t\s+"),
-        # Swedish
-        'swe'  : (r'En\s+', r'Ett\s+', r'Det\s+', r'Den\s+', r'De\s+', ),
-        # Turkish
-        'tur'  : (r'Bir\s+', ),
-        # Afrikaans
-        'afr'  : (r"'n\s+", r'Die\s+', ),
-        # Greek
-        'ell'  : (r'O\s+', r'I\s+', r'To\s+', r'Ta\s+', r'Tus\s+', r'Tis\s+',
-                  r"'Enas\s+", r"'Mia\s+", r"'Ena\s+", r"'Enan\s+", ),
-        # Hungarian
-        'hun'  : (r'A\s+', r'Az\s+', r'Egy\s+',),
+    # English
+    'eng': (r'A\s+', r'The\s+', r'An\s+'),
+    # Esperanto
+    'epo': (r'La\s+', r"L'", 'L´'),
+    # Spanish
+    'spa': (r'El\s+', r'La\s+', r'Lo\s+', r'Los\s+', r'Las\s+', r'Un\s+', r'Una\s+', r'Unos\s+', r'Unas\s+'),
+    # French
+    'fra': (r'Le\s+', r'La\s+', r"L'", r'L´', r'L’', r'Les\s+', r'Un\s+', r'Une\s+', r'Des\s+', r'De\s+(La\s+)?', r"D'", r'D´', r'D’'),
+    # Polish
+    'pol': (),
+    # Italian
+    'ita': (
+        r'Lo\s+',
+        r'Il\s+',
+        r"L'",
+        r'L´',
+        r'La\s+',
+        r'Gli\s+',
+        r'I\s+',
+        r'Le\s+',
+        r'Uno\s+',
+        r'Un\s+',
+        r'Una\s+',
+        r"Un'",
+        r'Un´',
+        r'Dei\s+',
+        r'Degli\s+',
+        r'Delle\s+',
+        r'Del\s+',
+        r'Della\s+',
+        r'Dello\s+',
+        r"Dell'",
+        r'Dell´',
+    ),
+    # Portuguese
+    'por': (r'A\s+', r'O\s+', r'Os\s+', r'As\s+', r'Um\s+', r'Uns\s+', r'Uma\s+', r'Umas\s+'),
+    # Romanian
+    'ron': (r'Un\s+', r'O\s+', r'Nişte\s+'),
+    # German
+    'deu': (r'Der\s+', r'Die\s+', r'Das\s+', r'Den\s+', r'Ein\s+', r'Eine\s+', r'Einen\s+', r'Dem\s+', r'Des\s+', r'Einem\s+', r'Eines\s+'),
+    # Dutch
+    'nld': (r'De\s+', r'Het\s+', r'Een\s+', r"'n\s+", r"'s\s+", r'Ene\s+', r'Ener\s+', r'Enes\s+', r'Den\s+', r'Der\s+', r'Des\s+', r"'t\s+"),
+    # Swedish
+    'swe': (r'En\s+', r'Ett\s+', r'Det\s+', r'Den\s+', r'De\s+'),
+    # Turkish
+    'tur': (r'Bir\s+',),
+    # Afrikaans
+    'afr': (r"'n\s+", r'Die\s+'),
+    # Greek
+    'ell': (r'O\s+', r'I\s+', r'To\s+', r'Ta\s+', r'Tus\s+', r'Tis\s+', r"'Enas\s+", r"'Mia\s+", r"'Ena\s+", r"'Enan\s+"),
+    # Hungarian
+    'hun': (r'A\s+', r'Az\s+', r'Egy\s+'),
 }
 default_language_for_title_sort = None
-title_sort_articles=r'^(A|The|An)\s+'
+title_sort_articles = r'^(A|The|An)\s+'
 
 #: Specify a folder calibre should connect to at startup
 # Specify a folder that calibre should connect to at startup using
@@ -262,11 +300,12 @@ title_sort_articles=r'^(A|The|An)\s+'
 auto_connect_to_folder = ''
 
 #: Specify renaming rules for SONY collections
-# Specify renaming rules for sony collections. This tweak is only applicable if
-# metadata management is set to automatic. Collections on Sonys are named
+# Specify renaming rules for SONY collections. This tweak is only applicable if
+# metadata management is set to automatic. Collections on SONYs are named
 # depending upon whether the field is standard or custom. A collection derived
-# from a standard field is named for the value in that field. For example, if
-# the standard 'series' column contains the value 'Darkover', then the
+# from a standard field is named for the value in that field.
+#
+# For example, if the standard 'series' column contains the value 'Darkover', then the
 # collection name is 'Darkover'. A collection derived from a custom field will
 # have the name of the field added to the value. For example, if a custom series
 # column named 'My Series' contains the name 'Darkover', then the collection
@@ -274,18 +313,22 @@ auto_connect_to_folder = ''
 # documentation, 'Darkover' is called the value and 'My Series' is called the
 # category. If two books have fields that generate the same collection name,
 # then both books will be in that collection.
+#
 # This set of tweaks lets you specify for a standard or custom field how
 # the collections are to be named. You can use it to add a description to a
 # standard field, for example 'Foo (Tag)' instead of the 'Foo'. You can also use
-# it to force multiple fields to end up in the same collection. For example, you
-# could force the values in 'series', '#my_series_1', and '#my_series_2' to
-# appear in collections named 'some_value (Series)', thereby merging all of the
-# fields into one set of collections.
+# it to force multiple fields to end up in the same collection.
+#
+# For example, you could force the values in 'series', '#my_series_1', and
+# '#my_series_2' to appear in collections named 'some_value (Series)', thereby
+# merging all of the fields into one set of collections.
+#
 # There are two related tweaks. The first determines the category name to use
 # for a metadata field.  The second is a template, used to determines how the
 # value and category are combined to create the collection name.
 # The syntax of the first tweak, sony_collection_renaming_rules, is:
 # {'field_lookup_name':'category_name_to_use', 'lookup_name':'name', ...}
+#
 # The second tweak, sony_collection_name_template, is a template. It uses the
 # same template language as plugboards and save templates. This tweak controls
 # how the value and category are combined together to make the collection name.
@@ -293,29 +336,35 @@ auto_connect_to_folder = ''
 # never empty. The {category} field can be empty. The default is to put the
 # value first, then the category enclosed in parentheses, it isn't empty:
 # '{value} {category:|(|)}'
+#
 # Examples: The first three examples assume that the second tweak
 # has not been changed.
-#  1: I want three series columns to be merged into one set of collections. The
-#  column lookup names are 'series', '#series_1' and '#series_2'. I want nothing
-#  in the parenthesis. The value to use in the tweak value would be:
+#
+# 1) I want three series columns to be merged into one set of collections. The
+# column lookup names are 'series', '#series_1' and '#series_2'. I want nothing
+# in the parenthesis. The value to use in the tweak value would be:
 #    sony_collection_renaming_rules={'series':'', '#series_1':'', '#series_2':''}
-#  2: I want the word '(Series)' to appear on collections made from series, and
-#  the word '(Tag)' to appear on collections made from tags. Use:
-#    sony_collection_renaming_rules={'series':'Series', 'tags':'Tag'}
-#  3: I want 'series' and '#myseries' to be merged, and for the collection name
-#  to have '(Series)' appended. The renaming rule is:
-#    sony_collection_renaming_rules={'series':'Series', '#myseries':'Series'}
-#  4: Same as example 2, but instead of having the category name in parentheses
-#  and appended to the value, I want it prepended and separated by a colon, such
-#  as in Series: Darkover. I must change the template used to format the category name
-#  The resulting two tweaks are:
+#
+# 2) I want the word '(Series)' to appear on collections made from series, and
+# the word '(Tag)' to appear on collections made from tags. Use:
+#   sony_collection_renaming_rules={'series':'Series', 'tags':'Tag'}
+#
+# 3) I want 'series' and '#myseries' to be merged, and for the collection name
+# to have '(Series)' appended. The renaming rule is:
+#   sony_collection_renaming_rules={'series':'Series', '#myseries':'Series'}
+#
+# 4) Same as example 2, but instead of having the category name in parentheses
+# and appended to the value, I want it prepended and separated by a colon, such
+# as in Series: Darkover. I must change the template used to format the category name
+#
+# The resulting two tweaks are:
 #    sony_collection_renaming_rules={'series':'Series', 'tags':'Tag'}
 #    sony_collection_name_template='{category:||: }{value}'
-sony_collection_renaming_rules={}
-sony_collection_name_template='{value}{category:| (|)}'
+sony_collection_renaming_rules = {}
+sony_collection_name_template = '{value}{category:| (|)}'
 
 #: Specify how SONY collections are sorted
-# Specify how sony collections are sorted. This tweak is only applicable if
+# Specify how SONY collections are sorted. This tweak is only applicable if
 # metadata management is set to automatic. You can indicate which metadata is to
 # be used to sort on a collection-by-collection basis. The format of the tweak
 # is a list of metadata fields from which collections are made, followed by the
@@ -331,34 +380,6 @@ sony_collection_name_template='{value}{category:| (|)}'
 # [ ( [list of fields], sort field ) , ( [ list of fields ] , sort field ) ]
 # Default: empty (no rules), so no collection attributes are named.
 sony_collection_sorting_rules = []
-
-#: Control how tags are applied when copying books to another library
-# Set this to True to ensure that tags in 'Tags to add when adding
-# a book' are added when copying books to another library
-add_new_book_tags_when_importing_books = False
-
-#: Set custom metadata fields that the Content server will or will not display.
-# Controls what fields are displayed when clicking the "Search" button in the
-# browser to search your calibre library.
-# content_server_will_display is a list of custom fields to be displayed.
-# content_server_wont_display is a list of custom fields not to be displayed.
-# wont_display has priority over will_display.
-# The special value '*' means all custom fields. The value [] means no entries.
-# Defaults:
-#    content_server_will_display = ['*']
-#    content_server_wont_display = []
-#
-# Examples:
-#
-# To display only the custom fields #mytags and #genre:
-#   content_server_will_display = ['#mytags', '#genre']
-#   content_server_wont_display = []
-#
-# To display all fields except #mycomments:
-#   content_server_will_display = ['*']
-#   content_server_wont_display['#mycomments']
-content_server_will_display = ['*']
-content_server_wont_display = []
 
 #: Set the maximum number of sort 'levels'
 # Set the maximum number of sort 'levels' that calibre will use to resort the
@@ -381,17 +402,19 @@ sort_dates_using_visible_fields = False
 cover_trim_fuzz_value = 10
 
 #: Control behavior of the book list
-# You can control the behavior of double clicks and pressing enter on the books list.
-# Choices: open_viewer, do_nothing,
-# edit_cell, edit_metadata. Selecting anything other than open_viewer has the
-# side effect of disabling editing a field using a single click.
+# You can control the behavior of double clicks and pressing Enter on the books
+# list. Choices: open_viewer, do_nothing, show_book_details,
+# show_locked_book_details, edit_cell, edit_metadata. Selecting anything other
+# than open_viewer, show_book_details, or show_locked_book_details has the side
+# effect of disabling editing a field using a single click.
 # Default: open_viewer.
 # Example: doubleclick_on_library_view = 'do_nothing'
-# You can also control whether the book list scrolls horizontal per column or
-# per pixel. Default is per column.
+# You can also control whether the book list scrolls per item or
+# per pixel. Default is per item.
 doubleclick_on_library_view = 'open_viewer'
 enter_key_behavior = 'do_nothing'
-horizontal_scrolling_per_column = True
+horizontal_scrolling_per_column = False
+vertical_scrolling_per_row = False
 
 #: Language to use when sorting
 # Setting this tweak will force sorting to use the
@@ -403,35 +426,18 @@ horizontal_scrolling_per_column = True
 # Default: locale_for_sorting = '' -- use the language calibre displays in
 # Example: locale_for_sorting = 'fr' -- sort using French rules.
 # Example: locale_for_sorting = 'nb' -- sort using Norwegian rules.
-locale_for_sorting =  ''
-
-#: Number of columns for custom metadata in the edit metadata dialog
-# Set whether to use one or two columns for custom metadata when editing
-# metadata  one book at a time. If True, then the fields are laid out using two
-# columns. If False, one column is used.
-metadata_single_use_2_cols_for_custom_fields = True
-
-#: Order of custom column(s) in edit metadata
-# Controls the order that custom columns are listed in edit metadata single
-# and bulk. The columns listed in the tweak are displayed first and in the
-# order provided. Any columns not listed are displayed after the listed ones,
-# in alphabetical order. Do note that this tweak does not change the size of
-# the edit widgets. Putting comments widgets in this list may result in some
-# odd widget spacing when using two-column mode.
-# Enter a comma-separated list of custom field lookup names, as in
-# metadata_edit_custom_column_order = ['#genre', '#mytags', '#etc']
-metadata_edit_custom_column_order = []
+locale_for_sorting = ''
 
 #: The number of seconds to wait before sending emails
 # The number of seconds to wait before sending emails when using a
-# public email server like gmx/hotmail/gmail. Default is: 5 minutes
+# public email server like GMX/Hotmail/Gmail. Default is: 5 minutes
 # Setting it to lower may cause the server's SPAM controls to kick in,
 # making email sending fail. Changes will take effect only after a restart of
 # calibre. You can also change the list of hosts that calibre considers
 # to be public relays here. Any relay host ending with one of the suffixes
 # in the list below will be considered a public email server.
 public_smtp_relay_delay = 301
-public_smtp_relay_host_suffixes = ['gmail.com', 'live.com', 'gmx.com']
+public_smtp_relay_host_suffixes = ['gmail.com', 'live.com', 'gmx.com', 'outlook.com']
 
 #: The maximum width and height for covers saved in the calibre library
 # All covers in the calibre library will be resized, preserving aspect ratio,
@@ -445,7 +451,7 @@ maximum_cover_size = (1650, 2200)
 # control where it is sent. Valid values are "main", "carda", "cardb". Note
 # that if there isn't enough free space available on the location you choose,
 # the files will be sent to the location with the most free space.
-send_news_to_device_location = "main"
+send_news_to_device_location = 'main'
 
 #: Unified toolbar on macOS
 # If you enable this option and restart calibre, the toolbar will be 'unified'
@@ -470,11 +476,13 @@ save_original_format_when_polishing = True
 # how many should be shown, here.
 gui_view_history_size = 15
 
-#: Change the font size of book details in the interface
+#: Change the font size of the Book details panel in the interface
 # Change the font size at which book details are rendered in the side panel and
 # comments are rendered in the metadata edit dialog. Set it to a positive or
-# negative number to increase or decrease the font size.
+# negative number to increase or decrease the font size. Similarly, change the
+# font size of the widget used to converse with AI.
 change_book_details_font_size_by = 0
+change_ai_chat_font_size_by = 0
 
 #: What format to default to when using the "Unpack book" feature
 # The "Unpack book" feature of calibre allows direct editing of a book format.
@@ -496,7 +504,14 @@ default_tweak_format = None
 # completions you will now have to press Tab to select one before pressing
 # Enter. Which technique you prefer will depend on the state of metadata in
 # your library and your personal editing style.
+#
+# If preselect_first_completion is False and you want Tab to accept what you
+# typed instead of the first completion then set tab_accepts_uncompleted_text
+# to True. If you do this then to select from the completions you must press
+# the Down or Up arrow keys. The tweak tab_accepts_uncompleted_text is ignored
+# if preselect_first_completion is True
 preselect_first_completion = False
+tab_accepts_uncompleted_text = False
 
 #: Completion mode when editing authors/tags/series/etc.
 # By default, when completing items, calibre will show you all the candidates
@@ -504,14 +519,16 @@ preselect_first_completion = False
 # all candidates that contain the text you have already typed. To do this, set
 # completion_mode to 'contains'. For example, if you type asi it will match both
 # Asimov and Quasimodo, whereas the default behavior would match only Asimov.
+# There is also a 'word-prefix' mode that matches only at the start of words,
+# so typing 'asi' will match Asimov and "Isaac Asimov" but not Quasimodo.
+# Similarly, typing 'cat' will match cathedral and "tabby cat" but not education.
+#
+# If completion_mode is 'word-prefix', you can specify additional word break chars
+# with the extra_word_break_chars setting.
+# For example, for extra_word_break_chars = '-' typing 'fic' will match
+# both "Science Fiction" and "Science-Fiction", instead of only the first one.
 completion_mode = 'prefix'
-
-#: Recognize numbers inside text when sorting
-# This means that when sorting on text fields like title the text "Book 2"
-# will sort before the text "Book 100". If you want this behavior, set
-# numeric_collation = True note that doing so will cause problems with text
-# that starts with numbers and is a little slower.
-numeric_collation = False
+extra_word_break_chars = ''
 
 #: Sort the list of libraries alphabetically
 # The list of libraries in the Copy to library and Quick switch menus are
@@ -543,17 +560,13 @@ content_server_thumbnail_compression_quality = 75
 #    cover_drop_exclude = {'tiff', 'webp'}
 cover_drop_exclude = ()
 
-#: Show the Saved searches box in the Search bar
-# In newer versions of calibre, only a single button that allows you to add a
-# new Saved search is shown in the Search bar. If you would like to have the
-# old Saved searches box with its two buttons back, set this tweak to True.
-show_saved_search_box = False
-
 #: Exclude fields when copy/pasting metadata
 # You can ask calibre to not paste some metadata fields when using the
 # Edit metadata->Copy metadata/Paste metadata actions. For example,
 # exclude_fields_on_paste = ['cover', 'timestamp', '#mycolumn']
 # to prevent pasting of the cover, Date and custom column, mycolumn.
+# You can also add a shortcut in Preferences->Shortcuts->Edit metadata
+# to paste metadata ignoring this tweak.
 exclude_fields_on_paste = []
 
 #: Skip internet connected check
@@ -561,3 +574,74 @@ exclude_fields_on_paste = []
 # Useful if for some reason your operating systems network checking
 # facilities are not reliable (for example NetworkManager on Linux).
 skip_network_check = False
+
+#: Tab stop width in the template editor
+# Sets the width of the tab stop in the template editor in "average characters".
+# For example, a value of 1 results in a space with the width of one average character.
+template_editor_tab_stop_width = 4
+
+#: Value for undefined numbers when sorting
+# Sets the value to use for undefined numbers when sorting.
+# For example, the value -10 sorts undefined numbers as if they were set to -10.
+# Use 'maximum' for the largest possible number. Use 'minimum' for the smallest
+# possible number. Quotes are optional if entering a number.
+# Examples:
+#   value_for_undefined_numbers_when_sorting = -100
+#   value_for_undefined_numbers_when_sorting = '2'
+#   value_for_undefined_numbers_when_sorting = -0.01
+#   value_for_undefined_numbers_when_sorting = 'minimum'
+#   value_for_undefined_numbers_when_sorting = 'maximum'
+value_for_undefined_numbers_when_sorting = 0
+
+#: Allow template database functions in composite columns
+# If True then the template database functions book_values() and book_count()
+# can be used in composite custom columns. Note: setting this tweak to True and
+# using these functions in composites can be very slow.
+# Default: False
+allow_template_database_functions_in_composites = False
+
+
+#: Change the programs that are run when opening files/URLs
+# By default, calibre passes URLs to the operating system to open using
+# whatever default programs are configured there. Here you can override
+# that by specifying the program to use, per URL type. For local files,
+# the type is "file" and for web links it is "http*". For example:
+# openers_by_scheme = { "http*": "firefox %u" } will make calibre run Firefox
+# for https://whatever URLs. %u is replaced by the URL to be opened. The scheme
+# takes a glob pattern allowing a single entry to match multiple URL types.
+openers_by_scheme = {}
+
+#: Set the first day of the week for calendar popups
+# It must be one of the values Default, Sunday, Monday, Tuesday, Wednesday,
+# Thursday, Friday, or Saturday, all in English, spelled exactly as shown.
+calendar_start_day_of_week = 'Default'
+
+#: East Asian language to use for transliteration
+# Setting this tweak will make calibre use the specified language as the "base"
+# language when transliterating East Asian languages to English. This might be
+# useful if you run calibre in English but want text transliterated to
+# Japanese instead of Chinese. The valid values are:
+#   'ja' for Japanese
+#   'kr' for Korean
+#   'vn' for Vietnamese
+#   'zh' for Chinese
+# Any other value will use the language set in calibre preferences as the base
+# language. A base language other than those in the above list causes transliteration
+# with a base language of Chinese.
+# Example: east_asian_base_language = 'ja'
+east_asian_base_language = ''
+
+#: Hide AI features
+# Hide AI features throughout the calibre user interface. Note that AI is
+# already opt-in and no AI related code is even loaded until the user configures some
+# AI backend. This tweak exists simply to hide a few menu entries and the like
+# that mention AI.
+hide_ai_features = False
+
+#: Control GPU usage in Qt WebEngine
+# Qt WebEngine is the library that is used to render content in the calibre
+# viewer and editor. It can optionally use the GPU for enhanced performance,
+# however, this can cause crashes/black screens on some older systems, so it
+# is disabled by default. In normal usage, the performance difference is not
+# noticeable anyway.
+qt_webengine_uses_gpu = False

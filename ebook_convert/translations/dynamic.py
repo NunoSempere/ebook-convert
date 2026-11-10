@@ -1,0 +1,37 @@
+# License: GPLv3 Copyright: 2008, Marshall T. Vandegrift <llasram@gmail.com>
+
+"""
+Dynamic language lookup of translations for user-visible strings.
+"""
+
+from __future__ import annotations
+import io
+from gettext import GNUTranslations
+from zipfile import ZipFile
+
+from ebook_convert.utils.localization import get_lc_messages_path
+from ebook_convert.utils.resources import get_path
+
+__all__ = ['translate']
+
+_CACHE: dict[str, GNUTranslations] = {}
+
+
+def translate(lang: str, text: str) -> str:
+    trans = None
+    if lang in _CACHE:
+        trans = _CACHE[lang]
+    else:
+        mpath = get_lc_messages_path(lang)
+        if mpath is not None:
+            with ZipFile(get_path('localization/locales.zip', allow_user_override=False), 'r') as zf:
+                try:
+                    buf = io.BytesIO(zf.read(mpath + '/messages.mo'))
+                except Exception:
+                    pass
+                else:
+                    trans = GNUTranslations(buf)
+                    _CACHE[lang] = trans
+    if trans is None:
+        return getattr(__builtins__, '_', lambda x: x)(text)
+    return trans.gettext(text)

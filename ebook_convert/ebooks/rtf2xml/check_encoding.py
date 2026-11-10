@@ -1,21 +1,21 @@
+#!/usr/bin/env python
+
+from __future__ import annotations
 import sys
 
 
 class CheckEncoding:
-
-    def __init__(self, bug_handler):
+    def __init__(self, bug_handler: type[Exception] = RuntimeError) -> None:
         self.__bug_handler = bug_handler
 
-    def __get_position_error(self, line, encoding, line_num):
-        char_position = 0
-        for char in line:
-            char_position +=1
+    def __get_position_error(self, line: bytes, encoding: str, line_num: int) -> None:
+        for pos, char in enumerate(line, 1):
             try:
-                char.decode(encoding)
+                bytes((char,)).decode(encoding)
             except ValueError as msg:
-                sys.stderr.write('line: %s char: %s\n%s\n' %  (line_num, char_position, str(msg)))
+                sys.stderr.write(f'line: {line_num} char: {pos}\n{msg!s}\n')
 
-    def check_encoding(self, path, encoding='us-ascii', verbose=True):
+    def check_encoding(self, path: str, encoding: str = 'us-ascii', verbose: bool = True) -> bool:
         line_num = 0
         with open(path, 'rb') as read_obj:
             for line in read_obj:
@@ -27,7 +27,7 @@ class CheckEncoding:
                         if len(line) < 1000:
                             self.__get_position_error(line, encoding, line_num)
                         else:
-                            sys.stderr.write('line: %d has bad encoding\n' % line_num)
+                            sys.stderr.write(f'line: {line_num} has bad encoding\n')
                     return True
         return False
 

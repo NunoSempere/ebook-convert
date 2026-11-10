@@ -10,24 +10,28 @@
 #                                                                       #
 #                                                                       #
 #########################################################################
-import os, re
+from __future__ import annotations
+import os
+import re
 
 from ebook_convert.ebooks.rtf2xml import copy
-from ebook_convert.utils.mreplace import MReplace
 from ebook_convert.ptempfile import better_mktemp
+from ebook_convert.utils.mreplace import MReplace
+
 from . import open_for_read, open_for_write
 
 
 class Tokenize:
     """Tokenize RTF into one line per field. Each line will contain information useful for the rest of the script"""
 
-    def __init__(self,
-            in_file,
-            bug_handler,
-            copy=None,
-            run_level=1,
-            # out_file = None,
-        ):
+    def __init__(
+        self,
+        in_file: str,
+        bug_handler: type[Exception],
+        copy: int | None = None,
+        run_level: int = 1,
+        # out_file = None,
+    ) -> None:
         self.__file = in_file
         self.__bug_handler = bug_handler
         self.__copy = copy
@@ -38,12 +42,25 @@ class Tokenize:
         self.__uc_char = 0
         self.__uc_bin = False
         self.__uc_value = [1]
-        self.__high_surrogate = None
+        self.__high_surrogate: int | None = None
 
-    def __combine_surrogates(self, code):
-        # Characters outside the BMP are written as two \u control words
-        # forming a UTF-16 surrogate pair. Unpaired surrogates become U+FFFD
-        # since a lone surrogate is not a valid XML character.
+    def __reini_utf8_counters(self) -> None:
+        self.__uc_char = 0
+        self.__uc_bin = False
+
+    def __remove_uc_chars(self, startchar: int, token: str) -> str:
+        for i in range(startchar, len(token)):
+            if self.__uc_char:
+                self.__uc_char -= 1
+            else:
+                return token[i:]
+        # if only char to skip
+        return ''
+
+    def __combine_surrogates(self, code: int) -> str:
+        # Characters outside the BMP are written as two \\u control words
+        # forming a UTF-16 surrogate pair. Unpaired surrogates are replaced with
+        # U+FFFD as they cannot be represented in the output.
         prefix = ''
         if self.__high_surrogate is not None:
             high, self.__high_surrogate = self.__high_surrogate, None
@@ -57,28 +74,15 @@ class Tokenize:
             return prefix + '\ufffd'
         return prefix + chr(code)
 
-    def __flush_high_surrogate(self):
+    def __flush_high_surrogate(self) -> str:
         # A high surrogate followed by anything other than a low surrogate is
-        # unpaired; emit a replacement character for it as a separate token.
+        # unpaired, emit a replacement character for it as a separate token
         if self.__high_surrogate is None:
             return ''
         self.__high_surrogate = None
         return '&#65533;\n'
 
-    def __reini_utf8_counters(self):
-        self.__uc_char = 0
-        self.__uc_bin = False
-
-    def __remove_uc_chars(self, startchar, token):
-        for i in range(startchar, len(token)):
-            if self.__uc_char:
-                self.__uc_char -= 1
-            else:
-                return token[i:]
-        # if only char to skip
-        return ''
-
-    def __unicode_process(self, token):
+    def __unicode_process(self, token: str) -> str:
         # change scope in
         if token == r'\{':
             self.__uc_value.append(self.__uc_value[-1])
@@ -104,11 +108,11 @@ class Tokenize:
         elif self.__uc_char:
             # handle \bin tag in case of uc char to skip
             if token[:4] == '\bin':
-                self.__uc_char -=1
+                self.__uc_char -= 1
                 self.__uc_bin = True
                 return ''
-            elif token[:1] == "\\" :
-                self.__uc_char -=1
+            elif token[:1] == '\\':
+                self.__uc_char -= 1
                 return ''
             else:
                 rest = self.__remove_uc_chars(0, token)
@@ -122,8 +126,7 @@ class Tokenize:
             uni_len = len(match_obj.group(0))
             if uni_char < 0:
                 uni_char += 65536
-            uni_char = self.__combine_surrogates(uni_char).encode(
-                'ascii', 'xmlcharrefreplace').decode('ascii')
+            uni_char = self.__combine_surrogates(uni_char).encode('ascii', 'xmlcharrefreplace').decode('ascii')
             self.__uc_char = self.__uc_value[-1]
             # there is only an unicode char
             if len(token) <= uni_len:
@@ -142,69 +145,66 @@ class Tokenize:
         # default
         return self.__flush_high_surrogate() + token
 
-    def __sub_reg_split(self,input_file):
+    def __sub_reg_split(self, input_file: str) -> list[str]:
         input_file = self.__replace_spchar.mreplace(input_file)
         # this is for older RTF
         input_file = self.__par_exp.sub(r'\n\\par \n', input_file)
-        input_file = self.__cwdigit_exp.sub(r"\g<1>\n\g<2>", input_file)
-        input_file = self.__cs_ast.sub(r"\g<1>", input_file)
-        input_file = self.__ms_hex_exp.sub(r"\\mshex0\g<1> ", input_file)
-        input_file = self.__utf_ud.sub(r"\\{\\uc0 \g<1>\\}", input_file)
+        input_file = self.__cwdigit_exp.sub(r'\g<1>\n\g<2>', input_file)
+        input_file = self.__cs_ast.sub(r'\g<1>', input_file)
+        input_file = self.__ms_hex_exp.sub(r'\\mshex0\g<1> ', input_file)
+        input_file = self.__utf_ud.sub(r'\\{\\uc0 \g<1>\\}', input_file)
         # remove \n in bin data
-        input_file = self.__bin_exp.sub(lambda x:
-                                        x.group().replace('\n', '') + '\n', input_file)
+        input_file = self.__bin_exp.sub(lambda x: x.group().replace('\n', '') + '\n', input_file)
         # split
         tokens = re.split(self.__splitexp, input_file)
         # remove empty tokens and \n
         return list(filter(lambda x: len(x) > 0 and x != '\n', tokens))
 
-    def __compile_expressions(self):
+    def __compile_expressions(self) -> None:
         SIMPLE_RPL = {
-            "\\\\": "\\backslash ",
-            "\\~": "\\~ ",
-            "\\;": "\\; ",
-            "&": "&amp;",
-            "<": "&lt;",
-            ">": "&gt;",
-            "\\~": "\\~ ",
-            "\\_": "\\_ ",
-            "\\:": "\\: ",
-            "\\-": "\\- ",
+            '\\\\': '\\backslash ',
+            '\\~': '\\~ ',
+            '\\;': '\\; ',
+            '&': '&amp;',
+            '<': '&lt;',
+            '>': '&gt;',
+            '\\_': '\\_ ',
+            '\\:': '\\: ',
+            '\\-': '\\- ',
             # turn into a generic token to eliminate special
             # cases and make processing easier
-            "\\{": "\\ob ",
+            '\\{': '\\ob ',
             # turn into a generic token to eliminate special
             # cases and make processing easier
-            "\\}": "\\cb ",
+            '\\}': '\\cb ',
             # put a backslash in front of to eliminate special cases and
             # make processing easier
-            "{": "\\{",
+            '{': '\\{',
             # put a backslash in front of to eliminate special cases and
             # make processing easier
-            "}": "\\}",
-            }
+            '}': '\\}',
+        }
         self.__replace_spchar = MReplace(SIMPLE_RPL)
         # add ;? in case of char following \u
         self.__ms_hex_exp = re.compile(r"\\\'([0-9a-fA-F]{2})")
-        self.__utf_exp = re.compile(r"\\u(-?\d{3,6}) ?")
-        self.__bin_exp = re.compile(r"(?:\\bin(-?\d{0,10})[\n ]+)[01\n]+")
+        self.__utf_exp = re.compile(r'\\u(-?\d{3,6}) ?')
+        self.__bin_exp = re.compile(r'(?:\\bin(-?\d{0,10})[\n ]+)[01\n]+')
         # manage upr/ud situations
-        self.__utf_ud = re.compile(r"\\{[\n ]?\\upr[\n ]?(?:\\{.*?\\})[\n ]?" +
-                       r"\\{[\n ]?\\*[\n ]?\\ud[\n ]?(\\{.*?\\})[\n ]?\\}[\n ]?\\}")
+        self.__utf_ud = re.compile(r'\\{[\n ]?\\upr[\n ]?(?:\\{.*?\\})[\n ]?' + r'\\{[\n ]?\\*[\n ]?\\ud[\n ]?(\\{.*?\\})[\n ]?\\}[\n ]?\\}')
         # add \n in split for whole file reading
         # why keep backslash whereas \is replaced before?
         # remove \n from endline char
-        self.__splitexp = re.compile(r"(\\[{}]|\n|\\[^\s\\{}&]+(?:[ \t\r\f\v])?)")
+        self.__splitexp = re.compile(r'(\\[{}]|\n|\\[^\s\\{}&]+(?:[ \t\r\f\v])?)')
         # this is for old RTF
         self.__par_exp = re.compile(r'(\\\n+|\\ )')
         # handle improper cs char-style with \* before without {
         self.__cs_ast = re.compile(r'\\\*([\n ]*\\cs\d+[\n \\]+)')
         # handle cw using a digit as argument and without space as delimiter
-        self.__cwdigit_exp = re.compile(r"(\\[a-zA-Z]+[\-0-9]+)([^0-9 \\]+)")
+        self.__cwdigit_exp = re.compile(r'(\\[a-zA-Z]+[\-0-9]+)([^0-9 \\]+)')
 
-    def tokenize(self):
-        """Main class for handling other methods. Reads the file \
-        , uses method self.sub_reg to make basic substitutions,\
+    def tokenize(self) -> None:
+        """Main class for handling other methods. Reads the file,
+        uses method self.sub_reg to make basic substitutions,
         and process tokens by itself"""
         # read
         with open_for_read(self.__file) as read_obj:
@@ -224,25 +224,25 @@ class Tokenize:
         # Move and copy
         copy_obj = copy.Copy(bug_handler=self.__bug_handler)
         if self.__copy:
-            copy_obj.copy_file(self.__write_to, "tokenize.data")
+            copy_obj.copy_file(self.__write_to, 'tokenize.data')
         copy_obj.rename(self.__write_to, self.__file)
         os.remove(self.__write_to)
 
         # self.__special_tokens = [ '_', '~', "'", '{', '}' ]
 
+
 # import sys
 # def main(args=sys.argv):
-    # if len(args) < 2:
-        # print 'No file'
-        # return
-    # file = 'data_tokens.txt'
-    # if len(args) == 3:
-        # file = args[2]
-    # to = Tokenize(args[1], Exception, out_file = file)
-    # to.tokenize()
-
+# if len(args) < 2:
+# print('No file')
+# return
+# file = 'data_tokens.txt'
+# if len(args) == 3:
+# file = args[2]
+# to = Tokenize(args[1], Exception, out_file = file)
+# to.tokenize()
 
 # if __name__ == '__main__':
-    # sys.exit(main())
+# sys.exit(main())
 
 # calibre-debug -e src/calibre/ebooks/rtf2xml/tokenize.py

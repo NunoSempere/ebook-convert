@@ -1,9 +1,49 @@
+# License: GPLv3 Copyright: 2008, Kovid Goyal <kovid at kovidgoyal.net>
+
+from __future__ import annotations
+import enum
 import importlib
+import os
 import sys
 import zipfile
+from typing import TYPE_CHECKING
 
-from ebook_convert.constants_old import numeric_version
+from ebook_convert.constants import ismacos, iswindows, numeric_version
 from ebook_convert.ptempfile import PersistentTemporaryFile
+from ebook_convert.utils.localization import _
+
+if TYPE_CHECKING:
+    import builtins
+    from collections.abc import Callable, Collection, Iterable, Iterator, Sequence
+    from optparse import Values
+    from types import ModuleType
+    from typing import IO
+
+    from qt.core import QSize, QWidget
+
+    from ebook_convert.ai import AICapabilities, ChatMessage, ChatResponse, ImageData, ImageGenerationOptions, ImageGenerationResult, StructuredOutputResult
+    from ebook_convert.db.cache import Cache
+    from ebook_convert.db.legacy import LibraryDatabase
+    from ebook_convert.ebooks.metadata.book.base import Metadata
+    from ebook_convert.gui2.actions import InterfaceAction
+    from ebook_convert.gui2.preferences import ConfigWidgetBase
+    from ebook_convert.gui2.store import StorePlugin
+    from ebook_convert.gui2.ui import Main
+    from ebook_convert.srv.routes import RouteFunction
+
+    #: The database passed to the post import/convert/delete/add hooks of file type plugins
+    type FileTypePluginDB = LibraryDatabase | Cache
+else:
+    Callable = Iterable = Iterator = Sequence = ChatMessage = ChatResponse = ImageData = ImageGenerationOptions = ImageGenerationResult = (
+        StructuredOutputResult
+    ) = AICapabilities = None
+
+if iswindows:
+    platform = 'windows'
+elif ismacos:
+    platform = 'osx'
+else:
+    platform = 'linux'
 
 
 class PluginNotFound(ValueError):
@@ -14,10 +54,17 @@ class InvalidPlugin(ValueError):
     pass
 
 
-class Plugin(object):
+class PluginInstallationType(enum.IntEnum):
+    EXTERNAL = 1
+    SYSTEM = 2
+    BUILTIN = 3
+
+
+class Plugin:  # {{{
     """
     A calibre plugin. Useful members include:
 
+       * ``self.installation_type``: Stores how the plugin was installed.
        * ``self.plugin_path``: Stores path to the ZIP file that contains
                                this plugin or None if it is a builtin
                                plugin
@@ -36,6 +83,7 @@ class Plugin(object):
         * :meth:`load_resources`
 
     """
+
     #: List of platforms this plugin works on.
     #: For example: ``['windows', 'osx', 'linux']``
     supported_platforms = []
@@ -48,10 +96,10 @@ class Plugin(object):
     version = (1, 0, 0)
 
     #: A short string describing what this plugin does
-    description = 'Does absolutely nothing'
+    description = _('Does absolutely nothing')
 
     #: The author of this plugin
-    author = 'Unknown'
+    author = _('Unknown')
 
     #: When more than one plugin exists for a filetype,
     #: the plugins are run in order of decreasing priority.
@@ -63,19 +111,22 @@ class Plugin(object):
     #: The earliest version of calibre this plugin requires
     minimum_calibre_version = (0, 4, 118)
 
+    #: The way this plugin is installed
+    installation_type: PluginInstallationType | None = None
+
     #: If False, the user will not be able to disable this plugin. Use with
     #: care.
     can_be_disabled = True
 
     #: The type of this plugin. Used for categorizing plugins in the
     #: GUI
-    type = 'Base'
+    type = _('Base')
 
-    def __init__(self, plugin_path):
+    def __init__(self, plugin_path: str | None) -> None:
         self.plugin_path = plugin_path
         self.site_customization = None
 
-    def initialize(self):
+    def initialize(self) -> None:
         """
         Called once when calibre plugins are initialized.  Plugins are
         re-initialized every time a new plugin is added. Also note that if the
@@ -86,12 +137,11 @@ class Plugin(object):
         resources from the plugin ZIP file. The path to the ZIP file is
         available as ``self.plugin_path``.
 
-        Note that ``self.site_customization`` is **not** available at this
-        point.
+        Note that ``self.site_customization`` is **not** available at this point.
         """
         pass
 
-    def config_widget(self):
+    def config_widget(self) -> QWidget | tuple[str, str]:
         """
         Implement this method and :meth:`save_settings` in your plugin to
         use a custom configuration dialog, rather then relying on the simple
@@ -109,7 +159,7 @@ class Plugin(object):
         """
         raise NotImplementedError()
 
-    def save_settings(self, config_widget):
+    def save_settings(self, config_widget: QWidget) -> None:
         """
         Save the settings specified by the user with config_widget.
 
@@ -118,7 +168,99 @@ class Plugin(object):
         """
         raise NotImplementedError()
 
-    def load_resources(self, names):
+    def do_user_config(self, parent: QWidget | None = None) -> int:
+        """
+        This method shows a configuration dialog for this plugin. It returns
+        True if the user clicks OK, False otherwise. The changes are
+        automatically applied.
+        """
+        from qt.core import QDialog, QDialogButtonBox, QLabel, QLineEdit, QScrollArea, QSize, Qt, QVBoxLayout
+
+        from ebook_convert.gui2 import gprefs, qapplication_or_fail
+        from ebook_convert.gui2.geometry import restore_geometry, save_geometry
+
+        class ConfigDialog(QDialog):
+            def __init__(self, parent: QWidget | None, config_widget: QWidget | tuple[str, str] | None) -> None:
+                super().__init__(parent)
+                self.config_widget = config_widget
+
+            def accept(self) -> None:
+                if (validate := getattr(self.config_widget, 'validate', None)) and getattr(self.config_widget, 'validate_before_accept', False):
+                    if not validate():
+                        return
+                super().accept()
+
+        try:
+            config_widget = self.config_widget()
+        except NotImplementedError:
+            config_widget = None
+
+        prefname = 'plugin config dialog:' + self.type + ':' + self.name
+
+        config_dialog = ConfigDialog(parent, config_widget)
+        button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        v = QVBoxLayout(config_dialog)
+        button_box.accepted.connect(config_dialog.accept)
+        button_box.rejected.connect(config_dialog.reject)
+        config_dialog.setWindowTitle(_('Customize') + ' ' + self.name)
+
+        if isinstance(config_widget, tuple):
+            from ebook_convert.gui2 import warning_dialog
+
+            warning_dialog(parent, _('Cannot configure'), config_widget[0], det_msg=config_widget[1], show=True)
+            return False
+
+        if config_widget is not None:
+
+            class SA(QScrollArea):
+                def sizeHint(self) -> QSize:
+                    sz = sw.sizeHint() if (sw := self.widget()) else QSize(0, 0)
+                    fw = 2 * self.frameWidth()
+                    vsz = vs.sizeHint().width() if (vs := self.verticalScrollBar()) else 0
+                    return QSize(sz.width() + vsz + fw, sz.height() + fw)
+
+            sa = SA(config_dialog)
+            sa.setWidget(config_widget)
+            sa.setWidgetResizable(True)
+            v.addWidget(sa)
+            v.addWidget(button_box)
+            if not restore_geometry(config_dialog, gprefs, prefname):
+                qapplication_or_fail().ensure_window_on_screen(config_dialog)
+            config_dialog.exec()
+
+            if config_dialog.result() == QDialog.DialogCode.Accepted:
+                if (validate := getattr(config_widget, 'validate', None)) is not None:
+                    if validate():
+                        self.save_settings(config_widget)
+                else:
+                    self.save_settings(config_widget)
+        else:
+            from ebook_convert.customize.ui import customize_plugin, plugin_customization
+
+            help_text = self.customization_help(gui=True)
+            help_text = QLabel(help_text, config_dialog)
+            help_text.setWordWrap(True)
+            help_text.setTextInteractionFlags(Qt.TextInteractionFlag.LinksAccessibleByMouse | Qt.TextInteractionFlag.LinksAccessibleByKeyboard)
+            help_text.setOpenExternalLinks(True)
+            v.addWidget(help_text)
+            sc = plugin_customization(self)
+            if not sc:
+                sc = ''
+            sc = sc.strip()
+            sc = QLineEdit(sc, config_dialog)
+            v.addWidget(sc)
+            v.addWidget(button_box)
+            restore_geometry(config_dialog, gprefs, prefname)
+            config_dialog.exec()
+
+            if config_dialog.result() == QDialog.DialogCode.Accepted:
+                sc = str(sc.text()).strip()
+                customize_plugin(self, sc)
+
+        save_geometry(config_dialog, gprefs, prefname)
+        return config_dialog.result()
+
+    def load_resources(self, names: Collection[str]) -> dict[str, bytes]:
         """
         If this plugin comes in a ZIP file (user added plugin), this method
         will allow you to load resources from the ZIP file.
@@ -129,8 +271,7 @@ class Plugin(object):
             pixmap.loadFromData(self.load_resources(['images/icon.png'])['images/icon.png'])
             icon = QIcon(pixmap)
 
-        :param names: List of paths to resources in the ZIP file using / as
-                      separator
+        :param names: List of paths to resources in the ZIP file using / as separator
 
         :return: A dictionary of the form ``{name: file_contents}``. Any names
                  that were not found in the ZIP file will not be present in the
@@ -146,7 +287,7 @@ class Plugin(object):
                     ans[candidate] = zf.read(candidate)
         return ans
 
-    def customization_help(self, gui=False):
+    def customization_help(self, gui: bool = False) -> str:
         """
         Return a string giving help on how to customize this plugin.
         By default raise a :class:`NotImplementedError`, which indicates that
@@ -165,7 +306,7 @@ class Plugin(object):
         """
         raise NotImplementedError()
 
-    def temporary_file(self, suffix):
+    def temporary_file(self, suffix: str) -> PersistentTemporaryFile:
         """
         Return a file-like object that is a temporary file on the file system.
         This file will remain available even after being closed and will only
@@ -176,62 +317,66 @@ class Plugin(object):
         """
         return PersistentTemporaryFile(suffix)
 
-    def is_customizable(self):
+    def is_customizable(self) -> bool:
         try:
             self.customization_help()
             return True
         except NotImplementedError:
             return False
 
-    def __enter__(self, *args):
+    def __enter__(self, *args: object) -> None:
         """
-        Add this plugin to the python path so that it's contents become
-        directly importable.  Useful when bundling large python libraries into
-        the plugin. Use it like this::
+        Add this plugin to the python path so that it's contents become directly importable.
+        Useful when bundling large python libraries into the plugin. Use it like this::
             with plugin:
                 import something
         """
         if self.plugin_path is not None:
-            from ebook_convert.utils.zipfile import ZipFile
-            zf = ZipFile(self.plugin_path)
-            extensions = {x.rpartition('.')[-1].lower() for x in
-                          zf.namelist()}
-            zip_safe = True
-            for ext in ('pyd', 'so', 'dll', 'dylib'):
-                if ext in extensions:
-                    zip_safe = False
-                    break
-            if zip_safe:
-                sys.path.insert(0, self.plugin_path)
-                self.sys_insertion_path = self.plugin_path
-            else:
-                from ebook_convert.ptempfile import TemporaryDirectory
-                self._sys_insertion_tdir = TemporaryDirectory('plugin_unzip')
-                self.sys_insertion_path = (self._sys_insertion_tdir.
-                                           __enter__(*args))
-                zf.extractall(self.sys_insertion_path)
-                sys.path.insert(0, self.sys_insertion_path)
-            zf.close()
+            from importlib.machinery import EXTENSION_SUFFIXES
 
-    def __exit__(self, *args):
-        ip = getattr(self, 'sys_insertion_path', None),
-        it = getattr(self, '_sys_insertion_tdir', None)
-        if ip in sys.path:
+            from ebook_convert.utils.zipfile import ZipFile
+
+            with ZipFile(self.plugin_path) as zf:
+                extensions = {x.lower() for x in EXTENSION_SUFFIXES}
+                zip_safe = True
+                for name in zf.namelist():
+                    for q in extensions:
+                        if name.endswith(q):
+                            zip_safe = False
+                            break
+                    if not zip_safe:
+                        break
+                if zip_safe:
+                    sys.path.append(self.plugin_path)
+                    self.sys_insertion_path = self.plugin_path
+                else:
+                    from ebook_convert.ptempfile import TemporaryDirectory
+
+                    self._sys_insertion_tdir = TemporaryDirectory('plugin_unzip')
+                    self.sys_insertion_path = self._sys_insertion_tdir.__enter__(*args)
+                    zf.extractall(self.sys_insertion_path)
+                    sys.path.append(self.sys_insertion_path)
+
+    def __exit__(self, *args: object) -> None:
+        ip, it = getattr(self, 'sys_insertion_path', None), getattr(self, '_sys_insertion_tdir', None)
+        if ip is not None and ip in sys.path:
             sys.path.remove(ip)
         if hasattr(it, '__exit__'):
             it.__exit__(*args)
 
-    def cli_main(self, args):
-        """
+    def cli_main(self, args: list[str]) -> None:
+        '''
         This method is the main entry point for your plugins command line
         interface. It is called when the user does: calibre-debug -r "Plugin
         Name". Any arguments passed are present in the args variable.
-        """
-        raise NotImplementedError('The %s plugin has no command line interface'
-                                  % self.name)
+        '''
+        raise NotImplementedError(f'The {self.name} plugin has no command line interface')
 
 
-class FileTypePlugin(Plugin):
+# }}}
+
+
+class FileTypePlugin(Plugin):  # {{{
     """
     A plugin that is associated with a particular set of file types.
     """
@@ -250,6 +395,15 @@ class FileTypePlugin(Plugin):
     #: methods of the plugin are called.
     on_postimport = False
 
+    #: If True, this plugin is run after a book is converted.
+    #: In this case the postconvert method of the plugin is called.
+    on_postconvert = False
+
+    #: If True, this plugin is run after a book file is deleted
+    #: from the database. In this case the postdelete method of
+    #: the plugin is called.
+    on_postdelete = False
+
     #: If True, this plugin is run just before a conversion
     on_preprocess = False
 
@@ -257,9 +411,13 @@ class FileTypePlugin(Plugin):
     #: on the final file produced by the conversion output plugin.
     on_postprocess = False
 
-    type = 'File type'
+    type = _('File type')
 
-    def run(self, path_to_ebook):
+    #: The path to the original file, before any file type plugins are run.
+    #: Set just before :meth:`run` is called.
+    original_path_to_file: str
+
+    def run(self, path_to_ebook: str) -> str:
         """
         Run the plugin. Must be implemented in subclasses.
         It should perform whatever modifications are required
@@ -268,8 +426,8 @@ class FileTypePlugin(Plugin):
         return the path to the original e-book. If an error is encountered
         it should raise an Exception. The default implementation
         simply return the path to the original e-book. Note that the path to
-        the original file (before any file type plugins are run, is available
-        as self.original_path_to_file).
+        the original file (before any file type plugins are run, is available as
+        self.original_path_to_file).
 
         The modified e-book file should be created with the
         :meth:`temporary_file` method.
@@ -281,14 +439,12 @@ class FileTypePlugin(Plugin):
         # Default implementation does nothing
         return path_to_ebook
 
-    def postimport(self, book_id, book_format, db):
+    def postimport(self, book_id: int, book_format: str, db: FileTypePluginDB) -> None:
         """
-        Called post import, i.e., after the book file has been added to the
-        database. Note that this is different from :meth:`postadd` which is
-        called when the book record is created for the first time. This method
-        is called whenever a new file is added to a book record. It is useful
-        for modifying the book record based on the contents of the newly added
-        file.
+        Called post import, i.e., after the book file has been added to the database. Note that
+        this is different from :meth:`postadd` which is called when the book record is created for
+        the first time. This method is called whenever a new file is added to a book record. It is
+        useful for modifying the book record based on the contents of the newly added file.
 
         :param book_id: Database id of the added book.
         :param book_format: The file type of the book that was added.
@@ -296,150 +452,199 @@ class FileTypePlugin(Plugin):
         """
         pass  # Default implementation does nothing
 
-    def postadd(self, book_id, fmt_map, db):
+    def postconvert(self, book_id: int, book_format: str, db: FileTypePluginDB) -> None:
+        """
+        Called post conversion, i.e., after the conversion output book file has been added to the database.
+        Note that it is run after a conversion only, not after a book is added. It is useful for modifying
+        the book record based on the contents of the newly added file.
+
+        :param book_id: Database id of the added book.
+        :param book_format: The file type of the book that was added.
+        :param db: Library database.
+        """
+        pass  # Default implementation does nothing
+
+    def postdelete(self, book_id: int, book_format: str, db: FileTypePluginDB) -> None:
+        """
+        Called post deletion, i.e., after the book file has been deleted from the database. Note
+        that it is not run when a book record is deleted, only when one or more formats from the
+        book are deleted. It is useful for modifying the book record based on the format of the
+        deleted file.
+
+        :param book_id: Database id of the added book.
+        :param book_format: The file type of the book that was added.
+        :param db: Library database.
+        """
+        pass  # Default implementation does nothing
+
+    def postadd(self, book_id: int, fmt_map: dict[str, str], db: FileTypePluginDB) -> None:
         """
         Called post add, i.e. after a book has been added to the db. Note that
-        this is different from :meth:`postimport`, which is called after a
-        single book file has been added to a book. postadd() is called only
-        when an entire book record with possibly more than one book file has
-        been created for the first time.  This is useful if you wish to modify
-        the book record in the database when the book is first added to
-        calibre.
+        this is different from :meth:`postimport`, which is called after a single book file
+        has been added to a book. postadd() is called only when an entire book record
+        with possibly more than one book file has been created for the first time.
+        This is useful if you wish to modify the book record in the database when the
+        book is first added to calibre.
 
         :param book_id: Database id of the added book.
         :param fmt_map: Map of file format to path from which the file format
             was added. Note that this might or might not point to an actual
-            existing file, as sometimes files are added as streams. In which
-            case it might be a dummy value or a non-existent path.
+            existing file, as sometimes files are added as streams. In which case
+            it might be a dummy value or a non-existent path.
         :param db: Library database
         """
         pass  # Default implementation does nothing
 
 
-class MetadataReaderPlugin(Plugin):
+# }}}
+
+
+class MetadataReaderPlugin(Plugin):  # {{{
     """
     A plugin that implements reading metadata from a set of file types.
     """
+
     #: Set of file types for which this plugin should be run.
     #: For example: ``set(['lit', 'mobi', 'prc'])``
     file_types = set()
 
-    supported_platforms = ['osx', 'linux']
+    supported_platforms = ['windows', 'osx', 'linux']
     version = numeric_version
     author = 'Kovid Goyal'
 
-    type = 'Metadata reader'
+    type = _('Metadata reader')
 
-    def __init__(self, *args, **kwargs):
-        Plugin.__init__(self, *args, **kwargs)
+    def __init__(self, plugin_path: str | None) -> None:
+        Plugin.__init__(self, plugin_path)
         self.quick = False
 
-    def get_metadata(self, stream, type):
+    def get_metadata(self, stream: IO[bytes], type: str) -> Metadata | None:
         """
         Return metadata for the file represented by stream (a file like object
         that supports reading). Raise an exception when there is an error
         with the input data.
 
         :param type: The type of file. Guaranteed to be one of the entries
-                     in :attr:`file_types`.
-        :return: A :class:`ebook_convert.ebooks.metadata.book.Metadata`
-                 object
+            in :attr:`file_types`.
+        :return: A :class:`calibre.ebooks.metadata.book.Metadata` object
         """
-        return None
+        return
 
 
-class MetadataWriterPlugin(Plugin):
+# }}}
+
+
+class MetadataWriterPlugin(Plugin):  # {{{
     """
     A plugin that implements reading metadata from a set of file types.
     """
+
     #: Set of file types for which this plugin should be run.
     #: For example: ``set(['lit', 'mobi', 'prc'])``
     file_types = set()
 
-    supported_platforms = ['osx', 'linux']
+    supported_platforms = ['windows', 'osx', 'linux']
     version = numeric_version
     author = 'Kovid Goyal'
 
-    type = 'Metadata writer'
+    type = _('Metadata writer')
 
-    def __init__(self, *args, **kwargs):
-        Plugin.__init__(self, *args, **kwargs)
+    def __init__(self, plugin_path: str | None) -> None:
+        Plugin.__init__(self, plugin_path)
         self.apply_null = False
+        self.force_identifiers = False
 
-    def set_metadata(self, stream, mi, type):
+    def set_metadata(self, stream: IO[bytes], mi: Metadata, type: str) -> None:
         """
         Set metadata for the file represented by stream (a file like object
         that supports reading). Raise an exception when there is an error
         with the input data.
 
         :param type: The type of file. Guaranteed to be one of the entries
-                     in :attr:`file_types`.
-        :param mi: A :class:`ebook_convert.ebooks.metadata.book.Metadata`
-                   object
+            in :attr:`file_types`.
+        :param mi: A :class:`calibre.ebooks.metadata.book.Metadata` object
         """
         pass
 
 
-class CatalogPlugin(Plugin):
+# }}}
+
+
+class CatalogPlugin(Plugin):  # {{{
     """
     A plugin that implements a catalog generator.
     """
 
-    resources_path = None
+    resources_path: str | None = None
 
     #: Output file type for which this plugin should be run.
     #: For example: 'epub' or 'xml'
     file_types = set()
 
-    type = 'Catalog generator'
+    type = _('Catalog generator')
 
-    #: CLI parser options specific to this plugin, declared as namedtuple
-    #: Option:
+    #: CLI parser options specific to this plugin, declared as `namedtuple` `Option`:
     #:
-    #:   from collections import namedtuple
-    #:   Option = namedtuple('Option', 'option, default, dest, help')
-    #:   cli_options = [Option('--catalog-title', default = 'My Catalog',
-    #:   dest = 'catalog_title', help = ('Title of generated catalog. '
-    #:                                     '\nDefault:' +
-    #:                                   " '" + '%default' + "'"))]
-    #:   cli_options parsed in
-    #:   ebook_convert.db.cli.cmd_catalog:option_parser()
+    #:     from collections import namedtuple
+    #:     Option = namedtuple('Option', 'option, default, dest, help')
+    #:     cli_options = [Option('--catalog-title', default = 'My Catalog',
+    #:     dest = 'catalog_title', help = (_('Title of generated catalog. \nDefault:') + " '" + '%default' + "'"))]
+    #:     cli_options parsed in calibre.db.cli.cmd_catalog:option_parser()
     #:
     cli_options = []
 
-    def _field_sorter(self, key):
+    def _field_sorter(self, key: str) -> str:
         """
         Custom fields sort after standard fields
         """
         if key.startswith('#'):
-            return '~%s' % key[1:]
+            return f'~{key[1:]}'
         else:
             return key
 
-    def search_sort_db(self, db, opts):
+    def search_sort_db(self, db: LibraryDatabase, opts: Values) -> list[dict[str | int, object]]:
 
-        db.search(opts.search_text)
+        db.data.search(opts.search_text)
 
-        if opts.sort_by:
+        if getattr(opts, 'sort_by', None):
             # 2nd arg = ascending
             db.sort(opts.sort_by, True)
         return db.get_data_as_dict(ids=opts.ids)
 
-    def get_output_fields(self, db, opts):
+    def get_output_fields(self, db: LibraryDatabase, opts: Values) -> list[str]:
         # Return a list of requested fields
-        all_std_fields = {'author_sort', 'authors', 'comments', 'cover',
-                          'formats', 'id', 'isbn', 'library_name', 'ondevice',
-                          'pubdate', 'publisher', 'rating', 'series_index',
-                          'series', 'size', 'tags', 'timestamp', 'title_sort',
-                          'title', 'uuid', 'languages', 'identifiers'}
-        all_custom_fields = set(db.custom_field_keys())
+        all_std_fields = {
+            'author_sort',
+            'authors',
+            'comments',
+            'cover',
+            'formats',
+            'id',
+            'isbn',
+            'library_name',
+            'ondevice',
+            'pubdate',
+            'publisher',
+            'rating',
+            'series_index',
+            'series',
+            'size',
+            'tags',
+            'timestamp',
+            'title_sort',
+            'title',
+            'uuid',
+            'languages',
+            'identifiers',
+        }
+        all_custom_fields = set(db.field_metadata.custom_field_keys())
         for field in list(all_custom_fields):
             fm = db.field_metadata[field]
             if fm['datatype'] == 'series':
-                all_custom_fields.add(field+'_index')
+                all_custom_fields.add(field + '_index')
         all_fields = all_std_fields.union(all_custom_fields)
 
-        if opts.fields != 'all':
+        if getattr(opts, 'fields', 'all') != 'all':
             # Make a list from opts.fields
             of = [x.strip() for x in opts.fields.split(',')]
             requested_fields = set(of)
@@ -447,41 +652,57 @@ class CatalogPlugin(Plugin):
             # Validate requested_fields
             if requested_fields - all_fields:
                 from ebook_convert.library import current_library_name
-                invalid_fields = sorted(list(requested_fields - all_fields))
-                print("invalid --fields specified: %s" %
-                      ', '.join(invalid_fields))
-                print("available fields in '%s': %s" %
-                      (current_library_name(),
-                       ', '.join(sorted(list(all_fields)))))
-                raise ValueError("unable to generate catalog with specified "
-                                 "fields")
+
+                invalid_fields = sorted(requested_fields - all_fields)
+                print('invalid --fields specified: {}'.format(', '.join(invalid_fields)))
+                print("available fields in '{}': {}".format(current_library_name(), ', '.join(sorted(all_fields))))
+                raise ValueError('unable to generate catalog with specified fields')
 
             fields = [x for x in of if x in all_fields]
         else:
             fields = sorted(all_fields, key=self._field_sorter)
 
-        if (not opts.connected_device['is_device_connected'] and
-                'ondevice' in fields):
+        if not opts.connected_device['is_device_connected'] and 'ondevice' in fields:
             fields.pop(int(fields.index('ondevice')))
 
         return fields
 
-    def initialize(self):
+    def initialize(self) -> None:
         """
         If plugin is not a built-in, copy the plugin's .ui and .py files from
         the ZIP file to $TMPDIR.
-        Tab will be dynamically generated and added to the Catalog Options
-        dialog in ebook_convert.gui2.dialogs.catalog.py:Catalog
+        Tab will be dynamically generated and added to the Catalog Options dialog in
+        calibre.gui2.dialogs.catalog.py:Catalog
         """
+        from ebook_convert.customize.builtins import plugins as builtin_plugins
+        from ebook_convert.customize.ui import config
+        from ebook_convert.ptempfile import PersistentTemporaryDirectory
 
-        # TODO(gryf): remove this entire abomination in favor of map and lazy
-        # importing if needed.
-        from ebook_convert.customize.builtins import plugins as \
-            builtin_plugins
-        if not type(self) in builtin_plugins:
-            raise ValueError(f'Plugin type "{self.__str__}" not found')
+        if type(self) not in builtin_plugins and self.name not in config['disabled_plugins']:
+            files_to_copy = [f'{self.name.lower()}.{ext}' for ext in ['ui', 'py']]
+            # Non builtin plugins are always loaded from a ZIP file
+            assert self.plugin_path is not None
+            resources = zipfile.ZipFile(self.plugin_path, 'r')
 
-    def run(self, path_to_output, opts, db, ids, notification=None):
+            if self.resources_path is None:
+                self.resources_path = PersistentTemporaryDirectory('_plugin_resources', prefix='')
+
+            for file in files_to_copy:
+                try:
+                    resources.extract(file, self.resources_path)
+                except Exception:
+                    print(f' customize:__init__.initialize(): {file} not found in {os.path.basename(self.plugin_path)}')
+                    continue
+            resources.close()
+
+    def run(
+        self,
+        path_to_output: str,
+        opts: Values,
+        db: LibraryDatabase,
+        ids: Collection[int] | None = None,
+        notification: Callable[[float, str], object] | None = None,
+    ) -> object:
         """
         Run the plugin. Must be implemented in subclasses.
         It should generate the catalog in the format specified
@@ -497,38 +718,41 @@ class CatalogPlugin(Plugin):
         :param db: A LibraryDatabase2 object
         """
         # Default implementation does nothing
-        raise NotImplementedError('CatalogPlugin.generate_catalog() default '
-                                  'method, should be overridden in subclass')
+        raise NotImplementedError('CatalogPlugin.generate_catalog() default method, should be overridden in subclass')
 
 
-class InterfaceActionBase(Plugin):
+# }}}
 
-    supported_platforms = ['osx', 'linux']
+
+class InterfaceActionBase(Plugin):  # {{{
+    supported_platforms = ['windows', 'osx', 'linux']
     author = 'Kovid Goyal'
-    type = 'User interface action'
-    can_be_disabled = False
+    type = _('User interface action')
 
-    actual_plugin = None
+    #: Import path of the actual interface action class as module:class
+    actual_plugin: str | None = None
 
-    def __init__(self, *args, **kwargs):
-        Plugin.__init__(self, *args, **kwargs)
-        self.actual_plugin_ = None
+    def __init__(self, plugin_path: str | None) -> None:
+        Plugin.__init__(self, plugin_path)
+        self.actual_plugin_: InterfaceAction | None = None
 
-    def load_actual_plugin(self, gui):
+    def load_actual_plugin(self, gui: Main) -> InterfaceAction:
         """
         This method must return the actual interface action plugin object.
         """
         ac = self.actual_plugin_
         if ac is None:
+            assert self.actual_plugin is not None
             mod, cls = self.actual_plugin.split(':')
-            ac = getattr(importlib.import_module(mod),
-                         cls)(gui, self.site_customization)
+            ac = getattr(importlib.import_module(mod), cls)(gui, self.site_customization)
             self.actual_plugin_ = ac
         return ac
 
 
-class PreferencesPlugin(Plugin):
+# }}}
 
+
+class PreferencesPlugin(Plugin):  # {{{
     """
     A plugin representing a widget displayed in the Preferences dialog.
 
@@ -536,18 +760,16 @@ class PreferencesPlugin(Plugin):
     various fields of the plugin control how it is categorized in the UI.
     """
 
-    supported_platforms = ['osx', 'linux']
+    supported_platforms = ['windows', 'osx', 'linux']
     author = 'Kovid Goyal'
-    type = 'Preferences'
-    can_be_disabled = False
+    type = _('Preferences')
 
     #: Import path to module that contains a class named ConfigWidget
     #: which implements the ConfigWidgetInterface. Used by
     #: :meth:`create_widget`.
     config_widget = None
 
-    #: Where in the list of categories the :attr:`category` of this plugin
-    #: should be.
+    #: Where in the list of categories the :attr:`category` of this plugin should be.
     category_order = 100
 
     #: Where in the list of names in a category, the :attr:`gui_name` of this
@@ -555,29 +777,30 @@ class PreferencesPlugin(Plugin):
     name_order = 100
 
     #: The category this plugin should be in
-    category = None
+    category: str | None = None
 
     #: The category name displayed to the user for this plugin
-    gui_category = None
+    gui_category: str | None = None
 
     #: The name displayed to the user for this plugin
-    gui_name = None
+    gui_name: str | None = None
 
     #: The icon for this plugin, should be an absolute path
-    icon = None
+    icon: str | None = None
 
     #: The description used for tooltips and the like
     description = None
 
-    def create_widget(self, parent=None):
+    def create_widget(self, parent: QWidget | None = None) -> ConfigWidgetBase:
         """
         Create and return the actual Qt widget used for setting this group of
         preferences. The widget must implement the
-        :class:`ebook_convert.gui2.preferences.ConfigWidgetInterface`.
+        :class:`calibre.gui2.preferences.ConfigWidgetInterface`.
 
         The default implementation uses :attr:`config_widget` to instantiate
         the widget.
         """
+        assert self.config_widget is not None
         base, _, wc = self.config_widget.partition(':')
         if not wc:
             wc = 'ConfigWidget'
@@ -586,19 +809,22 @@ class PreferencesPlugin(Plugin):
         return widget(parent)
 
 
-class StoreBase(Plugin):
+# }}}
 
-    supported_platforms = ['osx', 'linux']
+
+class StoreBase(Plugin):  # {{{
+    supported_platforms = ['windows', 'osx', 'linux']
     author = 'John Schember'
-    type = 'Store'
+    type = _('Store')
     # Information about the store. Should be in the primary language
     # of the store. This should not be translatable when set by
     # a subclass.
-    description = 'An e-book store.'
+    description = _('An e-book store.')
     minimum_calibre_version = (0, 8, 0)
     version = (1, 0, 1)
 
-    actual_plugin = None
+    #: Import path of the actual store plugin class as module:class
+    actual_plugin: str | None = None
 
     # Does the store only distribute e-books without DRM.
     drm_free_only = False
@@ -610,54 +836,219 @@ class StoreBase(Plugin):
     # Is this store on an affiliate program?
     affiliate = False
 
-    def load_actual_plugin(self, gui):
+    def load_actual_plugin(self, gui: Main) -> StorePlugin:
         """
         This method must return the actual interface action plugin object.
         """
+        assert self.actual_plugin is not None
         mod, cls = self.actual_plugin.split(':')
-        self.actual_plugin_object = getattr(importlib.import_module(mod),
-                                            cls)(gui, self.name)
+        self.actual_plugin_object: StorePlugin = getattr(importlib.import_module(mod), cls)(gui, self.name)
         return self.actual_plugin_object
 
-    def customization_help(self, gui=False):
+    def customization_help(self, gui: bool = False) -> str:
         if getattr(self, 'actual_plugin_object', None) is not None:
             return self.actual_plugin_object.customization_help(gui)
         raise NotImplementedError()
 
-    def config_widget(self):
+    def config_widget(self) -> QWidget | tuple[str, str]:
         if getattr(self, 'actual_plugin_object', None) is not None:
             return self.actual_plugin_object.config_widget()
         raise NotImplementedError()
 
-    def save_settings(self, config_widget):
+    def save_settings(self, config_widget: QWidget) -> None:
         if getattr(self, 'actual_plugin_object', None) is not None:
             return self.actual_plugin_object.save_settings(config_widget)
         raise NotImplementedError()
 
 
-class EditBookToolPlugin(Plugin):
+# }}}
 
-    type = 'Edit book tool'
+
+class EditBookToolPlugin(Plugin):  # {{{
+    type = _('Edit book tool')
     minimum_calibre_version = (1, 46, 0)
 
 
-class LibraryClosedPlugin(Plugin):
+# }}}
+
+
+class LibraryClosedPlugin(Plugin):  # {{{
     """
     LibraryClosedPlugins are run when a library is closed, either at shutdown,
     when the library is changed, or when a library is used in some other way.
     At the moment these plugins won't be called by the CLI functions.
     """
-    type = 'Library closed'
+
+    type = _('Library closed')
 
     # minimum version 2.54 because that is when support was added
     minimum_calibre_version = (2, 54, 0)
 
-    def run(self, db):
+    def run(self, db: Cache) -> None:
         """
         The db will be a reference to the new_api (db.cache.py).
 
         The plugin must run to completion. It must not use the GUI, threads, or
         any signals.
         """
-        raise NotImplementedError('LibraryClosedPlugin '
-                                  'run method must be overridden in subclass')
+        raise NotImplementedError('LibraryClosedPlugin run method must be overridden in subclass')
+
+
+# }}}
+
+
+class AIProviderPlugin(Plugin):  # {{{
+    """
+    AIProvider plugins abstract AI services that can be used by the rest of calibre.
+    """
+
+    type = _('AI provider')
+
+    # minimum version when support for this plugin type was added
+    minimum_calibre_version = (8, 10, 0)
+
+    # Used by builtin AI Provider plugins to live load the backend code
+    builtin_live_module_name = ''
+
+    _builtin_live_module: ModuleType | None
+
+    # See the AICapabilities enum. Sub-classes *must* implement this to the
+    # capabilities they support. Note this is independent of configuration.
+    @property
+    def capabilities(self) -> AICapabilities:
+        raise NotImplementedError()
+
+    @property
+    def builtin_live_module(self) -> ModuleType | None:
+        if not self.builtin_live_module_name:
+            return None
+        if (ans := self._builtin_live_module) is None:
+            from ebook_convert.live import Strategy, load_module
+
+            ans = self._builtin_live_module = load_module(self.builtin_live_module_name, strategy=Strategy.fast)
+        return ans
+
+    @property
+    def is_ready_for_use(self) -> bool:
+        if (m := self.builtin_live_module) is None:
+            return False
+        return m.is_ready_for_use()
+
+    def initialize(self) -> None:
+        self._builtin_live_module = None
+
+    def customization_help(self, gui: bool = False) -> str:
+        return ''
+
+    def config_widget(self) -> QWidget:
+        """
+        The config widget for an AI plugin must support validate() and additionally the property
+        is_ready_for_use which must be true iff the plugin is ready to be used,
+        i.e. it does not require configuration such as an API key or the API key is already set.
+        """
+        if (m := self.builtin_live_module) is not None:
+            return m.config_widget()
+        raise NotImplementedError()
+
+    def save_settings(self, config_widget: QWidget) -> None:
+        if (m := self.builtin_live_module) is not None:
+            return m.save_settings(config_widget)
+        raise NotImplementedError()
+
+    def text_chat(self, messages: Iterable[ChatMessage], use_model: str = '') -> Iterator[ChatResponse]:
+        """
+        Send the specified chat messages to the AI and return an iterable over its streaming responses.
+        The :code:`use_model` parameter will cause the plugin to use a specific model, useful when having
+        a conversation, to ensure the same model responds for every subsequent query.
+        """
+        if (m := self.builtin_live_module) is None:
+            raise NotImplementedError()
+        yield from m.text_chat(messages, use_model)
+
+    def generate_image(
+        self,
+        prompt: str,
+        source_images: Sequence[ImageData] = (),
+        options: ImageGenerationOptions | None = None,
+        use_model: str = '',
+    ) -> ImageGenerationResult:
+        """
+        Generate an image from the specified prompt. When :code:`source_images` are specified,
+        they are edited/transformed as per the prompt instead (the plugin must have the
+        text_and_image_to_image capability for this). Errors are reported via the
+        exception field of the returned result, rather than being raised. The
+        :code:`use_model` parameter causes the plugin to use the specified model rather
+        than choosing one automatically.
+        """
+        if (m := self.builtin_live_module) is None:
+            raise NotImplementedError()
+        if options is None:
+            from ebook_convert.ai import ImageGenerationOptions
+
+            options = ImageGenerationOptions()
+        return m.generate_image(prompt, source_images, options, use_model)
+
+    # note: builtins.type as the Plugin.type class attribute shadows the builtin here
+    def generate_structured_output(
+        self, prompt: str, schema: builtins.type, instructions: str = '', use_model: str = '', on_text: Callable[[str], None] | None = None
+    ) -> StructuredOutputResult:
+        """
+        Send the specified prompt to the AI and return its response as JSON conforming to the
+        specified schema, parsed into an instance of the schema class. The schema is specified
+        as a Python class with type annotated fields, see calibre.ai.structured for the supported
+        annotations. Use typing.Annotated[T, 'description'] and class docstrings to tell the AI
+        what fields mean. Providers that support structured output natively use it, others are
+        prompted with a TypeScript rendering of the schema. Errors are reported via the exception
+        field of the returned result, rather than being raised. Any extra :code:`instructions`
+        are sent to the AI as a system prompt. The :code:`use_model` parameter causes the plugin
+        to use the specified model rather than choosing one automatically. When :code:`on_text`
+        is specified, it is called with every fragment of the raw JSON text of the response as it
+        is received, on the calling thread, allowing parts of the response to be shown before it
+        is complete, see calibre.ai.structured.StreamingStringField.
+        """
+        m = self.builtin_live_module
+        if m is not None and hasattr(m, 'generate_structured_output'):
+            return m.generate_structured_output(prompt, schema, instructions, use_model, on_text)
+        # Fallback for third party plugins and stale live modules that only implement text_chat()
+        from ebook_convert.ai.structured import structured_output_via_prompt, structured_output_with_error_handler
+
+        return structured_output_with_error_handler(
+            lambda: structured_output_via_prompt(self.text_chat, prompt, schema, instructions, use_model, self.name, on_text)
+        )
+
+    def human_readable_model_name(self, model_id: str) -> str:
+        "Return a human readable model name for the specified model id"
+        if (m := self.builtin_live_module) is None:
+            return model_id
+        return m.human_readable_model_name(model_id)
+
+    def configured_model_name(self, capability: AICapabilities) -> str:
+        "Return the model id that would be used for a query with the given capability, or empty string if not determinable"
+        m = self.builtin_live_module
+        if m is not None and hasattr(m, 'configured_model_name'):
+            return m.configured_model_name(for_image=capability.supports_text_to_image)
+        return ''
+
+
+# }}}
+
+
+class ContentServerPlugin(Plugin):  # {{{
+    type = _('Content server')
+    supported_platforms = ['windows', 'osx', 'linux']
+    # minimum version when support for this plugin type was added
+    minimum_calibre_version = (9, 12, 0)
+
+    def content_server_endpoints(self) -> Sequence[RouteFunction]:
+        """
+        Return endpoint functions decorated with @endpoint().
+        These are registered with the content server's router at startup.
+
+        The default returns an empty tuple. Override to provide routes.
+        Endpoints with auth_required=False will be publicly accessible.
+        Endpoints with a route matching an existing route will not be added.
+        """
+        return ()
+
+
+# }}}

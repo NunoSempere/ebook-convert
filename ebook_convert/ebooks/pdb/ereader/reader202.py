@@ -1,35 +1,47 @@
+# License: GPLv3 Copyright: 2009, John Schember <john@nachtimwald.com>
+
 """
-Read content from ereader pdb file with a 116 and 202 byte header created by
-Makebook.
+Read content from ereader pdb file with a 116 and 202 byte header created by Makebook.
 """
+
+from __future__ import annotations
 import os
 import struct
+from typing import IO, TYPE_CHECKING
 
-from ebook_convert.polyglot import as_unicode
-from ebook_convert.utils import directory
+from ebook_convert import CurrentDir
 from ebook_convert.ebooks.metadata.opf2 import OPFCreator
-from ebook_convert.ebooks.pdb.formatreader import FormatReader
 from ebook_convert.ebooks.pdb.ereader import EreaderError
+from ebook_convert.ebooks.pdb.formatreader import FormatReader
+
+if TYPE_CHECKING:
+    from optparse import Values
+
+    from ebook_convert.ebooks.pdb.header import PdbHeaderReader
+    from ebook_convert.utils.logging import Log
+from ebook_convert.polyglot.builtins import as_unicode
 
 
-class HeaderRecord(object):
-    '''
+class HeaderRecord:
+    """
     The first record in the file is always the header record. It holds
     information related to the location of text, images, and so on
     in the file. This is used in conjunction with the sections
     defined in the file header.
-    '''
+    """
 
-    def __init__(self, raw):
-        self.version, = struct.unpack('>H', raw[0:2])
-        self.non_text_offset, = struct.unpack('>H', raw[8:10])
+    num_image_pages: int
+    image_data_offset: int
+
+    def __init__(self, raw: bytes) -> None:
+        (self.version,) = struct.unpack('>H', raw[0:2])
+        (self.non_text_offset,) = struct.unpack('>H', raw[8:10])
 
         self.num_text_pages = self.non_text_offset - 1
 
 
 class Reader202(FormatReader):
-
-    def __init__(self, header, stream, log, options):
+    def __init__(self, header: PdbHeaderReader, stream: IO[bytes], log: Log, options: Values) -> None:
         self.log = log
         self.encoding = options.input_encoding
 
@@ -42,54 +54,45 @@ class Reader202(FormatReader):
         self.header_record = HeaderRecord(self.section_data(0))
 
         if self.header_record.version not in (2, 4):
-            raise EreaderError('Unknown book version %i.' % self.header_record.version)
+            raise EreaderError(f'Unknown book version {self.header_record.version}.')
 
         from ebook_convert.ebooks.metadata.pdb import get_metadata
+
         self.mi = get_metadata(stream, False)
 
-    def section_data(self, number):
+    def section_data(self, number: int) -> bytes:
         return self.sections[number]
 
-    def decompress_text(self, number):
+    def decompress_text(self, number: int) -> str:
         from ebook_convert.ebooks.compression.palmdoc import decompress_doc
+
         data = bytearray(self.section_data(number))
         data = bytes(bytearray(x ^ 0xA5 for x in data))
         return decompress_doc(data).decode(self.encoding or 'cp1252', 'replace')
 
-    def get_image(self, number):
+    def get_image(self, number: int) -> tuple[bytes | None, bytes | None]:
         name = None
         img = None
 
         data = self.section_data(number)
         if data.startswith(b'PNG'):
-            name = data[4:4 + 32].strip(b'\x00')
+            name = data[4 : 4 + 32].strip(b'\x00')
             img = data[62:]
 
         return name, img
 
-    def image_dest(self, name, base):
-        # Calibre b6da1c3878: image names come from the file, keep them
-        # inside the images directory
-        base = os.path.abspath(base)
-        if not base.endswith(os.sep):
-            base += os.sep
-        ans = os.path.abspath(os.path.join(base, name))
-        if os.path.commonprefix([ans, base]) != base:
-            ans = ''
-        return ans
-
-    def get_text_page(self, number):
-        '''
+    def get_text_page(self, number: int) -> str:
+        """
         Only palmdoc compression is supported. The text is xored with 0xA5 and
         assumed to be encoded as Windows-1252. The encoding is part of
         the eReader file spec and should always be this encoding.
-        '''
+        """
         if not (1 <= number <= self.header_record.num_text_pages):
             return ''
 
         return self.decompress_text(number)
 
-    def extract_content(self, output_dir):
+    def extract_content(self, output_dir: str) -> str:
         from ebook_convert.ebooks.pml.pmlconverter import pml_to_html
 
         output_dir = os.path.abspath(output_dir)
@@ -99,17 +102,16 @@ class Reader202(FormatReader):
 
         pml = ''
         for i in range(1, self.header_record.num_text_pages + 1):
-            self.log.debug('Extracting text page %i', i)
+            self.log.debug(f'Extracting text page {i}')
             pml += self.get_text_page(i)
 
         title = self.mi.title
         if not isinstance(title, str):
             title = title.decode('utf-8', 'replace')
 
-        html = '<html><head><title>%s</title></head><body>%s</body></html>' % \
-            (title, pml_to_html(pml))
+        html = f'<html><head><title>{title}</title></head><body>{pml_to_html(pml)}</body></html>'
 
-        with directory.CurrentDir(output_dir):
+        with CurrentDir(output_dir):
             with open('index.html', 'wb') as index:
                 self.log.debug('Writing text to index.html')
                 index.write(html.encode('utf-8'))
@@ -117,25 +119,24 @@ class Reader202(FormatReader):
         if not os.path.exists(os.path.join(output_dir, 'images/')):
             os.makedirs(os.path.join(output_dir, 'images/'))
         images = []
-        images_dir = os.path.join(output_dir, 'images')
-        with directory.CurrentDir(images_dir):
+        images_dir = os.path.abspath(os.path.join(output_dir, 'images/'))
+        with CurrentDir(images_dir):
             for i in range(self.header_record.non_text_offset, len(self.sections)):
                 name, img = self.get_image(i)
-                # Calibre b7bb73e40e: the name is bytes in the file
                 name = as_unicode(name or b'')
-                dest = self.image_dest(name, images_dir) if name else ''
-                if dest:
+                if name and (dest := self.image_dest(name, images_dir)):
+                    assert img is not None  # get_image() returns a non-None img whenever name is non-None
                     images.append(name)
                     with open(dest, 'wb') as imgf:
-                        self.log.debug('Writing image %s to images/', name)
+                        self.log.debug(f'Writing image {name} to images/')
                         imgf.write(img)
 
         opf_path = self.create_opf(output_dir, images)
 
         return opf_path
 
-    def create_opf(self, output_dir, images):
-        with directory.CurrentDir(output_dir):
+    def create_opf(self, output_dir: str, images: list[str]) -> str:
+        with CurrentDir(output_dir):
             opf = OPFCreator(output_dir, self.mi)
 
             manifest = [('index.html', None)]
@@ -150,11 +151,11 @@ class Reader202(FormatReader):
 
         return os.path.join(output_dir, 'metadata.opf')
 
-    def dump_pml(self):
-        '''
+    def dump_pml(self) -> str:
+        """
         This is primarily used for debugging and 3rd party tools to
         get the plm markup that comprises the text in the file.
-        '''
+        """
         pml = ''
 
         for i in range(1, self.header_record.num_text_pages + 1):
@@ -162,19 +163,29 @@ class Reader202(FormatReader):
 
         return pml
 
-    def dump_images(self, output_dir):
-        '''
+    def image_dest(self, name: str, cwd: str) -> str:
+        base = os.path.abspath(cwd)
+        if not base.endswith(os.sep):
+            base += os.sep
+        ans = os.path.abspath(os.path.join(base, name))
+        if not ans.startswith(base):
+            ans = ''
+        return ans
+
+    def dump_images(self, output_dir: str) -> None:
+        """
         This is primarily used for debugging and 3rd party tools to
         get the images in the file.
-        '''
+        """
         if not os.path.exists(output_dir):
             os.makedirs(output_dir)
 
-        with directory.CurrentDir(output_dir):
-            for i in range(0, self.header_record.num_image_pages):
+        output_dir = os.path.abspath(output_dir)
+        with CurrentDir(output_dir):
+            for i in range(self.header_record.num_image_pages):
                 name, img = self.get_image(self.header_record.image_data_offset + i)
                 name = as_unicode(name or b'')
-                dest = self.image_dest(name, output_dir) if name else ''
-                if dest:
+                if name and (dest := self.image_dest(name, output_dir)):
+                    assert img is not None  # get_image() returns a non-None img whenever name is non-None
                     with open(dest, 'wb') as imgf:
                         imgf.write(img)

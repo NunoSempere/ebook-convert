@@ -10,22 +10,28 @@
 #                                                                       #
 #                                                                       #
 #########################################################################
-import os, re
+from __future__ import annotations
+import os
+import re
+from typing import TYPE_CHECKING
+
 from ebook_convert.ebooks.rtf2xml import copy
 from ebook_convert.ptempfile import better_mktemp
+
 from . import open_for_read, open_for_write
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 class HeadingsToSections:
-    """
-    """
-
-    def __init__(self,
-            in_file,
-            bug_handler,
-            copy=None,
-            run_level=1,
-            ):
+    def __init__(
+        self,
+        in_file: str,
+        bug_handler: type[Exception],
+        copy: int | None = None,
+        run_level: int = 1,
+    ) -> None:
         """
         Required:
             'file'
@@ -35,13 +41,13 @@ class HeadingsToSections:
             directory from which the script is run.)
         Returns:
             nothing
-            """
+        """
         self.__file = in_file
         self.__bug_handler = bug_handler
         self.__copy = copy
         self.__write_to = better_mktemp()
 
-    def __initiate_values(self):
+    def __initiate_values(self) -> None:
         """
         Required:
             Nothing
@@ -51,40 +57,51 @@ class HeadingsToSections:
             The self.__end_list is a list of tokens that will force a list to end.
             Likewise, the self.__end_lines is a list of lines that forces a list to end.
         """
-        self.__state = "default"
+        self.__state = 'default'
         self.__all_sections = []
         self.__chunk = ''
-        self.__state_dict={
-        'default'           :   self.__default_func,
-        'in_table'          :   self.__in_table_func,
-        'in_list'           :   self.__in_list_func,
-        'after_body'        :   self.__after_body_func,
+        self.__state_dict = {
+            'default': self.__default_func,
+            'in_table': self.__in_table_func,
+            'in_list': self.__in_list_func,
+            'after_body': self.__after_body_func,
         }
         self.__list_depth = 0
         self.__end_list = [
-        'mi<mk<body-close',
-        # changed 2004-04-26
-        # 'mi<mk<par-in-fld',
-        'mi<mk<sect-close',  # right before close of section
-        'mi<mk<sect-start',  # right before section start
-                            # this should be sect-close!
-        # 'mi<mk<header-beg',
-        # 'mi<mk<header-end',
-        # 'mi<mk<head___clo',
-        #
-        # changed 2004-04-26
-        # 'mi<mk<fldbk-end_',
-        # 'mi<mk<sec-fd-beg',
+            'mi<mk<body-close',
+            # changed 2004-04-26
+            # 'mi<mk<par-in-fld',
+            'mi<mk<sect-close',  # right before close of section
+            'mi<mk<sect-start',  # right before section start
+            # this should be sect-close!
+            # 'mi<mk<header-beg',
+            # 'mi<mk<header-end',
+            # 'mi<mk<head___clo',
+            #
+            # changed 2004-04-26
+            # 'mi<mk<fldbk-end_',
+            # 'mi<mk<sec-fd-beg',
         ]
         self.__headings = [
-        'heading 1', 'heading 2', 'heading 3', 'heading 4',
-        'heading 5', 'heading 6', 'heading 7', 'heading 8',
-        'heading 9'
+            'heading 1',
+            'heading 2',
+            'heading 3',
+            'heading 4',
+            'heading 5',
+            'heading 6',
+            'heading 7',
+            'heading 8',
+            'heading 9',
         ]
         self.__section_num = [0]
         self.__id_regex = re.compile(r'\<list-id\>(\d+)')
+        # Attributes used by __close_lists (currently unused path)
+        self.__left_indent: int = 0
+        self.__all_lists: list[dict] = []
+        self.__write_end_item: Callable[[], None] = self.__write_end_section
+        self.__write_end_list: Callable[[], None] = self.__write_end_section
 
-    def __close_lists(self):
+    def __close_lists(self) -> None:
         """
         Required:
             Nothing
@@ -103,14 +120,14 @@ class HeadingsToSections:
         num_levels_closed = 0
         for the_dict in self.__all_lists:
             list_indent = the_dict.get('left-indent')
-            if current_indent <= list_indent:
+            if list_indent is not None and current_indent <= list_indent:
                 self.__write_end_item()
                 self.__write_end_list()
                 num_levels_closed += 1
         self.__all_lists = self.__all_lists[num_levels_closed:]
         self.__all_lists.reverse()
 
-    def __close_sections(self, current_level):
+    def __close_sections(self, current_level: int) -> None:
         self.__all_sections.reverse()
         num_levels_closed = 0
         for level in self.__all_sections:
@@ -120,38 +137,32 @@ class HeadingsToSections:
         self.__all_sections = self.__all_sections[num_levels_closed:]
         self.__all_sections.reverse()
 
-    def __write_start_section(self, current_level, name):
+    def __write_start_section(self, current_level: int, name: str) -> None:
         section_num = ''
         for the_num in self.__section_num:
-            section_num += '%s.' % the_num
+            section_num += f'{the_num}.'
         section_num = section_num[:-1]
         num_in_level = len(self.__all_sections)
         num_in_level = self.__section_num[num_in_level]
         level = len(self.__all_sections)
-        self.__write_obj.write(
-            'mi<mk<sect-start\n'
-                )
-        self.__write_obj.write(
-                'mi<tg<open-att__<section<num>%s<num-in-level>%s<level>%s'
-                '<type>%s\n'
-                % (section_num, num_in_level, level, name)
-                )
+        self.__write_obj.write('mi<mk<sect-start\n')
+        self.__write_obj.write(f'mi<tg<open-att__<section<num>{section_num}<num-in-level>{num_in_level}<level>{level}<type>{name}\n')
 
-    def __write_end_section(self):
+    def __write_end_section(self) -> None:
         self.__write_obj.write('mi<mk<sect-close\n')
         self.__write_obj.write('mi<tg<close_____<section\n')
 
-    def __default_func(self, line):
+    def __default_func(self, line: str) -> None:
         """
         Required:
             self, line
         Returns:
             Nothing
         Logic
-            Look for the start of a paragraph defintion. If one is found, check if
+            Look for the start of a paragraph definition. If one is found, check if
             it contains a list-id. If it does, start a list. Change the state to
             in_pard.
-            """
+        """
         if self.__token_info == 'mi<mk<sect-start':
             self.__section_num[0] += 1
             self.__section_num = self.__section_num[0:1]
@@ -170,7 +181,7 @@ class HeadingsToSections:
             self.__state = 'after_body'
         self.__write_obj.write(line)
 
-    def __handle_heading(self, name):
+    def __handle_heading(self, name: str) -> None:
         num = self.__headings.index(name) + 1
         self.__close_sections(num)
         self.__all_sections.append(num)
@@ -182,12 +193,12 @@ class HeadingsToSections:
             self.__section_num[-1] += 1
         self.__write_start_section(num, name)
 
-    def __in_table_func(self, line):
+    def __in_table_func(self, line: str) -> None:
         if self.__token_info == 'mi<mk<table-end_':
             self.__state = 'default'
         self.__write_obj.write(line)
 
-    def __in_list_func(self, line):
+    def __in_list_func(self, line: str) -> None:
         if self.__token_info == 'mi<mk<list_close':
             self.__list_depth -= 1
         elif self.__token_info == 'mi<mk<list_start':
@@ -196,10 +207,10 @@ class HeadingsToSections:
             self.__state = 'default'
         self.__write_obj.write(line)
 
-    def __after_body_func(self, line):
+    def __after_body_func(self, line: str) -> None:
         self.__write_obj.write(line)
 
-    def make_sections(self):
+    def make_sections(self) -> None:
         """
         Required:
             nothing
@@ -216,11 +227,12 @@ class HeadingsToSections:
             line = line_to_read
             self.__token_info = line[:16]
             action = self.__state_dict.get(self.__state)
+            assert action is not None
             action(line)
         read_obj.close()
         self.__write_obj.close()
         copy_obj = copy.Copy(bug_handler=self.__bug_handler)
         if self.__copy:
-            copy_obj.copy_file(self.__write_to, "sections_to_headings.data")
+            copy_obj.copy_file(self.__write_to, 'sections_to_headings.data')
         copy_obj.rename(self.__write_to, self.__file)
         os.remove(self.__write_to)

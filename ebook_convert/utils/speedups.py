@@ -1,27 +1,39 @@
+#!/usr/bin/env python
+# License: GPLv3 Copyright: 2016, Kovid Goyal <kovid at kovidgoyal.net>
+
+from __future__ import annotations
 import os
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+
+    from qt.core import QPainterPath
 
 
-class ReadOnlyFileBuffer(object):
+class ReadOnlyFileBuffer:
+    """A zero copy implementation of a file like object. Uses memoryviews for efficiency."""
 
-    ''' A zero copy implementation of a file like object. Uses memoryviews for efficiency. '''
+    is_close_frame: bool = False  # used by the srv code
 
-    def __init__(self, raw):
+    def __init__(self, raw: bytes | memoryview, name: str = '') -> None:
         self.sz, self.mv = len(raw), (raw if isinstance(raw, memoryview) else memoryview(raw))
         self.pos = 0
+        self.name: str = name
 
-    def tell(self):
+    def tell(self) -> int:
         return self.pos
 
-    def read(self, n=None):
+    def read(self, n: int | None = None) -> memoryview:
         if n is None:
-            ans = self.mv[self.pos:]
+            ans = self.mv[self.pos :]
             self.pos = self.sz
             return ans
-        ans = self.mv[self.pos:self.pos+n]
+        ans = self.mv[self.pos : self.pos + n]
         self.pos = min(self.pos + n, self.sz)
         return ans
 
-    def seek(self, pos, whence=os.SEEK_SET):
+    def seek(self, pos: int, whence: int = os.SEEK_SET) -> int:
         if whence == os.SEEK_SET:
             self.pos = pos
         elif whence == os.SEEK_END:
@@ -31,20 +43,24 @@ class ReadOnlyFileBuffer(object):
         self.pos = max(0, min(self.pos, self.sz))
         return self.pos
 
-    def getvalue(self):
+    def seekable(self) -> bool:
+        return True
+
+    def getvalue(self) -> memoryview:
         return self.mv
 
-    def close(self):
+    def close(self) -> None:
         pass
 
 
-def svg_path_to_painter_path(d):
-    '''
+def svg_path_to_painter_path(d: str | bytes) -> QPainterPath:
+    """
     Convert a tiny SVG 1.2 path into a QPainterPath.
 
     :param d: The value of the d attribute of an SVG <path> tag
-    '''
-    from PyQt5.Qt import QPainterPath
+    """
+    from qt.core import QPainterPath
+
     cmd = last_cmd = b''
     path = QPainterPath()
     moveto_abs, moveto_rel = b'M', b'm'
@@ -68,12 +84,12 @@ def svg_path_to_painter_path(d):
     end = len(d)
     pos = [0]
 
-    def read_byte():
+    def read_byte() -> bytes:
         p = pos[0]
         pos[0] += 1
-        return d[p:p+1]
+        return d[p : p + 1]
 
-    def parse_float():
+    def parse_float() -> float:
         chars = []
         while pos[0] < end:
             c = read_byte()
@@ -87,7 +103,7 @@ def svg_path_to_painter_path(d):
             raise ValueError('Premature end of input while expecting a number')
         return float(b''.join(chars))
 
-    def parse_floats(num, x_offset=0, y_offset=0):
+    def parse_floats(num: int, x_offset: float = 0, y_offset: float = 0) -> Iterator[float]:
         for i in range(num):
             val = parse_float()
             yield val + (x_offset if i % 2 == 0 else y_offset)
@@ -108,7 +124,7 @@ def svg_path_to_painter_path(d):
             x += parse_float()
             y += parse_float()
             path.moveTo(x, y)
-        elif cmd == closepath1 or cmd == closepath2:
+        elif cmd in (closepath1, closepath2):
             path.closeSubpath()
         elif cmd == lineto_abs:
             x, y = parse_floats(2)
@@ -136,7 +152,7 @@ def svg_path_to_painter_path(d):
             x1, y1, x2, y2, x, y = parse_floats(6, x, y)
             path.cubicTo(x1, y1, x2, y2, x, y)
         elif cmd == smoothcurveto_abs:
-            if last_cmd == curveto_abs or last_cmd == curveto_rel or last_cmd == smoothcurveto_abs or last_cmd == smoothcurveto_rel:
+            if last_cmd in (curveto_abs, curveto_rel, smoothcurveto_abs, smoothcurveto_rel):
                 x1 = 2 * x - x2
                 y1 = 2 * y - y2
             else:
@@ -144,7 +160,7 @@ def svg_path_to_painter_path(d):
             x2, y2, x, y = parse_floats(4)
             path.cubicTo(x1, y1, x2, y2, x, y)
         elif cmd == smoothcurveto_rel:
-            if last_cmd == curveto_abs or last_cmd == curveto_rel or last_cmd == smoothcurveto_abs or last_cmd == smoothcurveto_rel:
+            if last_cmd in (curveto_abs, curveto_rel, smoothcurveto_abs, smoothcurveto_rel):
                 x1 = 2 * x - x2
                 y1 = 2 * y - y2
             else:
@@ -187,12 +203,22 @@ def svg_path_to_painter_path(d):
             elif last_cmd in (closepath1, closepath2):
                 raise ValueError('Extra parameters after close path command')
             elif last_cmd in (
-                lineto_abs, lineto_rel, hline_abs, hline_rel, vline_abs,
-                vline_rel, curveto_abs, curveto_rel,smoothcurveto_abs,
-                smoothcurveto_rel, quadcurveto_abs, quadcurveto_rel,
-                smoothquadcurveto_abs, smoothquadcurveto_rel
+                lineto_abs,
+                lineto_rel,
+                hline_abs,
+                hline_rel,
+                vline_abs,
+                vline_rel,
+                curveto_abs,
+                curveto_rel,
+                smoothcurveto_abs,
+                smoothcurveto_rel,
+                quadcurveto_abs,
+                quadcurveto_rel,
+                smoothquadcurveto_abs,
+                smoothquadcurveto_rel,
             ):
                 repeated_command = cmd = last_cmd
         else:
-            raise ValueError('Unknown path command: %s' % cmd)
+            raise ValueError(f'Unknown path command: {cmd}')
     return path

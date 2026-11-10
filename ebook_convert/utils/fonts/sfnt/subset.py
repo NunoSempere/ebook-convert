@@ -1,20 +1,32 @@
+#!/usr/bin/env python
+# License: GPLv3 Copyright: 2012, Kovid Goyal <kovid at kovidgoyal.net>
+
+from __future__ import annotations
 import traceback
 from collections import OrderedDict
-from operator import itemgetter
 from functools import partial
+from operator import itemgetter
+from typing import TYPE_CHECKING
 
-from ebook_convert.utils.icu import ord_string
 from ebook_convert.utils.fonts.sfnt.container import Sfnt
-from ebook_convert.utils.fonts.sfnt.errors import UnsupportedFont, NoGlyphs
+from ebook_convert.utils.fonts.sfnt.errors import NoGlyphs, UnsupportedFont
+from ebook_convert.utils.icu import ord_string, safe_chr
+from ebook_convert.utils.resources import get_path as P
 
+if TYPE_CHECKING:
+    from collections.abc import Iterable, Mapping, Sequence
+    from optparse import OptionParser
+
+    from ebook_convert.utils.fonts.sfnt.glyf import GlyfTable, SimpleGlyph
+    from ebook_convert.utils.fonts.sfnt.loca import LocaTable
 
 # TrueType outlines {{{
 
 
-def resolve_glyphs(loca, glyf, character_map, extra_glyphs):
+def resolve_glyphs(loca: LocaTable, glyf: GlyfTable, character_map: Mapping[int, int], extra_glyphs: set[int]) -> OrderedDict[int, SimpleGlyph]:
     unresolved_glyphs = set(character_map.values()) | extra_glyphs
     unresolved_glyphs.add(0)  # We always want the .notdef glyph
-    resolved_glyphs = {}
+    resolved_glyphs: dict[int, SimpleGlyph] = {}
 
     while unresolved_glyphs:
         glyph_id = unresolved_glyphs.pop()
@@ -31,7 +43,7 @@ def resolve_glyphs(loca, glyf, character_map, extra_glyphs):
     return OrderedDict(sorted(resolved_glyphs.items(), key=itemgetter(0)))
 
 
-def subset_truetype(sfnt, character_map, extra_glyphs):
+def subset_truetype(sfnt: Sfnt, character_map: dict[int, int], extra_glyphs: set[int]) -> None:
     loca = sfnt[b'loca']
     glyf = sfnt[b'glyf']
 
@@ -43,8 +55,7 @@ def subset_truetype(sfnt, character_map, extra_glyphs):
 
     resolved_glyphs = resolve_glyphs(loca, glyf, character_map, extra_glyphs)
     if not resolved_glyphs or set(resolved_glyphs) == {0}:
-        raise NoGlyphs('This font has no glyphs for the specified character '
-                'set, subsetting it is pointless')
+        raise NoGlyphs('This font has no glyphs for the specified character set, subsetting it is pointless')
 
     # Keep only character codes that have resolved glyphs
     for code, glyph_id in tuple(character_map.items()):
@@ -60,16 +71,17 @@ def subset_truetype(sfnt, character_map, extra_glyphs):
     head.update()
     maxp.num_glyphs = len(loca.offset_map) - 1
 
+
 # }}}
 
 
-def subset_postscript(sfnt, character_map, extra_glyphs):
+def subset_postscript(sfnt: Sfnt, character_map: dict[int, int], extra_glyphs: set[int]) -> None:
     cff = sfnt[b'CFF ']
     cff.decompile()
     cff.subset(character_map, extra_glyphs)
 
 
-def do_warn(warnings, *args):
+def do_warn(warnings: list[str] | None, *args: str) -> None:
     for arg in args:
         for line in arg.splitlines():
             if warnings is None:
@@ -82,11 +94,23 @@ def do_warn(warnings, *args):
         warnings.append('')
 
 
-def pdf_subset(sfnt, glyphs):
+def pdf_subset(sfnt: Sfnt, glyphs: set[int]) -> None:
     for tag in tuple(sfnt.tables):
-        if tag not in {b'hhea', b'head', b'hmtx', b'maxp',
-                       b'OS/2', b'post', b'cvt ', b'fpgm', b'glyf', b'loca',
-                       b'prep', b'CFF ', b'VORG'}:
+        if tag not in {
+            b'hhea',
+            b'head',
+            b'hmtx',
+            b'maxp',
+            b'OS/2',
+            b'post',
+            b'cvt ',
+            b'fpgm',
+            b'glyf',
+            b'loca',
+            b'prep',
+            b'CFF ',
+            b'VORG',
+        }:
             # Remove non core tables since they are unused in PDF rendering
             del sfnt[tag]
     if b'loca' in sfnt and b'glyf' in sfnt:
@@ -96,20 +120,26 @@ def pdf_subset(sfnt, glyphs):
         # PostScript Outlines
         subset_postscript(sfnt, {}, glyphs)
     else:
-        raise UnsupportedFont('This font does not contain TrueType '
-                'or PostScript outlines')
+        raise UnsupportedFont('This font does not contain TrueType or PostScript outlines')
 
 
-def safe_ord(x):
+def safe_ord(x: object) -> int:
     return ord_string(str(x))[0]
 
 
-def subset(raw, individual_chars, ranges=(), warnings=None):
+def subset(
+    raw: bytes, individual_chars: Iterable[str], ranges: Iterable[Sequence[str]] = (), warnings: list[str] | None = None
+) -> tuple[bytes, OrderedDict[bytes, int], OrderedDict[bytes, int]]:
     warn = partial(do_warn, warnings)
 
-    chars = set(map(safe_ord, individual_chars))
+    chars = set()
+    for ic in individual_chars:
+        try:
+            chars.add(safe_ord(ic))
+        except ValueError:
+            continue
     for r in ranges:
-        chars |= set(range(safe_ord(r[0]), safe_ord(r[1])+1))
+        chars |= set(range(safe_ord(r[0]), safe_ord(r[1]) + 1))
 
     # Always add the space character for ease of use from the command line
     if safe_ord(' ') not in chars:
@@ -124,11 +154,40 @@ def subset(raw, individual_chars, ranges=(), warnings=None):
 
     # Remove non core tables as they aren't likely to be used by renderers
     # anyway
-    core_tables = {b'cmap', b'hhea', b'head', b'hmtx', b'maxp', b'name',
-            b'OS/2', b'post', b'cvt ', b'fpgm', b'glyf', b'loca', b'prep',
-            b'CFF ', b'VORG', b'EBDT', b'EBLC', b'EBSC', b'BASE', b'GSUB',
-            b'GPOS', b'GDEF', b'JSTF', b'gasp', b'hdmx', b'kern', b'LTSH',
-            b'PCLT', b'VDMX', b'vhea', b'vmtx', b'MATH'}
+    core_tables = {
+        b'cmap',
+        b'hhea',
+        b'head',
+        b'hmtx',
+        b'maxp',
+        b'name',
+        b'OS/2',
+        b'post',
+        b'cvt ',
+        b'fpgm',
+        b'glyf',
+        b'loca',
+        b'prep',
+        b'CFF ',
+        b'VORG',
+        b'EBDT',
+        b'EBLC',
+        b'EBSC',
+        b'BASE',
+        b'GSUB',
+        b'GPOS',
+        b'GDEF',
+        b'JSTF',
+        b'gasp',
+        b'hdmx',
+        b'kern',
+        b'LTSH',
+        b'PCLT',
+        b'VDMX',
+        b'vhea',
+        b'vmtx',
+        b'MATH',
+    }
     for tag in list(sfnt):
         if tag not in core_tables:
             del sfnt[tag]
@@ -151,7 +210,7 @@ def subset(raw, individual_chars, ranges=(), warnings=None):
             gsub.decompile()
             extra_glyphs = gsub.all_substitutions(character_map.values())
         except UnsupportedFont as e:
-            warn('Usupported GSUB table: %s'%e)
+            warn(f'Usupported GSUB table: {e}')
         except Exception:
             warn('Failed to decompile GSUB table:', traceback.format_exc())
 
@@ -162,8 +221,7 @@ def subset(raw, individual_chars, ranges=(), warnings=None):
         # PostScript Outlines
         subset_postscript(sfnt, character_map, extra_glyphs)
     else:
-        raise UnsupportedFont('This font does not contain TrueType '
-                'or PostScript outlines')
+        raise UnsupportedFont('This font does not contain TrueType or PostScript outlines')
 
     # Restrict the cmap table to only contain entries for the resolved glyphs
     cmap.set_character_map(character_map)
@@ -172,21 +230,24 @@ def subset(raw, individual_chars, ranges=(), warnings=None):
         try:
             sfnt[b'kern'].restrict_to_glyphs(frozenset(character_map.values()))
         except UnsupportedFont as e:
-            warn('kern table unsupported, ignoring: %s'%e)
+            warn(f'kern table unsupported, ignoring: {e}')
         except Exception:
-            warn('Subsetting of kern table failed, ignoring:',
-                    traceback.format_exc())
+            warn('Subsetting of kern table failed, ignoring:', traceback.format_exc())
 
     raw, new_sizes = sfnt()
     return raw, old_sizes, new_sizes
 
+
 # CLI {{{
 
 
-def option_parser():
+def option_parser() -> OptionParser:
     import textwrap
+
     from ebook_convert.utils.config import OptionParser
-    parser = OptionParser(usage=textwrap.dedent('''\
+
+    parser = OptionParser(
+        usage=textwrap.dedent('''\
             %prog [options] input_font_file output_font_file characters_to_keep
 
             Subset the specified font, keeping only the glyphs for the characters in
@@ -194,38 +255,48 @@ def option_parser():
             the form: a,b,c,A-Z,0-9,xyz
 
             You can specify ranges in the list of characters, as shown above.
-            '''))
-    parser.add_option('-c', '--codes', default=False, action='store_true',
-            help='If specified, the list of characters is interpreted as '
-            'numeric unicode codes instead of characters. So to specify the '
-            'characters a,b you would use 97,98 or U+0061,U+0062')
+            ''')
+    )
+    parser.add_option(
+        '-c',
+        '--codes',
+        default=False,
+        action='store_true',
+        help='If specified, the list of characters is interpreted as '
+        'numeric unicode codes instead of characters. So to specify the '
+        'characters a,b you would use 97,98 or U+0061,U+0062',
+    )
     parser.prog = 'subset-font'
     return parser
 
 
-def print_stats(old_stats, new_stats):
-    print('========= Table comparison (original vs. subset) =========')
-    print('Table          Size  Percent             New Size New Percent')
-    print('='*80)
+def print_stats(old_stats: Mapping[bytes, int], new_stats: Mapping[bytes, int]) -> None:
+    from ebook_convert import prints
+
+    prints('========= Table comparison (original vs. subset) =========')
+    prints('Table', ' ', f"{'Size':>10}", '  ', 'Percent', '   ', f"{'New Size':>10}", ' New Percent')
+    prints('=' * 80)
     old_total = sum(old_stats.values())
     new_total = sum(new_stats.values())
-    tables = sorted(old_stats, key=lambda x: old_stats[x],
-                    reverse=True)
+    tables = sorted(old_stats, key=lambda x: old_stats[x], reverse=True)
     for table in tables:
         osz = old_stats[table]
-        op = osz/old_total * 100
+        op = osz / old_total * 100
         nsz = new_stats.get(table, 0)
-        np = nsz/new_total * 100
+        np = nsz / new_total * 100
         suffix = ' | same size'
         if nsz != osz:
-            suffix = ' | reduced to %.1f %%' % (nsz/osz * 100)
-        print('%4s  %10s  %5.1f %%  %10s  %5.1f %% %s' %
-              (table, osz, op, nsz, np, suffix))
-    print('='*80)
+            suffix = f' | reduced to {nsz / osz * 100:.1f} %'
+        prints(f'{table:>4}', '  ', f'{osz:>10}', '  ', f'{op:5.1f} %', '   ', f'{nsz:>10}', '  ', f'{np:5.1f} %', suffix)
+    prints('=' * 80)
 
 
-def main(args):
-    import sys, time
+def main(args: list[str]) -> None:
+    import sys
+    import time
+
+    from ebook_convert import prints
+
     parser = option_parser()
     opts, args = parser.parse_args(args)
     if len(args) < 4 or len(args) > 4:
@@ -235,29 +306,30 @@ def main(args):
     with open(iff, 'rb') as f:
         orig = f.read()
 
-    chars = [x for x in chars.split(',')]
+    chars = chars.split(',')
     individual, ranges = set(), set()
 
-    def not_single(c):
+    def not_single(c: str) -> None:
         if len(c) > 1:
-            print(f'{c}is not a single character')
+            prints(c, 'is not a single character', file=sys.stderr)
             raise SystemExit(1)
 
-    def conv_code(c):
+    def conv_code(c: str) -> str:
         if c.upper()[:2] in ('U+', '0X'):
-            c = int(c[2:], 16)
-        return chr(int(c))
+            return safe_chr(int(c[2:], 16))
+        return safe_chr(int(c))
 
     for c in chars:
         if '-' in c:
-            parts = [x.strip() for x in c.split('-')]
+            parts = tuple(x.strip() for x in c.split('-'))
             if len(parts) != 2:
-                print(f'Invalid range: {c}')
+                prints('Invalid range:', c, file=sys.stderr)
                 raise SystemExit(1)
             if opts.codes:
                 parts = tuple(map(conv_code, parts))
-            tuple(map(not_single, parts))
-            ranges.add(tuple(parts))
+            for i in parts:
+                not_single(i)
+            ranges.add(parts)
         else:
             if opts.codes:
                 c = conv_code(c)
@@ -266,35 +338,37 @@ def main(args):
     st = time.time()
     sf, old_stats, new_stats = subset(orig, individual, ranges)
     taken = time.time() - st
-    reduced = (len(sf)/len(orig)) * 100
+    reduced = (len(sf) / len(orig)) * 100
 
-    def sz(x):
-        return '%gKB' % (len(x)/1024.)
+    def sz(x: bytes) -> str:
+        return f'{len(x) / 1024.0:g}KB'
+
     print_stats(old_stats, new_stats)
-    print('Original size:', sz(orig), 'Subset size:', sz(sf),
-          'Reduced to: %g%%' % (reduced))
-    print('Subsetting took %g seconds' % taken)
+    prints('Original size:', sz(orig), 'Subset size:', sz(sf), f'Reduced to: {reduced:g}%')
+    prints(f'Subsetting took {taken:g} seconds')
     with open(off, 'wb') as f:
         f.write(sf)
-    print('Subset font written to:', off)
+    prints('Subset font written to:', off)
 
 
 if __name__ == '__main__':
     try:
-        import init_calibre
-        init_calibre
+        import init_calibre  # ruff: ignore[unused-import]  # type: ignore
     except ImportError:
         pass
     import sys
+
     main(sys.argv)
 # }}}
 
 # Tests {{{
 
 
-def test_mem():
-    from ebook_convert.utils.mem import memory
+def test_mem() -> None:
     import gc
+
+    from ebook_convert.utils.mem import memory
+
     gc.collect()
     start_mem = memory()
     raw = P('fonts/liberation/LiberationSerif-Regular.ttf', data=True)
@@ -304,18 +378,19 @@ def test_mem():
     del raw
     for i in range(3):
         gc.collect()
-    print('Leaked memory per call:', (memory() - start_mem)/calls*1024, 'KB')
+    print('Leaked memory per call:', (memory() - start_mem) / calls * 1024, 'KB')
 
 
-def test():
+def test() -> None:
     raw = P('fonts/liberation/LiberationSerif-Regular.ttf', data=True)
-    sf, old_stats, new_stats = subset(raw, set(('a', 'b', 'c')), ())
+    sf, old_stats, new_stats = subset(raw, {'a', 'b', 'c'}, ())
     if len(sf) > 0.3 * len(raw):
         raise Exception('Subsetting failed')
 
 
-def all():
+def all() -> None:
     from ebook_convert.utils.fonts.scanner import font_scanner
+
     failed = []
     unsupported = []
     warnings = {}
@@ -328,10 +403,9 @@ def all():
             total += 1
             try:
                 w = []
-                sf, old_stats, new_stats = subset(raw, set(('a', 'b', 'c')),
-                        (), w)
+                sf, old_stats, new_stats = subset(raw, {'a', 'b', 'c'}, (), w)
                 if w:
-                    warnings[font['full_name'] + ' (%s)'%font['path']] = w
+                    warnings['{} ({})'.format(font['full_name'], font['path'])] = w
             except NoGlyphs:
                 print('No glyphs!')
                 continue
@@ -343,9 +417,8 @@ def all():
                 print('Failed!')
                 failed.append((font['full_name'], font['path'], str(e)))
             else:
-                averages.append(sum(new_stats.values()) /
-                                sum(old_stats.values()) * 100)
-                print('Reduced to:', '%.1f'%averages[-1] , '%')
+                averages.append(sum(new_stats.values()) / sum(old_stats.values()) * 100)
+                print('Reduced to:', f'{averages[-1]:.1f}', '%')
     if unsupported:
         print('\n\nUnsupported:')
         for name, path, err in unsupported:
@@ -363,9 +436,9 @@ def all():
             print(name, path, err)
             print()
 
-    print('Average reduction to: %.1f%%'%(sum(averages)/len(averages)))
-    print('Total:', total, 'Unsupported:', len(unsupported), 'Failed:',
-            len(failed), 'Warnings:', len(warnings))
+    if averages:
+        print(f'Average reduction to: {sum(averages) / len(averages):.1f}%')
+    print('Total:', total, 'Unsupported:', len(unsupported), 'Failed:', len(failed), 'Warnings:', len(warnings))
 
 
 # }}}

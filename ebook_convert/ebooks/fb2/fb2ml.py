@@ -1,53 +1,62 @@
+# License: GPLv3 Copyright: 2009, John Schember <john@nachtimwald.com>
+
 """
 Transform OEB content into FB2 markup
 """
-from datetime import datetime
+
+from __future__ import annotations
 import re
 import textwrap
-import urllib.parse
 import uuid
+from datetime import datetime
+from typing import TYPE_CHECKING, cast
+from urllib.parse import urlparse
 
 from lxml import etree
 
-from ebook_convert import constants as const
-from ebook_convert.constants_old import __appname__, __version__
-from ebook_convert.ebooks.oeb import base
-from ebook_convert.ebooks.oeb import parse_utils
-from ebook_convert import polyglot
-from ebook_convert.utils import entities
+from ebook_convert import prepare_string_for_xml
+from ebook_convert.constants import __appname__, __version__
+from ebook_convert.ebooks.oeb.base import urlnormalize
 from ebook_convert.utils.img import save_cover_data_to
 from ebook_convert.utils.localization import lang_as_iso639_1
+from ebook_convert.utils.xml_parse import safe_xml_fromstring
+from ebook_convert.polyglot.binary import as_base64_unicode
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable
+    from optparse import Values
+
+    from lxml.etree import _Element
+
+    from ebook_convert.ebooks.oeb.base import TOC, Manifest, OEBBook
+    from ebook_convert.ebooks.oeb.stylizer import Stylizer
+    from ebook_convert.utils.logging import Log
 
 
-__license__ = 'GPL 3'
-__copyright__ = '2009, John Schember <john@nachtimwald.com>'
-__docformat__ = 'restructuredtext en'
-
-
-class FB2MLizer(object):
-    '''
+class FB2MLizer:
+    """
     Todo: * Include more FB2 specific tags in the conversion.
           * Handle notes and anchor links.
-    '''
+    """
 
-    def __init__(self, log):
+    def __init__(self, log: Log) -> None:
         self.log = log
         self.reset_state()
 
-    def reset_state(self):
+    def reset_state(self) -> None:
         # Used to ensure text and tags are always within <p> and </p>
         self.in_p = False
-        # Mapping of image names. OEB allows for images to have the same name
-        # but be stored in different directories. FB2 images are all in a flat
-        # layout so we rename all images into a sequential numbering system to
-        # ensure there are no collisions between image names.
-        self.image_hrefs = {}
+        # Mapping of image names. OEB allows for images to have the same name but be stored
+        # in different directories. FB2 images are all in a flat layout so we rename all images
+        # into a sequential numbering system to ensure there are no collisions between image names.
+        self.image_hrefs: dict[str, str] = {}
         # Mapping of toc items and their
-        self.toc = {}
+        # Maps href to {None: 'page'} or {id: level}, set to None once the page section has been started
+        self.toc: dict[str, dict[str | None, int | str] | None] = {}
         # Used to see whether a new <section> needs to be opened
         self.section_level = 0
 
-    def extract_content(self, oeb_book, opts):
+    def extract_content(self, oeb_book: OEBBook, opts: Values) -> str:
         self.log.info('Converting XHTML to FB2 markup...')
         self.oeb_book = oeb_book
         self.opts = opts
@@ -60,7 +69,7 @@ class FB2MLizer(object):
 
         return self.fb2mlize_spine()
 
-    def fb2mlize_spine(self):
+    def fb2mlize_spine(self) -> str:
         output = (
             self.fb2_header(),
             self.get_text(),
@@ -70,19 +79,15 @@ class FB2MLizer(object):
         output = self.clean_text('\n'.join(output))
 
         if self.opts.pretty_print:
-            output = etree.tostring(etree.fromstring(output),
-                                    encoding='unicode', pretty_print=True)
+            output = etree.tostring(safe_xml_fromstring(output), encoding='unicode', pretty_print=True)
 
         return '<?xml version="1.0" encoding="UTF-8"?>\n' + output
 
-    def clean_text(self, text):
+    def clean_text(self, text: str) -> str:
         # Remove pointless tags, but keep their contents.
-        text = re.sub(r'(?mu)<(strong|emphasis|strikethrough|sub|sup)>'
-                      r'(\s*)</\1>', r'\2', text)
+        text = re.sub(r'(?mu)<(strong|emphasis|strikethrough|sub|sup)>(\s*)</\1>', r'\2', text)
 
         # Clean up paragraphs endings.
-        # Calibre 1c24a53865: ASCII whitespace only, so that paragraphs made
-        # of non-breaking spaces survive
         text = re.sub(r'(?ma)\s+</p>', '</p>', text)
         # Condense empty paragraphs into a line break.
         text = re.sub(r'(?mu)(?:<p></p>\s*){3,}', '<empty-line/>', text)
@@ -102,8 +107,7 @@ class FB2MLizer(object):
         text = re.sub(r'(?mu)</title>\s*<p>', '</title>\n<p>', text)
 
         # Put line breaks between paragraphs on a separate line.
-        text = re.sub(r'(?mu)</(p|title)>\s*<empty-line/>',
-                      r'</\1>\n<empty-line/>', text)
+        text = re.sub(r'(?mu)</(p|title)>\s*<empty-line/>', r'</\1>\n<empty-line/>', text)
         text = re.sub(r'(?mu)<empty-line/>\s*<p>', '<empty-line/>\n<p>', text)
 
         # Remove empty sections.
@@ -116,21 +120,21 @@ class FB2MLizer(object):
 
         return text
 
-    def fb2_header(self):
+    def fb2_header(self) -> str:
+        from ebook_convert.ebooks.oeb.base import OPF
+
         metadata = {}
         metadata['title'] = self.oeb_book.metadata.title[0].value
         metadata['appname'] = __appname__
         metadata['version'] = __version__
-        metadata['date'] = '%i.%i.%i' % (datetime.now().day,
-                                         datetime.now().month,
-                                         datetime.now().year)
+        metadata['date'] = f'{datetime.now().day}.{datetime.now().month}.{datetime.now().year}'  # ruff: ignore[call-datetime-now-without-tzinfo]
         if self.oeb_book.metadata.language:
             lc = lang_as_iso639_1(self.oeb_book.metadata.language[0].value)
             if not lc:
                 lc = self.oeb_book.metadata.language[0].value
             metadata['lang'] = lc or 'en'
         else:
-            metadata['lang'] = u'en'
+            metadata['lang'] = 'en'
         metadata['id'] = None
         metadata['cover'] = self.get_cover()
         metadata['genre'] = self.opts.fb2_genre
@@ -151,46 +155,35 @@ class FB2MLizer(object):
                 author_middle = ' '.join(author_parts[1:-1])
                 author_last = author_parts[-1]
             metadata['author'] += '<author>'
-            metadata['author'] += (
-                '<first-name>%s</first-name>' %
-                entities.prepare_string_for_xml(author_first))
+            metadata['author'] += f'<first-name>{prepare_string_for_xml(author_first)}</first-name>'
             if author_middle:
-                metadata['author'] += (
-                    '<middle-name>%s</middle-name>' %
-                    entities.prepare_string_for_xml(author_middle))
-            metadata['author'] += (
-                '<last-name>%s</last-name>' %
-                entities.prepare_string_for_xml(author_last))
+                metadata['author'] += f'<middle-name>{prepare_string_for_xml(author_middle)}</middle-name>'
+            metadata['author'] += f'<last-name>{prepare_string_for_xml(author_last)}</last-name>'
             metadata['author'] += '</author>'
         if not metadata['author']:
-            metadata['author'] = ('<author><first-name></first-name>'
-                                  '<last-name></last-name></author>')
+            metadata['author'] = '<author><first-name></first-name><last-name></last-name></author>'
 
         metadata['keywords'] = ''
         tags = list(map(str, self.oeb_book.metadata.subject))
         if tags:
-            tags = ', '.join(entities.prepare_string_for_xml(x) for x in tags)
-            metadata['keywords'] = '<keywords>%s</keywords>' % tags
+            tags = ', '.join(prepare_string_for_xml(x) for x in tags)
+            metadata['keywords'] = f'<keywords>{tags}</keywords>'
 
         metadata['sequence'] = ''
         if self.oeb_book.metadata.series:
             index = '1'
             if self.oeb_book.metadata.series_index:
                 index = self.oeb_book.metadata.series_index[0]
-            seq = entities.prepare_string_for_xml(str(self.oeb_book.metadata
-                                                      .series[0]))
-            metadata['sequence'] = ('<sequence name="%s" number="%s"/>' %
-                                    (seq, index))
+            metadata['sequence'] = '<sequence name="{}" number="{}"/>'.format(prepare_string_for_xml(f'{self.oeb_book.metadata.series[0]}'), index)
 
         year = publisher = isbn = ''
         identifiers = self.oeb_book.metadata['identifier']
         for x in identifiers:
-            if ((x.get(base.tag('opf', 'scheme')) or '').lower() == 'uuid' or
-                    str(x).startswith('urn:uuid:')):
+            if (x.get(OPF('scheme')) or '').lower() == 'uuid' or str(x).startswith('urn:uuid:'):
                 metadata['id'] = str(x).split(':')[-1]
                 break
         if metadata['id'] is None:
-            self.log.warning('No UUID identifier found')
+            self.log.warn('No UUID identifier found')
             metadata['id'] = str(uuid.uuid4())
 
         try:
@@ -198,30 +191,23 @@ class FB2MLizer(object):
         except IndexError:
             pass
         else:
-            year = ('<year>%s</year>' %
-                    entities.prepare_string_for_xml(date.value
-                                                    .partition('-')[0]))
+            year = '<year>{}</year>'.format(prepare_string_for_xml(date.value.partition('-')[0]))
 
         try:
             publisher = self.oeb_book.metadata['publisher'][0]
         except IndexError:
             pass
         else:
-            publisher = ('<publisher>%s</publisher>' %
-                         entities.prepare_string_for_xml(publisher.value))
+            publisher = f'<publisher>{prepare_string_for_xml(publisher.value)}</publisher>'
 
         for x in identifiers:
-            if (x.get(base.tag('opf', 'scheme')) or '').lower() == 'isbn':
-                isbn = ('<isbn>%s</isbn>' %
-                        entities.prepare_string_for_xml(x.value))
+            if (x.get(OPF('scheme')) or '').lower() == 'isbn':
+                isbn = f'<isbn>{prepare_string_for_xml(x.value)}</isbn>'
 
-        metadata['year'] = year
-        metadata['isbn'] = isbn
-        metadata['publisher'] = publisher
+        metadata['year'], metadata['isbn'], metadata['publisher'] = year, isbn, publisher
         for key, value in metadata.items():
-            if key not in ('author', 'cover', 'sequence', 'keywords', 'year',
-                           'publisher', 'isbn'):
-                metadata[key] = entities.prepare_string_for_xml(value)
+            if key not in ('author', 'cover', 'sequence', 'keywords', 'year', 'publisher', 'isbn'):
+                metadata[key] = prepare_string_for_xml(cast('str', value))
 
         try:
             comments = self.oeb_book.metadata['description'][0]
@@ -229,12 +215,12 @@ class FB2MLizer(object):
             metadata['comments'] = ''
         else:
             from ebook_convert.utils.html2text import html2text
-            annot = entities.prepare_string_for_xml(html2text(comments
-                                                              .value).strip())
-            metadata['comments'] = f'<annotation><p>{annot}</p></annotation>'
+
+            metadata['comments'] = f'<annotation><p>{prepare_string_for_xml(html2text(comments.value).strip())}</p></annotation>'
 
         # Keep the indentation level of the description the same as the body.
-        header = textwrap.dedent('''\
+        header = (
+            textwrap.dedent('''\
             <FictionBook xmlns="http://www.gribuser.ru/xml/fictionbook/2.0" xmlns:l="http://www.w3.org/1999/xlink">
             <description>
                 <title-info>
@@ -259,24 +245,26 @@ class FB2MLizer(object):
                     %(year)s
                     %(isbn)s
                 </publish-info>
-            </description>''') % metadata
+            </description>''')
+            % metadata
+        )
 
         # Remove empty lines.
         return '\n'.join(filter(str.strip, header.splitlines()))
 
-    def fb2_footer(self):
+    def fb2_footer(self) -> str:
         return '</FictionBook>'
 
-    def get_cover(self):
+    def get_cover(self) -> str:
+        from ebook_convert.ebooks.oeb.base import OEB_RASTER_IMAGES, is_element_list, xpath
+
         cover_href = None
 
         # Get the raster cover if it's available.
-        if (self.oeb_book.metadata.cover and
-                str(self.oeb_book.metadata.cover[0]) in
-                self.oeb_book.manifest.ids):
+        if self.oeb_book.metadata.cover and str(self.oeb_book.metadata.cover[0]) in self.oeb_book.manifest.ids:
             id = str(self.oeb_book.metadata.cover[0])
             cover_item = self.oeb_book.manifest.ids[id]
-            if cover_item.media_type in base.OEB_RASTER_IMAGES:
+            if cover_item.media_type in OEB_RASTER_IMAGES:
                 cover_href = cover_item.href
         else:
             # Figure out if we have a title page or a cover page
@@ -287,27 +275,28 @@ class FB2MLizer(object):
                 page_name = 'cover'
 
             if page_name:
-                key = self.oeb_book.guide[page_name].href
-                cover_item = self.oeb_book.manifest.hrefs[key]
+                cover_item = self.oeb_book.manifest.hrefs[self.oeb_book.guide[page_name].href]
                 root = cover_item.data
-                # the guide can also point directly to an image
-                if isinstance(root, etree._Element):
+                if isinstance(root, etree._Element):  # the guide can also point directly to an image
                     # Get the first image in the page
-                    for img in base.xpath(root, '//h:img[@src]'):
-                        cover_href = cover_item.abshref(
-                            base.urlnormalize(img.attrib['src']))
+                    imgs = xpath(root, '//h:img[@src]')
+                    assert is_element_list(imgs)
+                    for img in imgs:
+                        cover_href = cover_item.abshref(urlnormalize(img.attrib['src']))
                         break
 
         # Only write the image tag if it is in the manifest.
         if cover_href and cover_href in self.oeb_book.manifest.hrefs:
             if cover_href not in self.image_hrefs:
-                self.image_hrefs[cover_href] = 'img_%s' % len(self.image_hrefs)
-            return ('<coverpage><image l:href="#%s"/></coverpage>' %
-                    self.image_hrefs[cover_href])
+                self.image_hrefs[cover_href] = f'img_{len(self.image_hrefs)}'
+            return f'<coverpage><image l:href="#{self.image_hrefs[cover_href]}"/></coverpage>'
+
         return ''
 
-    def get_text(self):
+    def get_text(self) -> str:
+        from ebook_convert.ebooks.oeb.base import XHTML
         from ebook_convert.ebooks.oeb.stylizer import Stylizer
+
         text = ['<body>']
 
         # Create main section if there are no others to create
@@ -316,21 +305,21 @@ class FB2MLizer(object):
             self.section_level += 1
 
         for item in self.oeb_book.spine:
-            self.log.debug('Converting %s to FictionBook2 XML', item.href)
-            stylizer = Stylizer(item.data, item.href, self.oeb_book, self.opts,
-                                self.opts.output_profile)
+            self.log.debug(f'Converting {item.href} to FictionBook2 XML')
+            root = item.data
+            assert isinstance(root, etree._Element)  # spine items are parsed (X)HTML documents
+            stylizer = Stylizer(root, item.href, self.oeb_book, self.opts, self.opts.output_profile)
 
-            # Start a <section> if we must sectionize each file or if the TOC
-            # references this page
+            # Start a <section> if we must sectionize each file or if the TOC references this page
             page_section_open = False
-            if (self.opts.sectionize == 'files' or
-                    None in self.toc.get(item.href, ())):
+            if self.opts.sectionize == 'files' or None in (self.toc.get(item.href) or ()):
                 text.append('<section>')
                 page_section_open = True
                 self.section_level += 1
 
-            text += self.dump_text(item.data.find(base.tag('xhtml', 'body')),
-                                   stylizer, item)
+            body = root.find(XHTML('body'))
+            assert body is not None
+            text += self.dump_text(body, stylizer, item)
 
             if page_section_open:
                 text.append('</section>')
@@ -344,40 +333,37 @@ class FB2MLizer(object):
         text.append('</body>')
         return ''.join(text)
 
-    def fb2mlize_images(self):
+    def fb2mlize_images(self) -> str:
         """
-        This function uses the self.image_hrefs dictionary mapping. It is
-        populated by the dump_text function.
+        This function uses the self.image_hrefs dictionary mapping. It is populated by the dump_text function.
         """
+        from ebook_convert.ebooks.oeb.base import OEB_RASTER_IMAGES
+
         images = []
         for item in self.oeb_book.manifest:
-            # Don't write the image if it's not referenced in the document's
-            # text.
+            # Don't write the image if it's not referenced in the document's text.
             if item.href not in self.image_hrefs:
                 continue
-            if item.media_type in base.OEB_RASTER_IMAGES:
+            if item.media_type in OEB_RASTER_IMAGES:
                 try:
                     if item.media_type not in ('image/jpeg', 'image/png'):
-                        imdata = save_cover_data_to(item.data,
-                                                    compression_quality=70)
-                        raw_data = polyglot.as_base64_unicode(imdata)
+                        idata = item.data
+                        assert isinstance(idata, bytes)  # raster images are unparsed bytes, errors are logged below
+                        imdata = save_cover_data_to(idata, compression_quality=70)
+                        raw_data = as_base64_unicode(imdata)
                         content_type = 'image/jpeg'
                     else:
-                        raw_data = polyglot.as_base64_unicode(item.data)
+                        raw_data = as_base64_unicode(item.data)
                         content_type = item.media_type
                     # Don't put the encoded image on a single line.
                     step = 72
-                    data = '\n'.join(raw_data[i:i+step]
-                                     for i in range(0, len(raw_data), step))
-                    images.append('<binary id="%s" content-type="%s">%s'
-                                  '</binary>' % (self.image_hrefs[item.href],
-                                                 content_type, data))
+                    data = '\n'.join(raw_data[i : i + step] for i in range(0, len(raw_data), step))
+                    images.append(f'<binary id="{self.image_hrefs[item.href]}" content-type="{content_type}">{data}</binary>')
                 except Exception as e:
-                    self.log.error('Error: Could not include file %s because '
-                                   '%s.', item.href, e)
+                    self.log.error(f'Error: Could not include file {item.href} because {e}.')
         return '\n'.join(images)
 
-    def create_flat_toc(self, nodes, level):
+    def create_flat_toc(self, nodes: Iterable[TOC], level: int) -> None:
         for item in nodes:
             if item.href is None:
                 self.create_flat_toc(item.nodes, level + 1)
@@ -386,19 +372,20 @@ class FB2MLizer(object):
             if not id:
                 self.toc[href] = {None: 'page'}
             else:
-                if not self.toc.get(href, None):
-                    self.toc[href] = {}
-                self.toc[href][id] = level
+                entry = self.toc.get(href, None)
+                if not entry:
+                    entry = self.toc[href] = {}
+                entry[id] = level
                 self.create_flat_toc(item.nodes, level + 1)
 
-    def ensure_p(self):
+    def ensure_p(self) -> tuple[list[str], list[str]]:
         if self.in_p:
             return [], []
         else:
             self.in_p = True
             return ['<p>'], ['p']
 
-    def close_open_p(self, tags):
+    def close_open_p(self, tags: list[str]) -> tuple[list[str], bool]:
         text = ['']
         added_p = False
 
@@ -407,13 +394,13 @@ class FB2MLizer(object):
             closed_tags = []
             tags.reverse()
             for t in tags:
-                text.append('</%s>' % t)
+                text.append(f'</{t}>')
                 closed_tags.append(t)
                 if t == 'p':
                     break
             closed_tags.reverse()
             for t in closed_tags:
-                text.append('<%s>' % t)
+                text.append(f'<{t}>')
         else:
             text.append('<p>')
             added_p = True
@@ -421,90 +408,81 @@ class FB2MLizer(object):
 
         return text, added_p
 
-    def handle_simple_tag(self, tag, tags):
-        s_out = []
-        s_tags = []
+    def handle_simple_tag(self, tag: str, tags: list[str]) -> tuple[list[str], list[str]]:
+        s_out: list[str] = []
+        s_tags: list[str] = []
         if tag not in tags:
             p_out, p_tags = self.ensure_p()
             s_out += p_out
             s_tags += p_tags
-            s_out.append('<%s>' % tag)
+            s_out.append(f'<{tag}>')
             s_tags.append(tag)
         return s_out, s_tags
 
-    def dump_text(self, elem_tree, stylizer, page, tag_stack=[]):
+    def dump_text(self, elem_tree: _Element, stylizer: Stylizer, page: Manifest.Item, tag_stack: list[str] | None = None) -> list[str]:
         """
-        This function is intended to be used in a recursive manner. dump_text
-        will run though all elements in the elem_tree and call itself on each
-        element.
+        This function is intended to be used in a recursive manner. dump_text will
+        run though all elements in the elem_tree and call itself on each element.
 
         self.image_hrefs will be populated by calling this function.
 
-        @param elem_tree: etree representation of XHTML content to be
-            transformed.
+        @param elem_tree: etree representation of XHTML content to be transformed.
         @param stylizer: Used to track the style of elements within the tree.
         @param page: OEB page used to determine absolute urls.
         @param tag_stack: List of open FB2 tags to take into account.
 
         @return: List of string representing the XHTML converted to FB2 markup.
         """
+        from ebook_convert.ebooks.oeb.base import XHTML_NS, barename, namespace
+
+        if tag_stack is None:
+            tag_stack = []
         elem = elem_tree
 
-        # Ensure what we are converting is not a string and that the fist tag
-        # is part of the XHTML namespace.
-        if (not isinstance(elem_tree.tag, (str, bytes)) or
-                parse_utils.namespace(elem_tree.tag) != const.XHTML_NS):
+        # Ensure what we are converting is not a string and that the fist tag is part of the XHTML namespace.
+        if not isinstance(elem_tree.tag, str) or namespace(elem_tree.tag) != XHTML_NS:
             p = elem.getparent()
-            if (p is not None and isinstance(p.tag, (str, bytes)) and
-                    parse_utils.namespace(p.tag) == const.XHTML_NS and
-                    elem.tail):
+            if p is not None and isinstance(p.tag, str) and namespace(p.tag) == XHTML_NS and elem.tail:
                 return [elem.tail]
             return []
 
         style = stylizer.style(elem_tree)
-        if style['display'] in ('none', 'oeb-page-head', 'oeb-page-foot') \
-           or style['visibility'] == 'hidden':
+        if style['display'] in ('none', 'oeb-page-head', 'oeb-page-foot') or style['visibility'] == 'hidden':
             if hasattr(elem, 'tail') and elem.tail:
                 return [elem.tail]
             return []
 
         # FB2 generated output.
-        fb2_out = []
-        # FB2 tags in the order they are opened. This will be used to close
-        # the tags.
-        tags = []
+        fb2_out: list[str] = []
+        # FB2 tags in the order they are opened. This will be used to close the tags.
+        tags: list[str] = []
         # First tag in tree
-        tag = parse_utils.barename(elem_tree.tag)
+        tag = barename(elem_tree.tag)
         # Number of blank lines above tag
         try:
-            ems = int(round((float(style.marginTop) / style.fontSize) - 1))
-            if ems < 0:
-                ems = 0
+            ems = round((float(style.marginTop) / style.fontSize) - 1)
+            ems = max(ems, 0)
         except Exception:
             ems = 0
 
         # Convert TOC entries to <title>s and add <section>s
         if self.opts.sectionize == 'toc':
-            # A section cannot be a child of any other element than another
-            # section, so leave the tag alone if there are parents
+            # A section cannot be a child of any other element than another section,
+            # so leave the tag alone if there are parents
             if not tag_stack:
-                # There are two reasons to start a new section here: the TOC
-                # pointed to this page (then we use the first non-<body> on
-                # the page as a <title>), or the TOC pointed to a specific
-                # element
+                # There are two reasons to start a new section here: the TOC pointed to
+                # this page (then we use the first non-<body> on the page as a <title>), or
+                # the TOC pointed to a specific element
                 newlevel = 0
                 toc_entry = self.toc.get(page.href, None)
                 if toc_entry is not None:
                     if None in toc_entry:
-                        if (tag != 'body' and hasattr(elem_tree, 'text') and
-                                elem_tree.text):
+                        if tag != 'body' and hasattr(elem_tree, 'text') and elem_tree.text:
                             newlevel = 1
                             self.toc[page.href] = None
-                    if (not newlevel and
-                            elem_tree.attrib.get('id', None) is not None):
-                        newlevel = toc_entry.get(elem_tree.attrib.get('id',
-                                                                      None),
-                                                 None)
+                    if not newlevel and elem_tree.attrib.get('id', None) is not None:
+                        # only the None key maps to a str
+                        newlevel = cast('int | None', toc_entry.get(elem_tree.attrib.get('id', None), None))
 
                 # Start a new section if necessary
                 if newlevel:
@@ -516,27 +494,25 @@ class FB2MLizer(object):
                     fb2_out.append('<title>')
                     tags.append('title')
             if self.section_level == 0:
-                # If none of the prior processing made a section, make one now
-                # to be FB2 spec compliant
+                # If none of the prior processing made a section, make one now to be FB2 spec compliant
                 fb2_out.append('<section>')
                 self.section_level += 1
 
         # Process the XHTML tag and styles. Converted to an FB2 tag.
-        # Use individual if statement not if else. There can be only one XHTML
-        # tag but it can have multiple styles.
+        # Use individual if statement not if else. There can be
+        # only one XHTML tag but it can have multiple styles.
         if tag == 'img' and elem_tree.attrib.get('src', None):
             # Only write the image tag if it is in the manifest.
-            ihref = base.urlnormalize(page.abshref(elem_tree.attrib['src']))
+            ihref = urlnormalize(page.abshref(elem_tree.attrib['src']))
             if ihref in self.oeb_book.manifest.hrefs:
                 if ihref not in self.image_hrefs:
-                    self.image_hrefs[ihref] = 'img_%s' % len(self.image_hrefs)
+                    self.image_hrefs[ihref] = f'img_{len(self.image_hrefs)}'
                 p_txt, p_tag = self.ensure_p()
                 fb2_out += p_txt
                 tags += p_tag
-                fb2_out.append('<image l:href="#%s"/>' %
-                               self.image_hrefs[ihref])
+                fb2_out.append(f'<image l:href="#{self.image_hrefs[ihref]}"/>')
             else:
-                self.log.warning('Ignoring image not in manifest: %s', ihref)
+                self.log.warn(f'Ignoring image not in manifest: {ihref}')
         if tag in ('br', 'hr') or ems >= 1:
             if ems < 1:
                 multiplier = 1
@@ -544,53 +520,50 @@ class FB2MLizer(object):
                 multiplier = ems
             if self.in_p:
                 closed_tags = []
-                open_tags = tag_stack+tags
+                open_tags = tag_stack + tags
                 open_tags.reverse()
                 for t in open_tags:
-                    fb2_out.append('</%s>' % t)
+                    fb2_out.append(f'</{t}>')
                     closed_tags.append(t)
                     if t == 'p':
                         break
                 fb2_out.append('<empty-line/>' * multiplier)
                 closed_tags.reverse()
                 for t in closed_tags:
-                    fb2_out.append('<%s>' % t)
+                    fb2_out.append(f'<{t}>')
             else:
                 fb2_out.append('<empty-line/>' * multiplier)
         if tag in ('div', 'li', 'p'):
-            p_text, added_p = self.close_open_p(tag_stack+tags)
+            p_text, added_p = self.close_open_p(tag_stack + tags)
             fb2_out += p_text
             if added_p:
                 tags.append('p')
         if tag == 'a' and elem_tree.attrib.get('href', None):
             # Handle only external links for now
-            if urllib.parse.urlparse(elem_tree.attrib['href']).netloc:
+            if urlparse(elem_tree.attrib['href']).netloc:
                 p_txt, p_tag = self.ensure_p()
                 fb2_out += p_txt
                 tags += p_tag
-                fb2_out.append('<a l:href="%s">' %
-                               base.urlnormalize(elem_tree.attrib['href']))
+                fb2_out.append('<a l:href="{}">'.format(urlnormalize(elem_tree.attrib['href'])))
                 tags.append('a')
         if tag == 'b' or style['font-weight'] in ('bold', 'bolder'):
-            s_out, s_tags = self.handle_simple_tag('strong', tag_stack+tags)
+            s_out, s_tags = self.handle_simple_tag('strong', tag_stack + tags)
             fb2_out += s_out
             tags += s_tags
         if tag == 'i' or style['font-style'] == 'italic':
-            s_out, s_tags = self.handle_simple_tag('emphasis', tag_stack+tags)
+            s_out, s_tags = self.handle_simple_tag('emphasis', tag_stack + tags)
             fb2_out += s_out
             tags += s_tags
-        if (tag in ('del', 'strike') or
-                style['text-decoration'] == 'line-through'):
-            s_out, s_tags = self.handle_simple_tag('strikethrough',
-                                                   tag_stack+tags)
+        if tag in ('del', 'strike') or style['text-decoration'] == 'line-through':
+            s_out, s_tags = self.handle_simple_tag('strikethrough', tag_stack + tags)
             fb2_out += s_out
             tags += s_tags
         if tag == 'sub':
-            s_out, s_tags = self.handle_simple_tag('sub', tag_stack+tags)
+            s_out, s_tags = self.handle_simple_tag('sub', tag_stack + tags)
             fb2_out += s_out
             tags += s_tags
         if tag == 'sup':
-            s_out, s_tags = self.handle_simple_tag('sup', tag_stack+tags)
+            s_out, s_tags = self.handle_simple_tag('sup', tag_stack + tags)
             fb2_out += s_out
             tags += s_tags
 
@@ -598,33 +571,32 @@ class FB2MLizer(object):
         if hasattr(elem_tree, 'text') and elem_tree.text:
             if not self.in_p:
                 fb2_out.append('<p>')
-            fb2_out.append(entities.prepare_string_for_xml(elem_tree.text))
+            fb2_out.append(prepare_string_for_xml(elem_tree.text))
             if not self.in_p:
                 fb2_out.append('</p>')
 
         # Process sub-elements.
         for item in elem_tree:
-            fb2_out += self.dump_text(item, stylizer, page, tag_stack+tags)
+            fb2_out += self.dump_text(item, stylizer, page, tag_stack + tags)
 
         # Close open FB2 tags.
         tags.reverse()
         fb2_out += self.close_tags(tags)
 
-        # Process element text that comes after the close of the XHTML tag but
-        # before the next XHTML tag.
+        # Process element text that comes after the close of the XHTML tag but before the next XHTML tag.
         if hasattr(elem_tree, 'tail') and elem_tree.tail:
             if not self.in_p:
                 fb2_out.append('<p>')
-            fb2_out.append(entities.prepare_string_for_xml(elem_tree.tail))
+            fb2_out.append(prepare_string_for_xml(elem_tree.tail))
             if not self.in_p:
                 fb2_out.append('</p>')
 
         return fb2_out
 
-    def close_tags(self, tags):
-        text = []
+    def close_tags(self, tags: list[str]) -> list[str]:
+        text: list[str] = []
         for tag in tags:
-            text.append('</%s>' % tag)
+            text.append(f'</{tag}>')
             if tag == 'p':
                 self.in_p = False
 

@@ -1,0 +1,511 @@
+#!/usr/bin/env python
+# License: GPLv3 Copyright: 2015, Kovid Goyal <kovid at kovidgoyal.net>
+
+from __future__ import annotations
+import os
+import tempfile
+from functools import partial
+from queue import Empty, Queue
+from threading import Event, Thread
+from typing import TYPE_CHECKING, Literal, cast
+
+from ebook_convert import detect_ncpus, filesystem_encoding, force_unicode, human_readable
+from ebook_convert.utils.filenames import atomic_rename
+from ebook_convert.utils.localization import _, ngettext
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Iterable
+
+    from lxml.etree import _Element
+
+    from ebook_convert.ebooks.oeb.polish.container import Container
+
+    type Report = Callable[[str], object]
+    # Maps image name to (True, (size_before, size_after)) or (False, traceback)
+    type CompressionResults = dict[str, tuple[Literal[True], tuple[int, int]] | tuple[Literal[False], str]]
+
+
+class Worker(Thread):
+    daemon = True
+
+    def __init__(
+        self,
+        abort: Event,
+        name: str,
+        queue: Queue[tuple[str, str, str]],
+        results: CompressionResults,
+        jpeg_quality: int | None,
+        webp_quality: int | None,
+        progress_callback: Callable[[str], None],
+    ) -> None:
+        Thread.__init__(self, name=name)
+        self.queue, self.results = queue, results
+        self.progress_callback = progress_callback
+        self.jpeg_quality = jpeg_quality
+        self.webp_quality = webp_quality
+        self.abort = abort
+        self.start()
+
+    def run(self) -> None:
+        while not self.abort.is_set():
+            try:
+                name, path, mt = self.queue.get_nowait()
+            except Empty:
+                break
+            try:
+                self.compress(name, path, mt)
+            except Exception:
+                import traceback
+
+                self.results[name] = (False, traceback.format_exc())
+            finally:
+                try:
+                    self.progress_callback(name)
+                except Exception:
+                    import traceback
+
+                    traceback.print_exc()
+                self.queue.task_done()
+
+    def compress(self, name: str, path: str, mime_type: str) -> None:
+        from ebook_convert.utils.img import encode_jpeg, encode_webp, optimize_jpeg, optimize_png, optimize_webp
+
+        if 'png' in mime_type:
+            func = optimize_png
+        elif 'webp' in mime_type:
+            if self.webp_quality is None:
+                func = optimize_webp
+            else:
+                func = partial(encode_webp, quality=self.webp_quality)
+        elif self.jpeg_quality is None:
+            func = optimize_jpeg
+        else:
+            func = partial(encode_jpeg, quality=self.jpeg_quality)
+        before = os.path.getsize(path)
+        with open(path, 'rb') as f:
+            old_data = f.read()
+        func(path)
+        after = os.path.getsize(path)
+        if after >= before:
+            with open(path, 'wb') as f:
+                f.write(old_data)
+            after = before
+        self.results[name] = (True, (before, after))
+
+
+def get_compressible_images(container: Container) -> set[str]:
+    mt_map = container.manifest_type_map
+    images: set[str] = set()
+    for mt in 'png jpg jpeg webp gif'.split():
+        # names are None for manifest items whose href does not point into the book
+        images |= {x for x in mt_map.get('image/' + mt, ()) if x is not None}
+    return images
+
+
+def convert_png_to_format(
+    container: Container, name: str, fmt: str, jpeg_quality: int = 75, webp_quality: int = 75, report: Report | None = None
+) -> tuple[str, int, int]:
+    """Convert a PNG image in the container to JPEG or WEBP format.
+
+    :param fmt: ``'jpeg'``, ``'webp'`` (lossy), or ``'webp-lossless'``
+    :returns: ``(new_name, before, after)`` where *before* and *after* are the
+        file sizes in bytes before and after conversion, or ``(name, 0, 0)`` if
+        conversion was skipped.
+    """
+    from ebook_convert.ebooks.oeb.polish.replace import rename_files
+    from ebook_convert.utils.img import image_from_data, image_to_data
+
+    if fmt == 'jpeg':
+        new_ext = 'jpg'
+        new_mt = 'image/jpeg'
+        img_fmt = 'JPEG'
+        quality = jpeg_quality
+    elif fmt == 'webp':
+        new_ext = 'webp'
+        new_mt = 'image/webp'
+        img_fmt = 'WEBP'
+        quality = webp_quality
+    elif fmt == 'webp-lossless':
+        new_ext = 'webp'
+        new_mt = 'image/webp'
+        img_fmt = 'WEBP'
+        quality = 100  # quality=100 means lossless for WEBP in image_to_data
+    else:
+        return name, 0, 0
+
+    base = name.rsplit('.', 1)[0] if '.' in name else name
+    new_name = f'{base}.{new_ext}'
+
+    if new_name != name and container.exists(new_name):
+        if report:
+            report(_('Skipping conversion of {0} as {1} already exists').format(name, new_name))
+        return name, 0, 0
+
+    path = container.get_file_path_for_processing(name)
+    before = os.path.getsize(path)
+    with open(path, 'rb') as f:
+        original_data = f.read()
+
+    img = image_from_data(original_data)
+    new_data = image_to_data(img, compression_quality=quality, fmt=img_fmt)
+    after = len(new_data)
+
+    # Write to a temp file in the same directory, then atomically replace the original
+    path_dir = os.path.dirname(path)
+    fd, tmp_path = tempfile.mkstemp(dir=path_dir)
+    try:
+        with os.fdopen(fd, 'wb') as f:
+            f.write(new_data)
+        os.replace(tmp_path, path)
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+
+    if new_name != name:
+        rename_files(container, {name: new_name})
+        container.mime_map[new_name] = new_mt
+        for itemid, q in container.manifest_id_map.items():
+            if q == new_name:
+                for item in container.opf_xpath(f'//opf:manifest/opf:item[@href and @id="{itemid}"]'):
+                    item.set('media-type', new_mt)
+        container.dirty(container.opf_name)
+
+    if report:
+        if before != after:
+            report(
+                _('{0} converted to {1} [{2} {5} {3}, {4:.1%} reduction]').format(
+                    name, new_name, human_readable(before), human_readable(after), (before - after) / before, '→'
+                )
+            )
+        else:
+            report(_('{0} converted to {1} [no size change]').format(name, new_name))
+
+    return new_name, before, after
+
+
+def convert_gif_to_format(
+    container: Container, name: str, fmt: str, jpeg_quality: int = 75, webp_quality: int = 75, report: Report | None = None
+) -> tuple[str, int, int]:
+    """Convert a GIF image in the container to JPEG, WEBP, or PNG format.
+
+    Animated GIFs are skipped when converting to JPEG.
+
+    :param fmt: ``'jpeg'``, ``'webp'`` (lossy), ``'webp-lossless'``, or ``'png'``
+    :returns: ``(new_name, before, after)`` where *before* and *after* are the
+        file sizes in bytes before and after conversion, or ``(name, 0, 0)`` if
+        conversion was skipped.
+    """
+    from ebook_convert.ebooks.oeb.polish.replace import rename_files
+    from ebook_convert.utils.img import image_from_data, image_to_data
+
+    if fmt == 'jpeg':
+        new_ext = 'jpg'
+        new_mt = 'image/jpeg'
+        img_fmt = 'JPEG'
+        quality = jpeg_quality
+    elif fmt == 'webp':
+        new_ext = 'webp'
+        new_mt = 'image/webp'
+        img_fmt = 'WEBP'
+        quality = webp_quality
+    elif fmt == 'webp-lossless':
+        new_ext = 'webp'
+        new_mt = 'image/webp'
+        img_fmt = 'WEBP'
+        quality = 100
+    elif fmt == 'png':
+        new_ext = 'png'
+        new_mt = 'image/png'
+        img_fmt = 'PNG'
+        quality = -1
+    else:
+        return name, 0, 0
+
+    path = container.get_file_path_for_processing(name)
+
+    if fmt == 'jpeg':
+        from qt.core import QImageReader
+
+        reader = QImageReader(path)
+        is_animated = reader.imageCount() > 1
+        if d := reader.device():
+            d.close()
+        if is_animated:
+            if report:
+                report(_('Skipping animated GIF {0}: animated GIFs cannot be converted to JPEG').format(name))
+            return name, 0, 0
+
+    base = name.rsplit('.', 1)[0] if '.' in name else name
+    new_name = f'{base}.{new_ext}'
+
+    if new_name != name and container.exists(new_name):
+        if report:
+            report(_('Skipping conversion of {0} as {1} already exists').format(name, new_name))
+        return name, 0, 0
+
+    before = os.path.getsize(path)
+    with open(path, 'rb') as f:
+        original_data = f.read()
+
+    img = image_from_data(original_data)
+    new_data = image_to_data(img, compression_quality=quality, fmt=img_fmt)
+    after = len(new_data)
+
+    path_dir = os.path.dirname(path)
+    with tempfile.NamedTemporaryFile(dir=path_dir, delete=False) as tf:
+        tf.write(new_data)
+    try:
+        atomic_rename(tf.name, path)
+    except Exception:
+        try:
+            os.unlink(tf.name)
+        except OSError:
+            pass
+        raise
+
+    if new_name != name:
+        rename_files(container, {name: new_name})
+        container.mime_map[new_name] = new_mt
+        for itemid, q in container.manifest_id_map.items():
+            if q == new_name:
+                for item in container.opf_xpath(f'//opf:manifest/opf:item[@href and @id="{itemid}"]'):
+                    item.set('media-type', new_mt)
+        container.dirty(container.opf_name)
+
+    if report:
+        if before != after:
+            report(
+                _('{0} converted to {1} [{2} {5} {3}, {4:.1%} reduction]').format(
+                    name, new_name, human_readable(before), human_readable(after), (before - after) / before, '→'
+                )
+            )
+        else:
+            report(_('{0} converted to {1} [no size change]').format(name, new_name))
+
+    return new_name, before, after
+
+
+def compress_images(
+    container: Container,
+    report: Report | None = None,
+    names: Iterable[str] | None = None,
+    jpeg_quality: int | None = None,
+    webp_quality: int | None = None,
+    compress_png: bool = True,
+    png_to_format: str | None = None,
+    gif_to_format: str | None = None,
+    progress_callback: Callable[[int, int, str], bool] = lambda n, t, name: True,
+) -> tuple[bool, CompressionResults]:
+    images = get_compressible_images(container)
+    if names is not None:
+        images &= set(names)
+
+    # Convert PNG images to the target format before any other compression
+    conv_before_total = conv_after_total = conv_num = 0
+    if png_to_format:
+        png_images = sorted(name for name in images if container.mime_map.get(name) == 'image/png')
+        j_quality = jpeg_quality if jpeg_quality is not None else 75
+        w_quality = webp_quality if webp_quality is not None else 75
+        for name in png_images:
+            new_name, before, after = convert_png_to_format(container, name, png_to_format, jpeg_quality=j_quality, webp_quality=w_quality, report=report)
+            if new_name != name:
+                images.discard(name)
+                images.add(new_name)
+            if before:
+                conv_num += 1
+                conv_before_total += before
+                conv_after_total += after
+
+    gif_conv_before_total = gif_conv_after_total = gif_conv_num = 0
+    if gif_to_format:
+        # If GIF target is PNG and PNG conversion is also enabled, go directly
+        # to the final format rather than producing an intermediate PNG that
+        # would immediately be converted again.
+        effective_gif_format = png_to_format if (gif_to_format == 'png' and png_to_format) else gif_to_format
+        gif_images = sorted(name for name in images if container.mime_map.get(name) == 'image/gif')
+        j_quality = jpeg_quality if jpeg_quality is not None else 75
+        w_quality = webp_quality if webp_quality is not None else 75
+        for name in gif_images:
+            new_name, before, after = convert_gif_to_format(
+                container, name, effective_gif_format, jpeg_quality=j_quality, webp_quality=w_quality, report=report
+            )
+            if new_name != name:
+                images.discard(name)
+                images.add(new_name)
+            if before:
+                gif_conv_num += 1
+                gif_conv_before_total += before
+                gif_conv_after_total += after
+
+    # Remove any remaining GIFs — no lossless compression tool is available for them
+    images = {name for name in images if container.mime_map.get(name) != 'image/gif'}
+
+    if not compress_png:
+        images = {name for name in images if container.mime_map.get(name) != 'image/png'}
+    results: CompressionResults = {}
+    queue: Queue[tuple[str, str, str]] = Queue()
+    abort = Event()
+    seen: set[str] = set()
+    num_to_process = 0
+    for name in sorted(images):
+        path = os.path.abspath(container.get_file_path_for_processing(name))
+        path_key = os.path.normcase(path)
+        if path_key not in seen:
+            num_to_process += 1
+            queue.put((name, path, container.mime_map[name]))
+            seen.add(path_key)
+
+    def pc(name: str) -> None:
+        keep_going = progress_callback(len(results), num_to_process, name)
+        if not keep_going:
+            abort.set()
+
+    progress_callback(0, num_to_process, '')
+    [Worker(abort, f'CompressImage{i}', queue, results, jpeg_quality, webp_quality, pc) for i in range(min(detect_ncpus(), num_to_process))]
+    queue.join()
+    before_total = after_total = 0
+    processed_num = 0
+    changed = conv_num > 0 or gif_conv_num > 0
+    for name, (ok, res) in results.items():
+        name = force_unicode(name, filesystem_encoding)
+        if ok:
+            before, after = cast('tuple[int, int]', res)  # ok is True so res is (size_before, size_after)
+            if before != after:
+                changed = True
+                processed_num += 1
+            before_total += before
+            after_total += after
+            if report:
+                if before != after:
+                    report(
+                        _('{0} compressed from {1} to {2} bytes [{3:.1%} reduction]').format(
+                            name, human_readable(before), human_readable(after), (before - after) / before
+                        )
+                    )
+                else:
+                    report(_('{0} could not be further compressed').format(name))
+        elif report:
+            report(_('Failed to process {0} with error:').format(name))
+            report(cast('str', res))  # ok is False so res is a traceback
+    if report:
+        if conv_num:
+            report('')
+            if conv_before_total and conv_before_total != conv_after_total:
+                report(
+                    ngettext(
+                        'PNG conversion: {0} file converted, total size changed from {1} to {2} [{3:.1%} reduction]',
+                        'PNG conversion: {0} files converted, total size changed from {1} to {2} [{3:.1%} reduction]',
+                        conv_num,
+                    ).format(
+                        conv_num,
+                        human_readable(conv_before_total),
+                        human_readable(conv_after_total),
+                        (conv_before_total - conv_after_total) / conv_before_total,
+                    )
+                )
+            else:
+                report(
+                    ngettext(
+                        'PNG conversion: {0} file converted, no size change',
+                        'PNG conversion: {0} files converted, no size change',
+                        conv_num,
+                    ).format(conv_num)
+                )
+        if gif_conv_num:
+            report('')
+            if gif_conv_before_total and gif_conv_before_total != gif_conv_after_total:
+                report(
+                    ngettext(
+                        'GIF conversion: {0} file converted, total size changed from {1} to {2} [{3:.1%} reduction]',
+                        'GIF conversion: {0} files converted, total size changed from {1} to {2} [{3:.1%} reduction]',
+                        gif_conv_num,
+                    ).format(
+                        gif_conv_num,
+                        human_readable(gif_conv_before_total),
+                        human_readable(gif_conv_after_total),
+                        (gif_conv_before_total - gif_conv_after_total) / gif_conv_before_total,
+                    )
+                )
+            else:
+                report(
+                    ngettext(
+                        'GIF conversion: {0} file converted, no size change',
+                        'GIF conversion: {0} files converted, no size change',
+                        gif_conv_num,
+                    ).format(gif_conv_num)
+                )
+        grand_before = before_total + conv_before_total + gif_conv_before_total
+        grand_after = after_total + conv_after_total + gif_conv_after_total
+        grand_changed = processed_num + conv_num + gif_conv_num
+        if grand_before and grand_changed:
+            report('')
+            report(
+                _('Total image filesize reduced from {0} to {1} [{2:.1%} reduction, {3} images changed]').format(
+                    human_readable(grand_before),
+                    human_readable(grand_after),
+                    (grand_before - grand_after) / grand_before,
+                    grand_changed,
+                )
+            )
+        elif not grand_changed:
+            report(_('Images are already fully optimized'))
+    return changed, results
+
+
+def remove_unused_images(container: Container, report: Report | None = None) -> bool:
+    """
+    Remove images that are not referenced by any file in the spine or by any
+    stylesheet used by files in the spine.
+    """
+    report = report or (lambda x: x)
+    from ebook_convert.ebooks.oeb.polish.container import OEB_STYLES
+    from ebook_convert.ebooks.oeb.polish.report import safe_href_to_name
+
+    # Collect spine document names
+    spine_docs = {name for name, _ in container.spine_names}
+
+    # Collect stylesheets referenced by spine documents
+    used_stylesheets: set[str] = set()
+    for name in spine_docs:
+        if not container.exists(name):
+            continue
+        root = cast('_Element', container.parsed(name))  # spine items are HTML, parsed into lxml trees
+        for link in root.xpath('//*[local-name()="link" and @href]'):
+            sname = safe_href_to_name(container, link.get('href'), name)
+            if sname and container.exists(sname):
+                mt = container.mime_map.get(sname, '')
+                if mt in OEB_STYLES:
+                    used_stylesheets.add(sname)
+
+    # Collect all images referenced by spine docs and their stylesheets
+    relevant_sources = spine_docs | used_stylesheets
+    referenced_images: set[str] = set()
+    for source_name in relevant_sources:
+        if not container.exists(source_name):
+            continue
+        for href, _line_number, _offset in container.iterlinks(source_name):
+            target = safe_href_to_name(container, href, source_name)
+            if target and container.exists(target):
+                mt = container.mime_map.get(target, '')
+                if mt and mt.startswith('image/'):
+                    referenced_images.add(target)
+
+    # Find all images in the container and remove unused ones
+    all_images = {name for name, mt in container.mime_map.items() if mt.startswith('image/') and container.exists(name)}
+    unused_images = all_images - referenced_images
+
+    if not unused_images:
+        report(_('No unused images found'))
+        return False
+
+    for name in sorted(unused_images):
+        report(_('Removing unused image: {}').format(name))
+        container.remove_item(name)
+
+    report('')
+    num = len(unused_images)
+    report(ngettext('Removed one unused image', 'Removed {} unused images', num).format(num))
+    return True

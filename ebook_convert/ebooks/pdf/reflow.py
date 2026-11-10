@@ -1,19 +1,7 @@
 #!/usr/bin/env python
 # License: GPLv3 Copyright: 2009, Kovid Goyal <kovid@kovidgoyal.net>
 
-"""
-The "calibre" PDF input engine: reflows the XML that ``pdftohtml -xml``
-produces into HTML, with font statistics, automatic header/footer removal,
-margin and indent detection, paragraph coalescing (also across page breaks),
-column detection and a table of contents built from the PDF outline.
-
-Ported from Calibre's src/calibre/ebooks/pdf/reflow.py (a8fb98459b ...
-c7d5d62c3e). Right-to-left text is left in the visual order pdftohtml
-produces, see ebook_convert.ebooks.pdf.bidi.
-"""
-
 from __future__ import annotations
-
 import os
 import re
 import sys
@@ -27,15 +15,15 @@ from ebook_convert.ebooks.pdf.bidi import fix_markup_line, has_rtl, is_predomina
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator
-    from logging import Logger as Log
     from optparse import Values
 
     from lxml.etree import _Element
 
     from ebook_convert.ebooks.oeb.polish.toc import TOC
+    from ebook_convert.utils.logging import Log
 
-    PageElement = Text | Image
-    FontMap = dict[str | None, Font]
+    type PageElement = Text | Image
+    type FontMap = dict[str | None, Font]
 
 # Global constants affecting formatting decisions
 
@@ -350,7 +338,7 @@ class Text(Element):
         # Need to check for </span> <span... as well
         # This test does not work in its present form
         # The matches can lose data, so force test to fail
-        if False and (  # noqa
+        if False and (  # ruff: ignore[expr-and-false]
             self.font_size_em == other.font_size_em
             and self.font.id == other.font.id
             and self.raw.startswith(r'<span style="font-size:')
@@ -722,7 +710,7 @@ class Region:
                 if w > mw:
                     mc, mw = c, w
             if mc is None:
-                self.log.warning(f'No suitable column for singleton {elem.to_html()}')
+                self.log.warn('No suitable column for singleton', elem.to_html())
                 mc = self.columns[0]
             return mc
 
@@ -731,7 +719,7 @@ class Region:
                 col = most_suitable_column(elem)
                 if self.opts.verbose > 3:
                     idx = self.columns.index(col)
-                    self.log.debug(f'Absorbing singleton {elem.to_html()} into column {idx}')
+                    self.log.debug(f'Absorbing singleton {elem.to_html()} into column', idx)
                 col.add(elem)
 
     def collect_stats(self) -> None:
@@ -813,7 +801,7 @@ class Region:
                     indent_diff = elem.indent_fraction - self.elements[i + 1].indent_fraction
                     if indent_diff > 0.05:
                         is_indented = True
-                if elem.top_gap_ratio > 1.2 or is_indented:  # unimplemented code, top_gap_ratio can be None
+                if elem.top_gap_ratio > 1.2 or is_indented:  # ty: ignore[unsupported-operator] unimplemented code, top_gap_ratio can be None
                     self.boxes.append(Box())
                 self.boxes[-1].append(elem)
 
@@ -1066,6 +1054,7 @@ class Page:
         for size, rows in zip(sizes, row_counts):
             if rows < COLUMN_MIN_ROWS or size < COLUMN_MIN_CHARS_PER_ROW * rows:
                 return 1
+        from ebook_convert.ebooks.pdf.bidi import is_predominantly_rtl
 
         # On a right-to-left page the rightmost column is read first
         rtl = is_predominantly_rtl(''.join(t.text_as_string for t in self.texts))
@@ -1513,7 +1502,7 @@ class Page:
         neighbors.add(elem)
         sorted_neighbors: list[PageElement] = sorted(neighbors, key=attrgetter('left'))
         if self.opts.verbose > 3:
-            self.log.debug(f'Neighbors: {[x.to_html() for x in sorted_neighbors]!r}')
+            self.log.debug('Neighbors:', [x.to_html() for x in sorted_neighbors])
         columns = [Column()]
         columns[0].add(elem)
         for x in sorted_neighbors:
@@ -1532,7 +1521,7 @@ class Page:
     def find_elements_in_row_of(self, x: PageElement) -> Iterator[PageElement]:
         interval = Interval(x.top, x.top + YFUZZ * (self.average_text_height))
         h_interval = Interval(x.left, x.right)
-        for y in self.elements[x.idx:x.idx + 15]:
+        for y in self.elements[x.idx : x.idx + 15]:
             if y is not x:
                 y_interval = Interval(y.top, y.bottom)
                 x_interval = Interval(y.left, y.right)
@@ -1654,6 +1643,7 @@ class Page:
 class PDFDocument:
     def __init__(self, xml: bytes, opts: Values, log: Log) -> None:
         from ebook_convert.utils.xml_parse import safe_xml_fromstring
+        # from calibre.rpdb import set_trace;  set_trace()
 
         self.opts, self.log = opts, log
 
@@ -1992,7 +1982,7 @@ class PDFDocument:
         # Or most popular bottom?  Or the max used value within 10% of max value?
         bcount = 0
         for b in self.bottoms:
-            if bcount < self.bottoms[b]:
+            if bcount < self.bottoms[b]:  # ruff: ignore[if-stmt-min-max]
                 # and b > self.stats.bottom*0.9:
                 bcount = self.bottoms[b]
             self.stats.bottom = max(self.stats.bottom, b)
@@ -2303,11 +2293,9 @@ class PDFDocument:
 
     def render(self) -> None:
         #### Where does the title come from if not run from command line?
-        # The real title comes from the PDF metadata via the OPF, this is only
-        # a placeholder for the HTML head.
         title = 'Converted Ebook'
         if len(sys.argv) > 1:
-            title = escape(os.path.basename(sys.argv[1]))
+            title = sys.argv[1]
         # Need to insert font info and styles
         html = [
             '<?xml version="1.0" encoding="UTF-8"?>',

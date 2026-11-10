@@ -1,86 +1,114 @@
-import io
+#!/usr/bin/env python
+# License: GPLv3 Copyright: 2013, Kovid Goyal <kovid at kovidgoyal.net>
 
-from lxml import etree
+from __future__ import annotations
+from typing import TYPE_CHECKING
 
-from ebook_convert import constants as const
-from ebook_convert.customize import conversion
-from ebook_convert.ebooks.docx.dump import do_dump
-from ebook_convert.ebooks.docx.writer.container import DOCX
-from ebook_convert.ebooks.docx.writer.from_html import Convert
-from ebook_convert.ebooks.metadata import opf2 as opf_meta
-from ebook_convert.ebooks.oeb import base
+from ebook_convert.customize.conversion import InputFormatPlugin, OptionRecommendation, OutputFormatPlugin
+from ebook_convert.utils.localization import _
+
+if TYPE_CHECKING:
+    from optparse import Values
+
+    from ebook_convert.ebooks.oeb.base import OEBBook
+    from ebook_convert.utils.logging import Log
+
+PAGE_SIZES = ['a0', 'a1', 'a2', 'a3', 'a4', 'a5', 'a6', 'b0', 'b1', 'b2', 'b3', 'b4', 'b5', 'b6', 'legal', 'letter']
 
 
-PAGE_SIZES = ['a0', 'a1', 'a2', 'a3', 'a4', 'a5', 'a6', 'b0', 'b1',
-              'b2', 'b3', 'b4', 'b5', 'b6', 'legal', 'letter']
-_OPT = conversion.OptionRecommendation
-
-
-class DOCXOutput(conversion.OutputFormatPlugin):
-
+class DOCXOutput(OutputFormatPlugin):
     name = 'DOCX Output'
     author = 'Kovid Goyal'
     file_type = 'docx'
     commit_name = 'docx_output'
     ui_data = {'page_sizes': PAGE_SIZES}
 
-    options = {_OPT(name='docx_page_size', recommended_value='letter',
-                    level=_OPT.LOW, choices=PAGE_SIZES,
-                    help='The size of the page. Default is letter. Choices '
-                    'are %s' % PAGE_SIZES),
-               _OPT(name='docx_custom_page_size', recommended_value=None,
-                    help='Custom size of the document. Use the form '
-                    'widthxheight EG. `123x321` to specify the width and '
-                    'height (in pts). This overrides any specified '
-                    'page-size.'),
-               _OPT(name='docx_no_cover', recommended_value=False,
-                    help='Do not insert the book cover as an image at the '
-                    'start of the document. If you use this option, the book '
-                    'cover will be discarded.'),
-               _OPT(name='preserve_cover_aspect_ratio',
-                    recommended_value=False, help='Preserve the aspect ratio '
-                    'of the cover image instead of stretching it out to cover '
-                    'the entire page.'),
-               _OPT(name='docx_no_toc', recommended_value=False,
-                    help='Do not insert the table of contents as a page at '
-                    'the start of the document.'),
-               _OPT(name='extract_to', help='Extract the contents of the '
-                    'generated DOCX file to the specified directory. The '
-                    'contents of the directory are first deleted, so be '
-                    'careful.'),
-               _OPT(name='docx_page_margin_left', recommended_value=72.0,
-                    level=_OPT.LOW, help='The size of the left page margin, '
-                    'in pts. Default is 72pt. Overrides the common left page '
-                    'margin setting.'),
-               _OPT(name='docx_page_margin_top', recommended_value=72.0,
-                    level=_OPT.LOW, help='The size of the top page margin, '
-                    'in pts. Default is 72pt. Overrides the common top page '
-                    'margin setting, unless set to zero.'),
-               _OPT(name='docx_page_margin_right', recommended_value=72.0,
-                    level=_OPT.LOW, help='The size of the right page margin, '
-                    'in pts. Default is 72pt. Overrides the common right page '
-                    'margin setting, unless set to zero.'),
-               _OPT(name='docx_page_margin_bottom', recommended_value=72.0,
-                    level=_OPT.LOW, help='The size of the bottom page margin, '
-                    'in pts. Default is 72pt. Overrides the common bottom '
-                    'page margin setting, unless set to zero.')}
+    options = {
+        OptionRecommendation(
+            name='docx_page_size',
+            recommended_value='letter',
+            level=OptionRecommendation.LOW,
+            choices=PAGE_SIZES,
+            help=_('The size of the page. Default is letter. Choices are %s') % PAGE_SIZES,
+        ),
+        OptionRecommendation(
+            name='docx_custom_page_size',
+            recommended_value=None,
+            help=_(
+                'Custom size of the document. Use the form width x height, '
+                'for example: `123x321` to specify the width and height (in pts). '
+                'This overrides any specified page-size.'
+            ),
+        ),
+        OptionRecommendation(
+            name='docx_no_cover',
+            recommended_value=False,
+            help=_('Do not insert the book cover as an image at the start of the document. If you use this option, the book cover will be discarded.'),
+        ),
+        OptionRecommendation(
+            name='preserve_cover_aspect_ratio',
+            recommended_value=False,
+            help=_('Preserve the aspect ratio of the cover image instead of stretching it out to cover the entire page.'),
+        ),
+        OptionRecommendation(
+            name='docx_no_toc',
+            recommended_value=False,
+            help=_('Do not insert the table of contents as a page at the start of the document.'),
+        ),
+        OptionRecommendation(
+            name='extract_to',
+            help=_('Extract the contents of the generated %s file to the specified folder. The contents of the folder are first deleted, so be careful.')
+            % 'DOCX',
+        ),
+        OptionRecommendation(
+            name='docx_page_margin_left',
+            recommended_value=72.0,
+            level=OptionRecommendation.LOW,
+            help=_('The size of the left page margin, in pts. Default is 72pt. Overrides the common left page margin setting.'),
+        ),
+        OptionRecommendation(
+            name='docx_page_margin_top',
+            recommended_value=72.0,
+            level=OptionRecommendation.LOW,
+            help=_('The size of the top page margin, in pts. Default is 72pt. Overrides the common top page margin setting, unless set to zero.'),
+        ),
+        OptionRecommendation(
+            name='docx_page_margin_right',
+            recommended_value=72.0,
+            level=OptionRecommendation.LOW,
+            help=_('The size of the right page margin, in pts. Default is 72pt. Overrides the common right page margin setting, unless set to zero.'),
+        ),
+        OptionRecommendation(
+            name='docx_page_margin_bottom',
+            recommended_value=72.0,
+            level=OptionRecommendation.LOW,
+            help=_('The size of the bottom page margin, in pts. Default is 72pt. Overrides the common bottom page margin setting, unless set to zero.'),
+        ),
+    }
 
-    def convert_metadata(self, oeb):
+    def convert_metadata(self, oeb: OEBBook) -> None:
+        from io import BytesIO
 
-        package = etree.Element(base.tag('opf', 'package'),
-                                attrib={'version': '2.0'},
-                                nsmap={None: const.OPF2_NS})
+        from lxml import etree
+
+        from ebook_convert.ebooks.metadata.opf2 import OPF as ReadOPF
+        from ebook_convert.ebooks.oeb.base import OPF, OPF2_NS
+
+        package = etree.Element(OPF('package'), attrib={'version': '2.0'}, nsmap={None: OPF2_NS})
         oeb.metadata.to_opf2(package)
-        self.mi = opf_meta.OPF(io.BytesIO(etree.tostring(package,
-                                                         encoding='utf-8')),
-                               populate_spine=False,
-                               try_to_guess_cover=False).to_book_metadata()
+        self.mi = ReadOPF(BytesIO(etree.tostring(package, encoding='utf-8')), populate_spine=False, try_to_guess_cover=False).to_book_metadata()
 
-    def convert(self, oeb, output_path, input_plugin, opts, log):
+    def convert(self, oeb_book: OEBBook, output: str, input_plugin: InputFormatPlugin, opts: Values, log: Log) -> None:
+        oeb = oeb_book
+        output_path = output
+        from ebook_convert.ebooks.docx.writer.container import DOCX
+        from ebook_convert.ebooks.docx.writer.from_html import Convert
+
         docx = DOCX(opts, log)
         self.convert_metadata(oeb)
-        Convert(oeb, docx, self.mi, not opts.docx_no_cover,
-                not opts.docx_no_toc)()
+        Convert(oeb, docx, self.mi, not opts.docx_no_cover, not opts.docx_no_toc)()
         docx.write(output_path, self.mi)
         if opts.extract_to:
+            from ebook_convert.ebooks.docx.dump import do_dump
+
             do_dump(output_path, opts.extract_to)

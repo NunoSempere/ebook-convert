@@ -1,47 +1,45 @@
 #!/usr/bin/env python
+# License: GPLv3 Copyright: 2012, Kovid Goyal <kovid@kovidgoyal.net>
 
-
-__license__   = 'GPL v3'
-__copyright__ = '2012, Kovid Goyal <kovid@kovidgoyal.net>'
-__docformat__ = 'restructuredtext en'
-
-import numbers
+from __future__ import annotations
 import random
 from collections import OrderedDict
 from io import BytesIO
 from struct import pack
+from typing import ClassVar
 
 from ebook_convert.ebooks.mobi.utils import align_block
-from ebook_convert.polyglot import as_bytes
+from ebook_convert.polyglot.builtins import as_bytes
 
-NULL = 0xffffffff
+NULL = 0xFFFFFFFF
 
-
-def zeroes(x):
-    return (b'\x00' * x)
+type HeaderValue = int | bytes | None
 
 
-def nulls(x):
-    return (b'\xff' * x)
+def zeroes(x: int) -> bytes:
+    return b'\x00' * x
 
 
-def short(x):
+def nulls(x: int) -> bytes:
+    return b'\xff' * x
+
+
+def short(x: int) -> bytes:
     return pack(b'>H', x)
 
 
-class Header(OrderedDict):
-
+class Header(OrderedDict[str, HeaderValue]):
     HEADER_NAME = b''
 
     DEFINITION = '''
     '''
 
     ALIGN_BLOCK = False
-    POSITIONS = {}  # Mapping of position field to field whose position should
+    POSITIONS: ClassVar[dict[str, str]] = {}  # Mapping of position field to field whose position should
     # be stored in the position field
-    SHORT_FIELDS = set()
+    SHORT_FIELDS: ClassVar[set[str]] = set()
 
-    def __init__(self):
+    def __init__(self) -> None:
         OrderedDict.__init__(self)
 
         for line in self.DEFINITION.splitlines():
@@ -50,8 +48,7 @@ class Header(OrderedDict):
                 continue
             name, val = (x.strip() for x in line.partition('=')[0::2])
             if val:
-                val = eval(val, {'zeroes':zeroes, 'NULL':NULL, 'DYN':None,
-                    'nulls':nulls, 'short':short, 'random':random})
+                val = eval(val, {'zeroes': zeroes, 'NULL': NULL, 'DYN': None, 'nulls': nulls, 'short': short, 'random': random})
             else:
                 val = 0
             if name in self:
@@ -59,10 +56,10 @@ class Header(OrderedDict):
             self[name] = val
 
     @property
-    def dynamic_fields(self):
+    def dynamic_fields(self) -> tuple[str, ...]:
         return tuple(k for k, v in self.items() if v is None)
 
-    def __call__(self, **kwargs):
+    def __call__(self, **kwargs: HeaderValue) -> bytes:
         positions = {}
         for name, val in kwargs.items():
             if name not in self:
@@ -76,9 +73,9 @@ class Header(OrderedDict):
             positions[name] = buf.tell()
             if val is None:
                 raise ValueError(f'Dynamic field {name!r} not set')
-            if isinstance(val, numbers.Integral):
+            if isinstance(val, int):
                 fmt = b'H' if name in self.SHORT_FIELDS else b'I'
-                val = pack(b'>'+fmt, val)
+                val = pack(b'>' + fmt, val)
             buf.write(val)
 
         for pos_field, field in self.POSITIONS.items():
@@ -90,5 +87,5 @@ class Header(OrderedDict):
             ans = align_block(ans)
         return ans
 
-    def format_value(self, name, val):
+    def format_value(self, name: str, val: HeaderValue) -> HeaderValue:
         return val

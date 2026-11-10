@@ -1,52 +1,83 @@
-import textwrap, os, glob
+#!/usr/bin/env python
+# License: GPLv3 Copyright: 2011, Kovid Goyal <kovid@kovidgoyal.net>
 
+from __future__ import annotations
+import glob
+import os
+import textwrap
+from typing import TYPE_CHECKING, TypedDict
+
+from ebook_convert.constants import numeric_version
 from ebook_convert.customize import FileTypePlugin
-from ebook_convert.constants_old import numeric_version
+from ebook_convert.utils.localization import _
+
+if TYPE_CHECKING:
+    from qt.core import QWidget
 
 
-__license__ = 'GPL v3'
-__copyright__ = '2011, Kovid Goyal <kovid@kovidgoyal.net>'
-__docformat__ = 'restructuredtext en'
+class HTML2ZIPSettings(TypedDict, total=False):
+    encoding: str
+    breadth_first: bool
+    allow_local_files_outside_root: bool
 
 
 class HTML2ZIP(FileTypePlugin):
     name = 'HTML to ZIP'
     author = 'Kovid Goyal'
-    description = textwrap.dedent('''\
-            Follow all local links in an HTML file and create a ZIP \
-            file containing all linked files. This plugin is run \
-            every time you add an HTML file to the library.\
-            ''')
+    description = textwrap.dedent(
+        _('''\
+Follow all local links in an HTML file and create a ZIP \
+file containing all linked files. This plugin is run \
+every time you add an HTML file to the library.\
+''')
+    )
     version = numeric_version
     file_types = {'html', 'htm', 'xhtml', 'xhtm', 'shtm', 'shtml'}
-    supported_platforms = ['osx', 'linux']
+    supported_platforms = ['windows', 'osx', 'linux']
     on_import = True
 
-    def run(self, htmlfile):
+    def parse_my_settings(self, sc: str | None) -> HTML2ZIPSettings:
+        if not sc:
+            sc = ''
+        if sc.startswith('{'):
+            import json
+
+            try:
+                return json.loads(sc)
+            except Exception:
+                return {}
+        else:
+            sc = sc.strip()
+            enc, _, bfs = sc.partition('|')
+            return {'encoding': enc, 'breadth_first': bfs == 'bf'}
+
+    def run(self, path_to_ebook: str) -> str:
         import codecs
-        from ebook_convert.ptempfile import TemporaryDirectory
-        from ebook_convert.gui2.convert.gui_conversion import gui_convert
+
+        from ebook_convert import prints
         from ebook_convert.customize.conversion import OptionRecommendation
         from ebook_convert.ebooks.epub import initialize_container
+        from ebook_convert.gui2.convert.gui_conversion import gui_convert
+        from ebook_convert.ptempfile import TemporaryDirectory
 
         with TemporaryDirectory('_plugin_html2zip') as tdir:
-            recs =[('debug_pipeline', tdir, OptionRecommendation.HIGH)]
+            recs = [('debug_pipeline', tdir, OptionRecommendation.HIGH)]
             recs.append(['keep_ligatures', True, OptionRecommendation.HIGH])
             if self.site_customization and self.site_customization.strip():
-                sc = self.site_customization.strip()
-                enc, _, bf = sc.partition('|')
+                settings = self.parse_my_settings(self.site_customization)
+                enc = settings.get('encoding')
                 if enc:
                     try:
                         codecs.lookup(enc)
                     except Exception:
-                        print('Ignoring invalid input encoding for HTML: %s',
-                              enc)
+                        prints('Ignoring invalid input encoding for HTML:', enc)
                     else:
                         recs.append(['input_encoding', enc, OptionRecommendation.HIGH])
-                if bf == 'bf':
-                    recs.append(['breadth_first', True,
-                        OptionRecommendation.HIGH])
-            gui_convert(htmlfile, tdir, recs, abort_after_input_dump=True)
+                if settings.get('breadth_first'):
+                    recs.append(['breadth_first', True, OptionRecommendation.HIGH])
+                if settings.get('allow_local_files_outside_root'):
+                    recs.append(['allow_local_files_outside_root', True, OptionRecommendation.HIGH])
+            gui_convert(path_to_ebook, tdir, recs, abort_after_input_dump=True)
             of = self.temporary_file('_plugin_html2zip.zip')
             tdir = os.path.join(tdir, 'input')
             opf = glob.glob(os.path.join(tdir, '*.opf'))[0]
@@ -59,61 +90,76 @@ class HTML2ZIP(FileTypePlugin):
 
         return of.name
 
-    def customization_help(self, gui=False):
-        return 'Character encoding for the input HTML files. Common choices '
-    'include: cp1252, cp1251, latin1 and utf-8.'
+    def customization_help(self, gui: bool = False) -> str:
+        return _('Character encoding for the input HTML files. Common choices include: utf-8, cp1252, cp1251 and latin1.')
 
-    def do_user_config(self, parent=None):
-        '''
+    def do_user_config(self, parent: QWidget | None = None) -> int:
+        """
         This method shows a configuration dialog for this plugin. It returns
         True if the user clicks OK, False otherwise. The changes are
         automatically applied.
-        '''
-        from PyQt5.Qt import (QDialog, QDialogButtonBox, QVBoxLayout,
-                QLabel, Qt, QLineEdit, QCheckBox)
+        """
+        import json
+
+        from qt.core import QCheckBox, QDialog, QDialogButtonBox, QLabel, QLineEdit, Qt, QVBoxLayout
 
         config_dialog = QDialog(parent)
-        button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         v = QVBoxLayout(config_dialog)
 
-        def size_dialog():
+        def size_dialog() -> None:
             config_dialog.resize(config_dialog.sizeHint())
 
         button_box.accepted.connect(config_dialog.accept)
         button_box.rejected.connect(config_dialog.reject)
-        config_dialog.setWindowTitle('Customize' + ' ' + self.name)
-        from ebook_convert.customize.ui import (plugin_customization,
-                customize_plugin)
+        config_dialog.setWindowTitle(_('Customize') + ' ' + self.name)
+        from ebook_convert.customize.ui import customize_plugin, plugin_customization
+
         help_text = self.customization_help(gui=True)
         help_text = QLabel(help_text, config_dialog)
         help_text.setWordWrap(True)
-        help_text.setTextInteractionFlags(Qt.LinksAccessibleByMouse | Qt.LinksAccessibleByKeyboard)
+        help_text.setMinimumWidth(300)
+        help_text.setTextInteractionFlags(Qt.TextInteractionFlag.LinksAccessibleByMouse | Qt.TextInteractionFlag.LinksAccessibleByKeyboard)
         help_text.setOpenExternalLinks(True)
         v.addWidget(help_text)
-        bf = QCheckBox('Add linked files in breadth first order')
-        bf.setToolTip('Normally, when following links in HTML files calibre '
-                      'does it depth first, i.e. if file A links to B and  C, '
-                      'but B links to D, the files are added in the order A, '
-                      'B, D, C. With this option, they will instead be added '
-                      'as A, B, C, D')
-        sc = plugin_customization(self)
-        if not sc:
-            sc = ''
-        sc = sc.strip()
-        enc = sc.partition('|')[0]
-        bfs = sc.partition('|')[-1]
-        bf.setChecked(bfs == 'bf')
-        sc = QLineEdit(enc, config_dialog)
+        bf = QCheckBox(_('Add linked files in breadth first order'))
+        bf.setToolTip(
+            _(
+                'Normally, when following links in HTML files'
+                ' calibre does it depth first, i.e. if file A links to B and '
+                ' C, but B links to D, the files are added in the order A, B, D, C. '
+                ' With this option, they will instead be added as A, B, C, D'
+            )
+        )
+        lr = QCheckBox(_('Allow resources outside the HTML file root folder'))
+        from ebook_convert.customize.ui import plugin_for_input_format
+
+        hi = plugin_for_input_format('html')
+        assert hi is not None
+        for opt in hi.options:
+            if opt.option.name == 'allow_local_files_outside_root':
+                lr.setToolTip(opt.help)
+                break
+        settings = self.parse_my_settings(plugin_customization(self))
+        bf.setChecked(bool(settings.get('breadth_first')))
+        lr.setChecked(bool(settings.get('allow_local_files_outside_root')))
+        sc = QLineEdit(str(settings.get('encoding', '')), config_dialog)
         v.addWidget(sc)
         v.addWidget(bf)
+        v.addWidget(lr)
         v.addWidget(button_box)
         size_dialog()
-        config_dialog.exec_()
+        config_dialog.exec()
 
-        if config_dialog.result() == QDialog.Accepted:
-            sc = str(sc.text()).strip()
+        if config_dialog.result() == QDialog.DialogCode.Accepted:
+            settings: HTML2ZIPSettings = {}
+            enc = str(sc.text()).strip()
+            if enc:
+                settings['encoding'] = enc
             if bf.isChecked():
-                sc += '|bf'
-            customize_plugin(self, sc)
+                settings['breadth_first'] = True
+            if lr.isChecked():
+                settings['allow_local_files_outside_root'] = True
+            customize_plugin(self, json.dumps(settings, ensure_ascii=True))
 
         return config_dialog.result()

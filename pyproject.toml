@@ -4,14 +4,15 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ebook-convert"
-version = "4.15.0"
-requires-python = ">= 3.10"
+version = "5.0.0a1"
+requires-python = ">= 3.12"
 description = "Command-line ebook converter extracted from Calibre: epub, mobi, azw3, docx, fb2, lrf, pdf, rtf, txt, ..."
 readme = "README.rst"
 license = "GPL-3.0-or-later"
 license-files = ["LICENSE"]
 authors = [
-    {name = "gryf", email = "gryf73@gmail.com"}
+    {name = "Kovid Goyal and the Calibre contributors"},
+    {name = "gryf", email = "gryf73@gmail.com"},
 ]
 maintainers = [
     {name = "Nuno Sempere"}
@@ -22,12 +23,10 @@ classifiers = [
     "Intended Audience :: End Users/Desktop",
     "Operating System :: POSIX :: Linux",
     "Operating System :: MacOS",
-    "Development Status :: 4 - Beta",
+    "Development Status :: 3 - Alpha",
     "Programming Language :: Python",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3 :: Only",
-    "Programming Language :: Python :: 3.10",
-    "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: 3.14",
@@ -46,17 +45,23 @@ dependencies = [
     "msgpack>=1.0.0",
     "odfpy>=1.4.1",
     "pillow>=8.0.1",
+    "pystache>=0.6",
     "python-dateutil>=2.8.1",
+    "regex>=2023.0.0",
     "resvg-py>=0.5",
+    "tzlocal>=5.0",
 ]
 
 [project.optional-dependencies]
 # Markdown formatted plain-text input.
 markdown = ["markdown>=3.0"]
+# Japanese transliteration for --asciiize
+japanese = ["pykakasi>=2.2"]
 
 [project.urls]
 Repository = "https://github.com/NunoSempere/ebook-convert"
 Issues = "https://github.com/NunoSempere/ebook-convert/issues"
+Calibre = "https://github.com/kovidgoyal/calibre"
 Original = "https://github.com/gryf/ebook-converter"
 
 [project.scripts]
@@ -70,10 +75,9 @@ dev = [
 
 [tool.setuptools.packages.find]
 include = ["ebook_convert*"]
-exclude = ["ebook_convert.tinycss.tests*"]
 
 [tool.setuptools.package-data]
-"*" = ["*.types", "*.css", "*.html", "*.xhtml", "*.xsl", "*.json"]
+"ebook_convert" = ["data/**/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

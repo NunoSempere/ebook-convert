@@ -1,0 +1,62 @@
+#!/usr/bin/env python
+# License: GPLv3 Copyright: 2009, Kovid Goyal <kovid@kovidgoyal.net>
+
+from __future__ import annotations
+import errno
+import os
+from functools import lru_cache
+from typing import TYPE_CHECKING
+
+from ebook_convert.constants import filesystem_encoding, get_windows_username, islinux, iswindows
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+VADDRESS = None
+
+
+def eintr_retry_call[**P, R](func: Callable[P, R], *args: P.args, **kwargs: P.kwargs) -> R:
+    while True:
+        try:
+            return func(*args, **kwargs)
+        except OSError as e:
+            if getattr(e, 'errno', None) == errno.EINTR:
+                continue
+            raise
+
+
+@lru_cache
+def socket_address(which: str) -> str:
+    from ebook_convert import force_unicode
+    from ebook_convert.utils.filenames import ascii_filename
+
+    if iswindows:
+        ans = r'\\.\pipe\Calibre' + which
+        try:
+            user = get_windows_username()
+        except Exception:
+            user = None
+        if user:
+            user = ascii_filename(user).replace(' ', '_')
+            if user:
+                ans += '-' + user[:100] + 'x'
+    else:
+        user = force_unicode(os.environ.get('USER') or os.path.basename(os.path.expanduser('~')), filesystem_encoding)
+        if islinux:
+            sock_name = '{}-calibre-{}.socket'.format(ascii_filename(user).replace(' ', '_'), which)
+            ans = '\0' + sock_name
+        else:
+            ans = f'/tmp/calibre-{os.getuid()}-{which}.sock'
+    return ans
+
+
+def gui_socket_address() -> str:
+    return socket_address('GUI' if iswindows else 'gui')
+
+
+def viewer_socket_address() -> str:
+    return socket_address('Viewer' if iswindows else 'viewer')
+
+
+def cyoa_socket_address() -> str:
+    return socket_address('CYOA' if iswindows else 'cyoa')

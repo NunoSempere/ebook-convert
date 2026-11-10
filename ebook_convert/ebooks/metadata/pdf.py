@@ -1,40 +1,68 @@
-"""
-Read meta information from PDF files
-"""
-import functools
+# License: GPLv3 Copyright: 2008, Kovid Goyal <kovid at kovidgoyal.net>
+
+"""Read meta information from PDF files"""
+
+from __future__ import annotations
 import os
 import re
 import shutil
 import subprocess
+from functools import partial
+from typing import IO, TYPE_CHECKING
 
+from ebook_convert import prints
+from ebook_convert.constants import iswindows
+from ebook_convert.ebooks.metadata import MetaInformation, check_doi, check_isbn, string_to_authors
 from ebook_convert.ptempfile import TemporaryDirectory
-from ebook_convert.ebooks.metadata import (
-    MetaInformation, string_to_authors, check_isbn, check_doi)
+from ebook_convert.utils.ipc.simple_worker import WorkerError, fork_job
+from ebook_convert.utils.localization import _
+
+if TYPE_CHECKING:
+    from ebook_convert.ebooks.metadata.book.base import Metadata
 
 
-def read_info(outputdir, get_cover):
-    ''' Read info dict and cover from a pdf file named src.pdf in outputdir.
+def get_tools() -> tuple[str, str]:
+    from ebook_convert.ebooks.pdf.pdftohtml import PDFTOHTML
+
+    base = os.path.dirname(PDFTOHTML)
+    suffix = '.exe' if iswindows else ''
+    pdfinfo = os.path.join(base, 'pdfinfo') + suffix
+    pdftoppm = os.path.join(base, 'pdftoppm') + suffix
+    return pdfinfo, pdftoppm
+
+
+def check_output(*a: str) -> bytes:
+    from ebook_convert.ebooks.pdf.pdftohtml import creationflags
+
+    return subprocess.check_output(list(a), creationflags=creationflags)
+
+
+def check_call(*a: str) -> None:
+    from ebook_convert.ebooks.pdf.pdftohtml import creationflags
+
+    subprocess.check_call(list(a), creationflags=creationflags)
+
+
+def read_info(outputdir: str, get_cover: bool) -> dict[str, str | bytes] | None:
+    """Read info dict and cover from a pdf file named src.pdf in outputdir.
     Note that this function changes the cwd to outputdir and is therefore not
     thread safe. Run it using fork_job. This is necessary as there is no safe
     way to pass unicode paths via command line arguments. This also ensures
     that if poppler crashes, no stale file handles are left for the original
-    file, only for src.pdf.'''
-    pdfinfo = 'pdfinfo'
-    pdftoppm = 'pdftoppm'
-    source_file = os.path.join(outputdir, 'src.pdf')
-    cover_file = os.path.join(outputdir, 'cover')
-    ans = {}
+    file, only for src.pdf."""
+    os.chdir(outputdir)
+    pdfinfo, pdftoppm = get_tools()
+    ans: dict[str, str | bytes] = {}
 
     try:
-        raw = subprocess.check_output([pdfinfo, '-enc', 'UTF-8', '-isodates',
-                                       source_file])
+        raw = check_output(pdfinfo, '-enc', 'UTF-8', '-isodates', 'src.pdf')
     except subprocess.CalledProcessError as e:
-        print(f'pdfinfo errored out with return code: {e.returncode}')
+        prints(f'pdfinfo errored out with return code: {e.returncode}')
         return None
     try:
         info_raw = raw.decode('utf-8')
     except UnicodeDecodeError:
-        print('pdfinfo returned no UTF-8 data')
+        prints('pdfinfo returned no UTF-8 data')
         return None
 
     for line in info_raw.splitlines():
@@ -46,17 +74,16 @@ def read_info(outputdir, get_cover):
             ans[field] = val.strip()
 
     # Now read XMP metadata
-    # Versions of poppler before 0.47.0 used to print out both the Info dict
-    # and XMP metadata packet together. However, since that changed in
+    # Versions of poppler before 0.47.0 used to print out both the Info dict and
+    # XMP metadata packet together. However, since that changed in
     # https://cgit.freedesktop.org/poppler/poppler/commit/?id=c91483aceb1b640771f572cb3df9ad707e5cad0d
     # we can no longer rely on it.
     try:
-        raw = subprocess.check_output([pdfinfo, '-meta', source_file]).strip()
+        raw = check_output(pdfinfo, '-meta', 'src.pdf').strip()
     except subprocess.CalledProcessError as e:
-        print('pdfinfo failed to read XML metadata with return code: '
-              f'{e.returncode}')
+        prints(f'pdfinfo failed to read XML metadata with return code: {e.returncode}')
     else:
-        parts = re.split(br'^Metadata:', raw, 1, flags=re.MULTILINE)
+        parts = re.split(rb'^Metadata:', raw, maxsplit=1, flags=re.MULTILINE)
         if len(parts) > 1:
             # old poppler < 0.47.0
             raw = parts[1].strip()
@@ -65,44 +92,56 @@ def read_info(outputdir, get_cover):
 
     if get_cover:
         try:
-            subprocess.check_call([pdftoppm, '-singlefile', '-jpeg',
-                                   '-cropbox', source_file, cover_file])
+            check_call(pdftoppm, '-singlefile', '-jpeg', '-cropbox', 'src.pdf', 'cover')
         except subprocess.CalledProcessError as e:
-            print(f'pdftoppm errored out with return code: {e.returncode}')
+            prints(f'pdftoppm errored out with return code: {e.returncode}')
 
     return ans
 
 
-def page_images(pdfpath, outputdir='.', first=1, last=1, image_format='jpeg',
-                prefix='page-images'):
-    pdftoppm = 'pdftoppm'
+def page_images(pdfpath: str, outputdir: str = '.', first: int = 1, last: int = 1, image_format: str = 'jpeg', prefix: str = 'page-images') -> None:
+    pdftoppm = get_tools()[1]
     outputdir = os.path.abspath(outputdir)
-    args = {}
     try:
-        subprocess.check_call([
-            pdftoppm, '-cropbox', '-' + image_format, '-f', str(first),
-            '-l', str(last), pdfpath, os.path.join(outputdir, prefix)
-        ], **args)
+        check_call(
+            pdftoppm,
+            '-cropbox',
+            '-' + image_format,
+            '-f',
+            str(first),
+            '-l',
+            str(last),
+            pdfpath,
+            os.path.join(outputdir, prefix),
+        )
     except subprocess.CalledProcessError as e:
-        raise ValueError('Failed to render PDF, pdftoppm errorcode: %s' %
-                         e.returncode)
+        raise ValueError(f'Failed to render PDF, pdftoppm errorcode: {e.returncode}')
 
 
-def is_pdf_encrypted(path_to_pdf):
-    pdfinfo = 'pdfinfo'
-    raw = subprocess.check_output([pdfinfo, path_to_pdf])
-    q = re.search(br'^Encrypted:\s*(\S+)', raw, flags=re.MULTILINE)
+def is_pdf_encrypted(path_to_pdf: str) -> bool:
+    pdfinfo = get_tools()[0]
+    raw = check_output(pdfinfo, path_to_pdf)
+    q = re.search(rb'^Encrypted:\s*(\S+)', raw, flags=re.MULTILINE)
     if q is not None:
         return q.group(1) == b'yes'
     return False
 
 
-def get_metadata(stream, cover=True):
+def get_metadata(stream: IO[bytes], cover: bool = True) -> Metadata:
     with TemporaryDirectory('_pdf_metadata_read') as pdfpath:
         stream.seek(0)
         with open(os.path.join(pdfpath, 'src.pdf'), 'wb') as f:
             shutil.copyfileobj(stream, f)
-        info = read_info(pdfpath, bool(cover))
+        try:
+            res = fork_job('ebook_convert.ebooks.metadata.pdf', 'read_info', (pdfpath, bool(cover)))
+        except WorkerError as e:
+            prints(e.orig_tb)
+            raise RuntimeError('Failed to run pdfinfo')
+        info = res['result']
+        with open(res['stdout_stderr'], 'rb') as f:
+            raw = f.read().strip()
+            if raw:
+                prints(raw)
         if info is None:
             raise ValueError('Could not read info dict from PDF')
         covpath = os.path.join(pdfpath, 'cover.jpg')
@@ -111,13 +150,15 @@ def get_metadata(stream, cover=True):
             with open(covpath, 'rb') as f:
                 cdata = f.read()
 
-    title = info.get('Title', None) or 'Unknown'
+    title = info.get('Title', None) or _('Unknown')
     au = info.get('Author', None)
     if au is None:
-        au = ['Unknown']
+        au = [_('Unknown')]
     else:
         au = string_to_authors(au)
     mi = MetaInformation(title, au)
+    # if isbn is not None:
+    #     mi.isbn = isbn
 
     creator = info.get('Creator', None)
     if creator:
@@ -138,6 +179,7 @@ def get_metadata(stream, cover=True):
 
     if 'xmp_metadata' in info:
         from ebook_convert.ebooks.metadata.xmp import consolidate_metadata
+
         mi = consolidate_metadata(mi, info)
 
     # Look for recognizable identifiers in the info dict, if they were not
@@ -156,8 +198,8 @@ def get_metadata(stream, cover=True):
     return mi
 
 
-get_quick_metadata = functools.partial(get_metadata, cover=False)
+get_quick_metadata = partial(get_metadata, cover=False)
 
-
-def set_metadata(stream, mi):
-    return None
+def set_metadata(stream: IO[bytes], mi: Metadata) -> None:
+    # ebook-convert: PoDoFo is not available
+    raise NotImplementedError('Writing PDF metadata needs the PoDoFo extension, which ebook-convert does not include')

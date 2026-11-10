@@ -1,20 +1,33 @@
-from ebook_convert.utils import img as uimg
+#!/usr/bin/env python
+# License: GPLv3 Copyright: 2009, Kovid Goyal <kovid@kovidgoyal.net>
+
+from __future__ import annotations
+from typing import TYPE_CHECKING
+
+from ebook_convert import fit_image
+
+if TYPE_CHECKING:
+    from optparse import Values
+
+    from ebook_convert.ebooks.conversion.plumber import OptionValues
+    from ebook_convert.ebooks.oeb.base import OEBBook
 
 
-class RescaleImages(object):
+class RescaleImages:
+    "Rescale all images to fit inside given screen size"
 
-    'Rescale all images to fit inside given screen size'
-
-    def __init__(self, check_colorspaces=False):
+    def __init__(self, check_colorspaces: bool = False) -> None:
         self.check_colorspaces = check_colorspaces
 
-    def __call__(self, oeb, opts, max_size='profile'):
+    def __call__(self, oeb: OEBBook, opts: Values | OptionValues, max_size: str = 'profile') -> None:
+
         self.oeb, self.opts, self.log = oeb, opts, oeb.log
         self.rescale(max_size)
 
-    def rescale(self, max_size='profile'):
-        from PIL import Image
+    def rescale(self, max_size: str = 'profile') -> None:
         from io import BytesIO
+
+        from PIL import Image
 
         is_image_collection = getattr(self.opts, 'is_image_collection', False)
 
@@ -22,10 +35,10 @@ class RescaleImages(object):
             page_width, page_height = self.opts.dest.comic_screen_size
         else:
             page_width, page_height = self.opts.dest.width, self.opts.dest.height
-            page_width -= (self.opts.margin_left + self.opts.margin_right) * self.opts.dest.dpi/72
-            page_height -= (self.opts.margin_top + self.opts.margin_bottom) * self.opts.dest.dpi/72
+            page_width -= (self.opts.margin_left + self.opts.margin_right) * self.opts.dest.dpi / 72
+            page_height -= (self.opts.margin_top + self.opts.margin_bottom) * self.opts.dest.dpi / 72
+
         no_scale_size = 99999999999
-        max_size = (max_size or 'profile')
         if max_size == 'none':
             page_width = page_height = no_scale_size
         elif max_size != 'profile':
@@ -42,7 +55,6 @@ class RescaleImages(object):
                 page_height = no_scale_size
             if page_height <= 0:
                 page_height = no_scale_size
-
         for item in self.oeb.manifest:
             if item.media_type.startswith('image'):
                 ext = item.media_type.split('/')[-1].upper()
@@ -56,6 +68,7 @@ class RescaleImages(object):
                     # Probably an svg image
                     continue
                 try:
+                    assert isinstance(raw, bytes)  # BytesIO() raised TypeError for anything else
                     img = Image.open(BytesIO(raw))
                 except Exception:
                     continue
@@ -63,36 +76,26 @@ class RescaleImages(object):
 
                 try:
                     if self.check_colorspaces and img.mode == 'CMYK':
-                        self.log.warning('The image %s is in the CMYK '
-                                         'colorspace, converting it to RGB as '
-                                         'Adobe Digital Editions cannot '
-                                         'display CMYK', item.href)
+                        self.log.warn(f'The image {item.href} is in the CMYK colorspace, converting it to RGB as Adobe Digital Editions cannot display CMYK')
                         img = img.convert('RGB')
                 except Exception:
-                    self.log.exception('Failed to convert image %s from CMYK '
-                                       'to RGB', item.href)
+                    self.log.exception(f'Failed to convert image {item.href} from CMYK to RGB')
 
-                scaled, new_width, new_height = uimg.fit_image(width, height,
-                                                               page_width,
-                                                               page_height)
+                scaled, new_width, new_height = fit_image(width, height, page_width, page_height)
                 if scaled:
                     new_width = max(1, new_width)
                     new_height = max(1, new_height)
-                    self.log.info('Rescaling image from %dx%d to %dx%d %s',
-                                  width, height, new_width, new_height,
-                                  item.href)
+                    self.log(f'Rescaling image from {width}x{height} to {new_width}x{new_height}', item.href)
                     try:
                         img = img.resize((new_width, new_height))
                     except Exception:
-                        self.log.exception('Failed to rescale image: %s',
-                                           item.href)
+                        self.log.exception(f'Failed to rescale image: {item.href}')
                         continue
                     buf = BytesIO()
                     try:
                         img.save(buf, ext)
                     except Exception:
-                        self.log.exception('Failed to rescale image: %s',
-                                           item.href)
+                        self.log.exception(f'Failed to rescale image: {item.href}')
                     else:
                         item.data = buf.getvalue()
                         item.unload_data_from_memory()

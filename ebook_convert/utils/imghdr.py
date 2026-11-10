@@ -1,25 +1,32 @@
-"""
-Recognize image file formats and sizes based on their first few bytes.
-"""
-from struct import unpack, unpack_from, error
-import os
+#!/usr/bin/env python
+# License: GPLv3 Copyright: 2016, Kovid Goyal <kovid at kovidgoyal.net>
 
+from __future__ import annotations
+import os
+from collections.abc import Callable, Iterator
+from struct import error, unpack, unpack_from
+from typing import IO
+
+from ebook_convert.utils import StreamOrPath
 from ebook_convert.utils.speedups import ReadOnlyFileBuffer
 
+''' Recognize image file formats and sizes based on their first few bytes.'''
 
 HSIZE = 120
 
+type ImageTest = Callable[[memoryview], str | None]
 
-def what(file, h=None):
-    ' Recognize image headers '
+
+def what(file: str | bytes | IO[bytes] | None, h: bytes | memoryview | None = None) -> str | None:
+    "Recognize image headers"
     if h is None:
         if isinstance(file, (str, bytes)):
             with open(file, 'rb') as f:
                 h = f.read(HSIZE)
         else:
-            location = file.tell()
-            h = file.read(HSIZE)
-            file.seek(location)
+            location = file.tell()  # ty: ignore[unresolved-attribute]
+            h = file.read(HSIZE)  # ty: ignore[unresolved-attribute]
+            file.seek(location)  # ty: ignore[unresolved-attribute]
     if isinstance(h, bytes):
         h = memoryview(h)
     for tf in tests:
@@ -33,18 +40,19 @@ def what(file, h=None):
     return None
 
 
-def identify(src):
-    ''' Recognize file format and sizes. Returns format, width, height. width
+def identify(src: str | bytes | IO[bytes]) -> tuple[str | None, int, int]:
+    """Recognize file format and sizes. Returns format, width, height. width
     and height will be -1 if not found and fmt will be None if the image is not
-    recognized. '''
-    width = height = -1
+    recognized."""
 
-    if isinstance(src, str):
-        stream = open(src, 'rb')
-    elif isinstance(src, bytes):
-        stream = ReadOnlyFileBuffer(src)
-    else:
-        stream = src
+    if isinstance(src, bytes):
+        src = ReadOnlyFileBuffer(src)  # ty: ignore[invalid-assignment]
+    with StreamOrPath(src, 'rb') as stream:
+        return _identify(stream)
+
+
+def _identify(stream: IO[bytes]) -> tuple[str | None, int, int]:
+    width = height = -1
 
     pos = stream.tell()
     head = stream.read(HSIZE)
@@ -57,7 +65,7 @@ def identify(src):
             # PNG
             s = head[16:24] if size >= 24 and head[12:16] == b'IHDR' else head[8:16]
             try:
-                width, height = unpack(b">LL", s)
+                width, height = unpack(b'>LL', s)
             except error:
                 return fmt, width, height
         elif fmt == 'jpeg':
@@ -72,7 +80,7 @@ def identify(src):
         elif fmt == 'gif':
             # GIF
             try:
-                width, height = unpack(b"<HH", head[6:10])
+                width, height = unpack(b'<HH', head[6:10])
             except error:
                 return fmt, width, height
         elif size >= 56 and fmt == 'jpeg2000':
@@ -104,21 +112,21 @@ def identify(src):
                 stream.seek(pos)
     return fmt, width, height
 
+
 # ---------------------------------#
-# Subroutines per image file type #
+# Subroutines per image file type  #
 # ---------------------------------#
 
+_tests: list[ImageTest] = []
 
-tests = []
 
-
-def test(f):
-    tests.append(f)
+def test(f: ImageTest) -> ImageTest:
+    _tests.append(f)
     return f
 
 
 @test
-def jpeg(h):
+def jpeg(h: memoryview) -> str | None:
     """JPEG data in JFIF format (Changed by Kovid to mimic the file utility,
     the original code was failing with some jpegs that included ICC_PROFILE
     data, for example: http://nationalpostnews.files.wordpress.com/2013/03/budget.jpeg?w=300&h=1571)"""
@@ -130,40 +138,40 @@ def jpeg(h):
             return 'jpeg'
 
 
-def jpeg_dimensions(stream):
+def jpeg_dimensions(stream: IO[bytes]) -> tuple[int, int]:
     # A JPEG marker is two bytes of the form 0xff x where 0 < x < 0xff
     # See section B.1.1.2 of https://www.w3.org/Graphics/JPEG/itu-t81.pdf
     # We read the dimensions from the first SOFn section we come across
     stream.seek(2, os.SEEK_CUR)
 
-    def read(n):
+    def read(n: int) -> bytes:
         ans = stream.read(n)
         if len(ans) != n:
             raise ValueError('Truncated JPEG data')
         return ans
 
-    def read_byte():
+    def read_byte() -> int:
         return read(1)[0]
 
     x = None
     while True:
         # Find next marker
-        while x != 0xff:
+        while x != 0xFF:
             x = read_byte()
         # Soak up padding
-        marker = 0xff
-        while marker == 0xff:
+        marker = 0xFF
+        while marker == 0xFF:
             marker = read_byte()
         q = marker
-        if 0xc0 <= q <= 0xcf and q != 0xc4 and q != 0xcc:
+        if 0xC0 <= q <= 0xCF and q not in {0xC4, 0xCC}:
             # SOFn marker
             stream.seek(3, os.SEEK_CUR)
             return unpack(b'>HH', read(4))
-        elif 0xd8 <= q <= 0xda:
+        elif 0xD8 <= q <= 0xDA:
             break  # start of image, end of image, start of scan, no point
         elif q == 0:
             return -1, -1  # Corrupted JPEG
-        elif q == 0x01 or 0xd0 <= q <= 0xd7:
+        elif q == 0x01 or 0xD0 <= q <= 0xD7:
             # Standalone marker
             continue
         else:
@@ -176,20 +184,20 @@ def jpeg_dimensions(stream):
 
 
 @test
-def png(h):
-    if h[:8] == b"\211PNG\r\n\032\n":
+def png(h: memoryview) -> str | None:
+    if h[:8] == b'\211PNG\r\n\032\n':
         return 'png'
 
 
 @test
-def gif(h):
+def gif(h: memoryview) -> str | None:
     """GIF ('87 and '89 variants)"""
     if h[:6] in (b'GIF87a', b'GIF89a'):
         return 'gif'
 
 
 @test
-def tiff(h):
+def tiff(h: memoryview) -> str | None:
     """TIFF (can be in Motorola or Intel byte order)"""
     if h[:2] in (b'MM', b'II'):
         if h[2:4] == b'\xbc\x01':
@@ -198,13 +206,13 @@ def tiff(h):
 
 
 @test
-def webp(h):
+def webp(h: memoryview) -> str | None:
     if h[:4] == b'RIFF' and h[8:12] == b'WEBP':
         return 'webp'
 
 
 @test
-def avif(h):
+def avif(h: memoryview) -> str | None:
     """AVIF (still images and image sequences), which is ISOBMFF based, like HEIF"""
     if h[4:8] != b'ftyp':
         return None
@@ -216,7 +224,7 @@ def avif(h):
     # (four byte) minor version at offset 16
     brands = [h[8:12].tobytes()]
     for pos in range(16, min(box_size, len(h)) - 3, 4):
-        brands.append(h[pos:pos + 4].tobytes())
+        brands.append(h[pos : pos + 4].tobytes())
     for brand in brands:
         if brand in (b'avif', b'avis'):
             return 'avif'
@@ -228,14 +236,14 @@ JXL_CONTAINER_SIGNATURE = b'\x00\x00\x00\x0cJXL \x0d\x0a\x87\x0a'
 
 
 @test
-def jxl(h):
+def jxl(h: memoryview) -> str | None:
     """JPEG-XL, either a bare codestream or one in the ISOBMFF based container"""
     if h[:2] == JXL_CODESTREAM_SIGNATURE or h[:12] == JXL_CONTAINER_SIGNATURE:
         return 'jxl'
     return None
 
 
-def webp_dimensions(h):
+def webp_dimensions(h: bytes) -> tuple[int, int]:
     """The dimensions of a WebP image, from the header of its first chunk.
     See https://developers.google.com/speed/webp/docs/riff_container"""
     chunk = h[12:16]
@@ -269,24 +277,24 @@ AVIF_MAX_META_SIZE = 1024 * 1024
 AVIF_MAX_TOP_LEVEL_BOXES = 32
 
 
-def isobmff_boxes(data, pos=0, end=-1):
+def isobmff_boxes(data: bytes, pos: int = 0, end: int = -1) -> Iterator[tuple[bytes, int, int]]:
     """The type, start and end of the content of each box in data[pos:end]."""
     end = len(data) if end < 0 else end
     while pos + 8 <= end:
-        size, box_type = unpack(b'>L4s', data[pos:pos + 8])
+        size, box_type = unpack(b'>L4s', data[pos : pos + 8])
         start = pos + 8
         if size == 1:
-            size = unpack(b'>Q', data[start:start + 8])[0]
+            size = unpack(b'>Q', data[start : start + 8])[0]
             start += 8
         elif size == 0:
             size = end - pos
         if size < start - pos or pos + size > end:
-            raise ValueError('Invalid size for the ISOBMFF box: %r' % box_type)
+            raise ValueError(f'Invalid size for the ISOBMFF box: {box_type!r}')
         yield box_type, start, pos + size
         pos += size
 
 
-def read_avif_meta(stream):
+def read_avif_meta(stream: IO[bytes]) -> bytes:
     """The content of the top level meta box of an AVIF file."""
     for i in range(AVIF_MAX_TOP_LEVEL_BOXES):
         header = stream.read(8)
@@ -310,7 +318,7 @@ def read_avif_meta(stream):
     raise ValueError('No meta box found in the AVIF file')
 
 
-def avif_dimensions(stream):
+def avif_dimensions(stream: IO[bytes]) -> tuple[int, int]:
     """The dimensions of the primary image of an AVIF file, as displayed,
     so swapped if it is rotated by 90 or 270 degrees.
 
@@ -320,8 +328,8 @@ def avif_dimensions(stream):
     """
     meta = read_avif_meta(stream)
     primary = -1
-    properties = []
-    associations = {}
+    properties: list[tuple[bytes, int, int]] = []
+    associations: dict[int, list[int]] = {}
     # meta is a full box, so its children come after its version and flags
     for box_type, start, end in isobmff_boxes(meta, 4):
         if box_type == b'pitm':
@@ -332,16 +340,16 @@ def avif_dimensions(stream):
                 if child == b'ipco':
                     properties = list(isobmff_boxes(meta, cstart, cend))
                 elif child == b'ipma':
-                    version, flags = meta[cstart], int.from_bytes(meta[cstart + 1:cstart + 4], 'big')
+                    version, flags = meta[cstart], int.from_bytes(meta[cstart + 1 : cstart + 4], 'big')
                     pos = cstart + 4
-                    count = unpack(b'>L', meta[pos:pos + 4])[0]
+                    count = unpack(b'>L', meta[pos : pos + 4])[0]
                     pos += 4
                     for e in range(count):
                         if version < 1:
-                            item = unpack(b'>H', meta[pos:pos + 2])[0]
+                            item = unpack(b'>H', meta[pos : pos + 2])[0]
                             pos += 2
                         else:
-                            item = unpack(b'>L', meta[pos:pos + 4])[0]
+                            item = unpack(b'>L', meta[pos : pos + 4])[0]
                             pos += 4
                         num = meta[pos]
                         pos += 1
@@ -349,14 +357,14 @@ def avif_dimensions(stream):
                         for a in range(num):
                             # The top bit of each is the essential flag
                             if flags & 1:
-                                indices.append(unpack(b'>H', meta[pos:pos + 2])[0] & 0x7FFF)
+                                indices.append(unpack(b'>H', meta[pos : pos + 2])[0] & 0x7FFF)
                                 pos += 2
                             else:
                                 indices.append(meta[pos] & 0x7F)
                                 pos += 1
                         associations[item] = indices
 
-    def property_of(item, name):
+    def property_of(item: int, name: bytes) -> tuple[int, int] | None:
         for index in associations.get(item, ()):
             if 0 < index <= len(properties) and properties[index - 1][0] == name:
                 return properties[index - 1][1:]
@@ -369,7 +377,7 @@ def avif_dimensions(stream):
         if ispe is None:
             raise ValueError('No ispe property found in the AVIF file')
     # ispe is a full box, so the dimensions come after its version and flags
-    width, height = unpack(b'>LL', meta[ispe[0] + 4:ispe[0] + 12])
+    width, height = unpack(b'>LL', meta[ispe[0] + 4 : ispe[0] + 12])
     irot = property_of(primary, b'irot')
     # irot is the number of 90 degree anti-clockwise rotations
     if irot is not None and meta[irot[0]] & 1:
@@ -385,15 +393,15 @@ JXL_MAX_BOXES = 32
 JXL_RATIOS = ((1, 1), (1, 1), (12, 10), (4, 3), (3, 2), (16, 9), (5, 4), (2, 1))
 
 
-class BitReader(object):
+class BitReader:
     """Read the bits of data starting with the least significant bit of
     the first byte, the bit order used in JPEG-XL codestreams."""
 
-    def __init__(self, data):
+    def __init__(self, data: bytes) -> None:
         self.data = data
         self.pos = 0
 
-    def bits(self, n):
+    def bits(self, n: int) -> int:
         ans = 0
         for i in range(n):
             byte = self.pos >> 3
@@ -403,13 +411,13 @@ class BitReader(object):
             self.pos += 1
         return ans
 
-    def u32(self, *distribution):
+    def u32(self, *distribution: tuple[int, int]) -> int:
         """A U32 field: two bits select one of the four (offset, number of bits) pairs."""
         offset, n = distribution[self.bits(2)]
         return offset + self.bits(n)
 
 
-def read_jxl_codestream_header(stream):
+def read_jxl_codestream_header(stream: IO[bytes]) -> bytes:
     """The first JXL_HEADER_SIZE bytes of the codestream, after its
     signature. In the container the codestream is either in a single jxlc
     box or split over multiple jxlp boxes, which can be interleaved with
@@ -454,7 +462,7 @@ def read_jxl_codestream_header(stream):
     return codestream[2:]
 
 
-def jxl_dimensions(stream):
+def jxl_dimensions(stream: IO[bytes]) -> tuple[int, int]:
     """The dimensions of a JPEG-XL image, as displayed, so swapped if its
     orientation transposes it.
 
@@ -488,73 +496,70 @@ def jxl_dimensions(stream):
 
 
 @test
-def rgb(h):
+def rgb(h: memoryview) -> str | None:
     """SGI image library"""
     if h[:2] == b'\001\332':
         return 'rgb'
 
 
 @test
-def pbm(h):
+def pbm(h: memoryview) -> str | None:
     """PBM (portable bitmap)"""
-    if len(h) >= 3 and \
-        h[0] == b'P' and h[1] in b'14' and h[2] in b' \t\n\r':
+    if len(h) >= 3 and h[0] == b'P' and h[1] in b'14' and h[2] in b' \t\n\r':
         return 'pbm'
 
 
 @test
-def pgm(h):
+def pgm(h: memoryview) -> str | None:
     """PGM (portable graymap)"""
-    if len(h) >= 3 and \
-        h[0] == b'P' and h[1] in b'25' and h[2] in b' \t\n\r':
+    if len(h) >= 3 and h[0] == b'P' and h[1] in b'25' and h[2] in b' \t\n\r':
         return 'pgm'
 
 
 @test
-def ppm(h):
+def ppm(h: memoryview) -> str | None:
     """PPM (portable pixmap)"""
-    if len(h) >= 3 and \
-        h[0] == b'P' and h[1] in b'36' and h[2] in b' \t\n\r':
+    if len(h) >= 3 and h[0] == b'P' and h[1] in b'36' and h[2] in b' \t\n\r':
         return 'ppm'
 
 
 @test
-def rast(h):
+def rast(h: memoryview) -> str | None:
     """Sun raster file"""
-    if h[:4] == b'\x59\xA6\x6A\x95':
+    if h[:4] == b'\x59\xa6\x6a\x95':
         return 'rast'
 
 
 @test
-def xbm(h):
+def xbm(h: memoryview) -> str | None:
     """X bitmap (X10 or X11)"""
     s = b'#define '
-    if h[:len(s)] == s:
+    if h[: len(s)] == s:
         return 'xbm'
 
 
 @test
-def bmp(h):
+def bmp(h: memoryview) -> str | None:
     if h[:2] == b'BM':
         return 'bmp'
 
 
 @test
-def emf(h):
+def emf(h: memoryview) -> str | None:
     if h[:4] == b'\x01\0\0\0' and h[40:44] == b' EMF':
         return 'emf'
 
 
 @test
-def jpeg2000(h):
+def jpeg2000(h: memoryview) -> str | None:
     if h[:12] == b'\x00\x00\x00\x0cjP  \r\n\x87\n':
         return 'jpeg2000'
 
 
 @test
-def svg(h):
+def svg(h: memoryview) -> str | None:
     if h[:4] == b'<svg' or (h[:2] == b'<?' and h[2:5].tobytes().lower() == b'xml' and b'<svg' in h.tobytes()):
         return 'svg'
 
 
-tests = tuple(tests)
+tests = tuple(_tests)

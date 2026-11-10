@@ -1,51 +1,62 @@
-import struct, string, zlib, os
+#!/usr/bin/env python
+# License: GPLv3 Copyright: 2011, Kovid Goyal <kovid@kovidgoyal.net>
+
+from __future__ import annotations
+import os
+import string
+import struct
 from collections import OrderedDict
+import zlib
 from io import BytesIO
+from typing import IO, TYPE_CHECKING, TypedDict, cast
 
-from ebook_convert.utils.img import save_cover_data_to, scale_image, image_to_data, image_from_data, resize_image, png_data_to_gif_data
-from ebook_convert.utils.imghdr import what
+from ebook_convert.tinycss.color4 import parse_color_string
+
 from ebook_convert.ebooks import normalize
-from ebook_convert import polyglot
-from ebook_convert.tinycss.color3 import parse_color_string
+from ebook_convert.utils.img import image_from_data, image_to_data, png_data_to_gif_data, resize_image, save_cover_data_to, scale_image
+from ebook_convert.utils.imghdr import what
+from ebook_convert.utils.localization import _
+from ebook_convert.polyglot.builtins import as_bytes
 
+if TYPE_CHECKING:
+    import unittest
+    from collections.abc import Iterable, Mapping, Sequence
 
-__license__ = 'GPL v3'
-__copyright__ = '2011, Kovid Goyal <kovid@kovidgoyal.net>'
-__docformat__ = 'restructuredtext en'
+    from ebook_convert.ebooks.oeb.base import TOC, Guide
+    from ebook_convert.utils.logging import Log
 
 IMAGE_MAX_SIZE = 10 * 1024 * 1024
 RECORD_SIZE = 0x1000  # 4096 (Text record size (uncompressed))
 
 
-class PolyglotDict(dict):
-
-    def __setitem__(self, key, val):
+class PolyglotDict[V](dict[bytes, V]):
+    def __setitem__(self, key: str | bytes, val: V) -> None:
         if isinstance(key, str):
             key = key.encode('utf-8')
         dict.__setitem__(self, key, val)
 
-    def __getitem__(self, key):
+    def __getitem__(self, key: str | bytes) -> V:
         if isinstance(key, str):
             key = key.encode('utf-8')
         return dict.__getitem__(self, key)
 
-    def __contains__(self, key):
+    def __contains__(self, key: object) -> bool:
         if isinstance(key, str):
             key = key.encode('utf-8')
         return dict.__contains__(self, key)
 
 
-def decode_string(raw, codec='utf-8', ordt_map=None):
-    length, = struct.unpack(b'>B', raw[0:1])
-    raw = raw[1:1+length]
-    consumed = length+1
+def decode_string(raw: bytes, codec: str = 'utf-8', ordt_map: Sequence[str] | Mapping[int, str] | None = None) -> tuple[str, int]:
+    (length,) = struct.unpack(b'>B', raw[0:1])
+    raw = raw[1 : 1 + length]
+    consumed = length + 1
     if ordt_map:
         return ''.join(ordt_map[x] for x in bytearray(raw)), consumed
     return raw.decode(codec), consumed
 
 
-def decode_hex_number(raw, codec='utf-8'):
-    '''
+def decode_hex_number(raw: bytes, codec: str = 'utf-8') -> tuple[int, int]:
+    """
     Return a variable length number encoded using hexadecimal encoding. These
     numbers have the first byte which tells the number of bytes that follow.
     The bytes that follow are simply the hexadecimal representation of the
@@ -55,34 +66,34 @@ def decode_hex_number(raw, codec='utf-8'):
 
     :return: The number and the number of bytes from raw that the number
     occupies.
-    '''
-    raw, consumed = decode_string(raw, codec=codec)
-    return int(raw, 16), consumed
+    """
+    text, consumed = decode_string(raw, codec=codec)
+    return int(text, 16), consumed
 
 
-def encode_string(raw):
-    ans = bytearray(polyglot.as_bytes(raw))
+def encode_string(raw: str | bytes) -> bytes:
+    ans = bytearray(as_bytes(raw))
     ans.insert(0, len(ans))
     return bytes(ans)
 
 
-def encode_number_as_hex(num):
-    '''
+def encode_number_as_hex(num: int) -> bytes:
+    """
     Encode num as a variable length encoded hexadecimal number. Returns the
     bytestring containing the encoded number. These
     numbers have the first byte which tells the number of bytes that follow.
     The bytes that follow are simply the hexadecimal representation of the
     number.
-    '''
-    num = hex(num)[2:].upper().encode('ascii')
-    nlen = len(num)
+    """
+    hexnum = f'{num:X}'.encode('ascii')
+    nlen = len(hexnum)
     if nlen % 2 != 0:
-        num = b'0'+num
-    return encode_string(num)
+        hexnum = b'0' + hexnum
+    return encode_string(hexnum)
 
 
-def encint(value, forward=True):
-    '''
+def encint(value: int, forward: bool = True) -> bytes:
+    """
     Some parts of the Mobipocket format encode data as variable-width integers.
     These integers are represented big-endian with 7 bits per byte in bits 1-7.
     They may be either forward-encoded, in which case only the first byte has bit 8 set,
@@ -101,7 +112,7 @@ def encint(value, forward=True):
 
     If forward is True the bytes returned are suitable for prepending to the
     output buffer, otherwise they must be append to the output buffer.
-    '''
+    """
     if value < 0:
         raise ValueError('Cannot encode negative numbers as vwi')
     # Encode vwi
@@ -118,15 +129,15 @@ def encint(value, forward=True):
     return bytes(byts)
 
 
-def decint(raw, forward=True):
-    '''
+def decint(raw: bytes | bytearray, forward: bool = True) -> tuple[int, int]:
+    """
     Read a variable width integer from the bytestring or bytearray raw and return the
     integer and the number of bytes read. If forward is True bytes are read
     from the start of raw, otherwise from the end of raw.
 
     This function is the inverse of encint above, see its docs for more
     details.
-    '''
+    """
     val = 0
     byts = bytearray()
     src = bytearray(raw)
@@ -145,17 +156,16 @@ def decint(raw, forward=True):
     return val, len(byts)
 
 
-def test_decint(num):
+def test_decint(num: int) -> None:
     for d in (True, False):
         raw = encint(num, forward=d)
         sz = len(raw)
         if (num, sz) != decint(raw, forward=d):
-            raise ValueError('Failed for num %d, forward=%r: %r != %r' % (
-                num, d, (num, sz), decint(raw, forward=d)))
+            raise ValueError(f'Failed for num {num}, forward={d!r}: {num, sz!r} != {decint(raw, forward=d)!r}')
 
 
-def rescale_image(data, maxsizeb=IMAGE_MAX_SIZE, dimen=None):
-    '''
+def rescale_image(data: bytes, maxsizeb: int = IMAGE_MAX_SIZE, dimen: int | tuple[int, int] | None = None) -> bytes:
+    """
     Convert image setting all transparent pixels to white and changing format
     to JPEG. Ensure the resultant image has a byte size less than
     maxsizeb.
@@ -165,16 +175,16 @@ def rescale_image(data, maxsizeb=IMAGE_MAX_SIZE, dimen=None):
     of dimen)
 
     Returns the image as a bytestring
-    '''
+    """
     if dimen is not None:
         if hasattr(dimen, '__len__'):
-            width, height = dimen
+            width, height = cast('tuple[int, int]', dimen)
         else:
             width = height = dimen
         data = scale_image(data, width=width, height=height, compression_quality=90)[-1]
-    # else:
+    else:
         # Replace transparent pixels with white pixels and convert to JPEG
-        #data = save_cover_data_to(data)
+        data = save_cover_data_to(data)
     if len(data) <= maxsizeb:
         return data
     orig_data = data  # save it in case compression fails
@@ -190,21 +200,21 @@ def rescale_image(data, maxsizeb=IMAGE_MAX_SIZE, dimen=None):
     while len(data) > maxsizeb and scale >= 0.05:
         img = image_from_data(data)
         w, h = img.width(), img.height()
-        img = resize_image(img, int(scale*w), int(scale*h))
+        img = resize_image(img, int(scale * w), int(scale * h))
         data = image_to_data(img, compression_quality=quality)
         scale -= 0.05
     return data
 
 
-def get_trailing_data(record, extra_data_flags):
-    '''
+def get_trailing_data(record: bytes, extra_data_flags: int) -> tuple[dict[int, bytes], bytes]:
+    """
     Given a text record as a bytestring and the extra data flags from the MOBI
     header, return the trailing data as a dictionary, mapping bit number to
     data as bytestring. Also returns the record - all trailing data.
 
     :return: Trailing data, record - trailing data
-    '''
-    data = OrderedDict()
+    """
+    data: dict[int, bytes] = OrderedDict()
     flags = extra_data_flags >> 1
 
     num = 0
@@ -228,8 +238,8 @@ def get_trailing_data(record, extra_data_flags):
     return data, record
 
 
-def encode_trailing_data(raw):
-    '''
+def encode_trailing_data(raw: bytes) -> bytes:
+    """
     Given some data in the bytestring raw, return a bytestring of the form
 
         <data><size>
@@ -239,7 +249,7 @@ def encode_trailing_data(raw):
 
     This is the encoding used for trailing data entries at the end of text
     records. See get_trailing_data() for details.
-    '''
+    """
     lsize = 1
     while True:
         encoded = encint(len(raw) + lsize, forward=False)
@@ -249,32 +259,32 @@ def encode_trailing_data(raw):
     return raw + encoded
 
 
-def encode_fvwi(val, flags, flag_size=4):
-    '''
+def encode_fvwi(val: int, flags: int, flag_size: int = 4) -> bytes:
+    """
     Encode the value val and the flag_size bits from flags as a fvwi. This encoding is
     used in the trailing byte sequences for indexing. Returns encoded
     bytestring.
-    '''
+    """
     ans = val << flag_size
     for i in range(flag_size):
-        ans |= (flags & (1 << i))
+        ans |= flags & (1 << i)
     return encint(ans)
 
 
-def decode_fvwi(byts, flag_size=4):
-    '''
+def decode_fvwi(byts: bytes | bytearray, flag_size: int = 4) -> tuple[int, int, int]:
+    """
     Decode encoded fvwi. Returns number, flags, consumed
-    '''
+    """
     arg, consumed = decint(bytes(byts))
     val = arg >> flag_size
     flags = 0
     for i in range(flag_size):
-        flags |= (arg & (1 << i))
+        flags |= arg & (1 << i)
     return val, flags, consumed
 
 
-def decode_tbs(byts, flag_size=4):
-    '''
+def decode_tbs(byts: bytes | bytearray, flag_size: int = 4) -> tuple[int, dict[int, int], int]:
+    """
     Trailing byte sequences for indexing consists of series of fvwi numbers.
     This function reads the fvwi number and its associated flags. It then uses
     the flags to read any more numbers that belong to the series. The flags are
@@ -282,10 +292,10 @@ def decode_tbs(byts, flag_size=4):
 
     Returns the fvwi number, a dictionary mapping flags bits to the associated
     data and the number of bytes consumed.
-    '''
+    """
     byts = bytes(byts)
     val, flags, consumed = decode_fvwi(byts, flag_size=flag_size)
-    extra = {}
+    extra: dict[int, int] = {}
     byts = byts[consumed:]
     if flags & 0b1000 and flag_size > 3:
         extra[0b1000] = True
@@ -306,11 +316,11 @@ def decode_tbs(byts, flag_size=4):
     return val, extra, consumed
 
 
-def encode_tbs(val, extra, flag_size=4):
-    '''
+def encode_tbs(val: int, extra: dict[int, int], flag_size: int = 4) -> bytes:
+    """
     Encode the number val and the extra data in the extra dict as an fvwi. See
     decode_tbs above.
-    '''
+    """
     flags = 0
     for flag in extra:
         flags |= flag
@@ -325,98 +335,109 @@ def encode_tbs(val, extra, flag_size=4):
     return ans
 
 
-def utf8_text(text):
-    '''
+def utf8_text(text: str | bytes | None) -> bytes:
+    """
     Convert a possibly null string to utf-8 bytes, guaranteeing to return a non
     empty, normalized bytestring.
-    '''
+    """
     if text and text.strip():
         text = text.strip()
         if not isinstance(text, str):
             text = text.decode('utf-8', 'replace')
         text = normalize(text).encode('utf-8')
     else:
-        text = 'Unknown'.encode('utf-8')
+        text = _('Unknown').encode('utf-8')
     return text
 
 
-def align_block(raw, multiple=4, pad=b'\0'):
-    '''
+def align_block(raw: bytes, multiple: int = 4, pad: bytes = b'\0') -> bytes:
+    """
     Return raw with enough pad bytes append to ensure its length is a multiple
     of 4.
-    '''
+    """
     extra = len(raw) % multiple
     if extra == 0:
         return raw
-    return raw + pad*(multiple - extra)
+    return raw + pad * (multiple - extra)
 
 
-def detect_periodical(toc, log):
-    '''
+def detect_periodical(toc: TOC, log: Log | None = None) -> bool:
+    """
     Detect if the TOC object toc contains a periodical that conforms to the
     structure required by kindlegen to generate a periodical.
-    '''
-    if toc.count() < 1 or not toc[0].klass == 'periodical':
+    """
+    if toc.count() < 1 or toc[0].klass != 'periodical':
         return False
     for node in toc.iterdescendants():
         if node.depth() == 1 and node.klass != 'article':
-            log.debug('Not a periodical: Deepest node does not have '
-                      'class="article"')
+            if log is not None:
+                log.debug('Not a periodical: Deepest node does not have class="article"')
             return False
         if node.depth() == 2 and node.klass != 'section':
-            log.debug('Not a periodical: Second deepest node does not have '
-                      'class="section"')
+            if log is not None:
+                log.debug('Not a periodical: Second deepest node does not have class="section"')
             return False
         if node.depth() == 3 and node.klass != 'periodical':
-            log.debug('Not a periodical: Third deepest node does not have '
-                      'class="periodical"')
+            if log is not None:
+                log.debug('Not a periodical: Third deepest node does not have class="periodical"')
             return False
         if node.depth() > 3:
-            log.debug('Not a periodical: Has nodes of depth > 3')
+            if log is not None:
+                log.debug('Not a periodical: Has nodes of depth > 3')
             return False
     return True
 
 
-def count_set_bits(num):
+def count_set_bits(num: int) -> int:
     if num < 0:
         num = -num
     ans = 0
     while num > 0:
-        ans += (num & 0b1)
+        ans += num & 0b1
         num >>= 1
     return ans
 
 
-def to_base(num, base=32, min_num_digits=None):
+def to_base(num: int, base: int = 32, min_num_digits: int | None = None) -> str:
     digits = string.digits + string.ascii_uppercase
     sign = 1 if num >= 0 else -1
     if num == 0:
-        return ('0' if min_num_digits is None else '0'*min_num_digits)
+        return '0' if min_num_digits is None else '0' * min_num_digits
     num *= sign
     ans = []
     while num:
         ans.append(digits[(num % base)])
         num //= base
     if min_num_digits is not None and len(ans) < min_num_digits:
-        ans.extend('0'*(min_num_digits - len(ans)))
+        ans.extend('0' * (min_num_digits - len(ans)))
     if sign < 0:
         ans.append('-')
     ans.reverse()
     return ''.join(ans)
 
 
-def mobify_image(data):
-    'Convert PNG images to GIF as the idiotic Kindle cannot display some PNG'
+def mobify_image(data: bytes) -> bytes:
+    "Convert PNG images to GIF as the idiotic Kindle cannot display some PNG"
     fmt = what(None, data)
     if fmt == 'png':
         data = png_data_to_gif_data(data)
     return data
 
+
 # Font records {{{
 
 
-def read_font_record(data, extent=1040):
-    '''
+class FontRecord(TypedDict):
+    raw_data: bytes
+    font_data: bytes | None
+    err: str | None
+    ext: str
+    headers: dict[str, int | str] | None
+    encrypted: bool
+
+
+def read_font_record(data: bytes, extent: int | None = 1040) -> FontRecord:
+    """
     Return the font encoded in the MOBI FONT record represented by data.
     The return value in a dict with fields raw_data, font_data, err, ext,
     headers.
@@ -433,7 +454,7 @@ def read_font_record(data, extent=1040):
     error occurred)
     headers is the list of decoded headers from the font record or None if
     decoding failed
-    '''
+    """
     # Format:
     # bytes  0 -  3:  'FONT'
     # bytes  4 -  7:  Uncompressed size
@@ -445,28 +466,25 @@ def read_font_record(data, extent=1040):
     # bytes 19 - 23:  offset to start of XOR data
     # The zlib compressed data begins with 2 bytes of header and
     # has 4 bytes of checksum at the end
-    ans = {'raw_data':data, 'font_data':None, 'err':None, 'ext':'failed',
-            'headers':None, 'encrypted':False}
+    ans: FontRecord = {'raw_data': data, 'font_data': None, 'err': None, 'ext': 'failed', 'headers': None, 'encrypted': False}
 
     try:
-        usize, flags, dstart, xor_len, xor_start = struct.unpack_from(
-                b'>LLLLL', data, 4)
-    except:
+        usize, flags, dstart, xor_len, xor_start = struct.unpack_from(b'>LLLLL', data, 4)
+    except Exception:
         ans['err'] = 'Failed to read font record header fields'
         return ans
     font_data = data[dstart:]
-    ans['headers'] = {'usize':usize, 'flags':bin(flags), 'xor_len':xor_len,
-            'xor_start':xor_start, 'dstart':dstart}
+    ans['headers'] = {'usize': usize, 'flags': bin(flags), 'xor_len': xor_len, 'xor_start': xor_start, 'dstart': dstart}
 
     if flags & 0b10:
         # De-obfuscate the data
-        key = bytearray(data[xor_start:xor_start+xor_len])
+        key = bytearray(data[xor_start : xor_start + xor_len])
         buf = bytearray(font_data)
         extent = len(font_data) if extent is None else extent
         extent = min(extent, len(font_data))
 
         for n in range(extent):
-            buf[n] ^= key[n%xor_len]  # XOR of buf and key
+            buf[n] ^= key[n % xor_len]  # XOR of buf and key
 
         font_data = bytes(buf)
         ans['encrypted'] = True
@@ -476,7 +494,7 @@ def read_font_record(data, extent=1040):
         try:
             font_data = zlib.decompress(font_data)
         except Exception as e:
-            ans['err'] = 'Failed to zlib decompress font data (%s)'%e
+            ans['err'] = f'Failed to zlib decompress font data ({e})'
             return ans
 
         if len(font_data) != usize:
@@ -485,17 +503,16 @@ def read_font_record(data, extent=1040):
 
     ans['font_data'] = font_data
     sig = font_data[:4]
-    ans['ext'] = ('ttf' if sig in {b'\0\1\0\0', b'true', b'ttcf'}
-                    else 'otf' if sig == b'OTTO' else 'dat')
+    ans['ext'] = 'ttf' if sig in {b'\0\1\0\0', b'true', b'ttcf'} else 'otf' if sig == b'OTTO' else 'dat'
 
     return ans
 
 
-def write_font_record(data, obfuscate=True, compress=True):
-    '''
+def write_font_record(data: bytes, obfuscate: bool = True, compress: bool = True) -> bytes:
+    """
     Write the ttf/otf font represented by data into a font record. See
     read_font_record() for details on the format of the record.
-    '''
+    """
 
     flags = 0
     key_len = 20
@@ -508,31 +525,31 @@ def write_font_record(data, obfuscate=True, compress=True):
         flags |= 0b10
         xor_key = os.urandom(key_len)
         key = bytearray(xor_key)
-        data = bytearray(data)
+        buf = bytearray(data)
         for i in range(1040):
-            data[i] ^= key[i%key_len]
-        data = bytes(data)
+            buf[i] ^= key[i % key_len]
+        data = bytes(buf)
 
     key_start = struct.calcsize(b'>5L') + 4
     data_start = key_start + len(xor_key)
 
-    header = b'FONT' + struct.pack(b'>5L', usize, flags, data_start,
-            len(xor_key), key_start)
+    header = b'FONT' + struct.pack(b'>5L', usize, flags, data_start, len(xor_key), key_start)
 
     return header + xor_key + data
+
 
 # }}}
 
 
-def create_text_record(text):
-    '''
+def create_text_record(text: IO[bytes]) -> tuple[bytes, bytes]:
+    """
     Return a Palmdoc record of size RECORD_SIZE from the text file object.
     In case the record ends in the middle of a multibyte character return
     the overlap as well.
 
     Returns data, overlap: where both are byte strings. overlap is the
     extra bytes needed to complete the truncated multibyte character.
-    '''
+    """
     opos = text.tell()
     text.seek(0, 2)
     # npos is the position of the next record
@@ -575,25 +592,24 @@ def create_text_record(text):
     return data, overlap
 
 
-class CNCX(object):  # {{{
-
-    '''
+class CNCX:  # {{{
+    """
     Create the CNCX records. These are records containing all the strings from
     an index. Each record is of the form: <vwi string size><utf-8 encoded
     string>
-    '''
+    """
 
     MAX_STRING_LENGTH = 500
 
-    def __init__(self, strings=()):
+    def __init__(self, strings: Iterable[str] = ()) -> None:
         self.strings = OrderedDict((s, 0) for s in strings)
 
-        self.records = []
+        self.records: list[bytes] = []
         offset = 0
         buf = BytesIO()
         RECORD_LIMIT = 0x10000 - 1024  # kindlegen appears to use 1024, PDB limit is 0x10000
         for key in self.strings:
-            utf8 = utf8_text(key[:self.MAX_STRING_LENGTH])
+            utf8 = utf8_text(key[: self.MAX_STRING_LENGTH])
             l = len(utf8)
             sz_bytes = encint(l)
             raw = sz_bytes + utf8
@@ -609,34 +625,64 @@ class CNCX(object):  # {{{
         if val:
             self.records.append(align_block(val))
 
-    def __getitem__(self, string):
+    def __getitem__(self, string: str) -> int:
         return self.strings[string]
 
-    def __bool__(self):
+    def __bool__(self) -> bool:
         return bool(self.records)
+
     __nonzero__ = __bool__
 
-    def __len__(self):
+    def __len__(self) -> int:
         return len(self.records)
+
 
 # }}}
 
 
-def is_guide_ref_start(ref):
+def is_guide_ref_start(ref: Guide.Reference) -> bool | str:
     # title can be None for references with non-standard types
-    return ((ref.title or '').lower() == 'start' or
-            (ref.type and ref.type.lower() in {'start',
-                    'other.start', 'text'}))
+    return (ref.title or '').lower() == 'start' or (ref.type and ref.type.lower() in {'start', 'other.start', 'text'})
 
 
-def convert_color_for_font_tag(val):
+def convert_color_for_font_tag(val: object) -> str:
     rgba = parse_color_string(str(val or ''))
-    if not isinstance(rgba, tuple):
-        # not a color (for example inherit, var(...) or a plain number, see
-        # 47ec4b5521) or currentColor: pass it through, always as a string
+    if not isinstance(rgba, tuple):  # not a color or currentColor
         return str(val)
-    # The channels are already in 0..1 (clamp them anyway, color3 does not
-    # clamp percentages), round rather than truncate as colors converted from
-    # other color spaces are not exact multiples of 1/255
-    clamp = lambda x: max(0.0, min(1.0, x))
-    return '#' + ''.join('%02x' % int(clamp(x) * 255 + 0.5) for x in rgba[:3])
+    # The channels are already in 0..1, round rather than truncate as colors
+    # converted from other color spaces are not exact multiples of 1/255
+    return '#' + ''.join(f'{int(x * 255 + 0.5):02x}' for x in rgba[:3])
+
+
+def find_tests() -> unittest.TestSuite:
+    import unittest
+
+    class TestConvertColor(unittest.TestCase):
+        def test_convert_color_for_font_tag(self) -> None:
+            ae = self.assertEqual
+            cc = convert_color_for_font_tag
+            ae('currentColor', cc('currentColor'))
+            ae('inherit', cc('inherit'))
+            ae('#ff0000', cc('red'))
+            ae('#001122', cc('#012'))
+            ae('#1a334d', cc('rgb(10%, 20%, 30%)'))
+            ae('#00ff00', cc('rgb(-51, 306, 0)'))
+            # CSS Color Level 4
+            ae('#ff0000', cc('#ff000080'))
+            ae('#ff0000', cc('rgb(255 0 0 / 50%)'))
+            ae('#663399', cc('rebeccapurple'))
+            ae('#ffffff', cc('lab(100 0 0)'))
+            ae('#ff0000', cc('oklch(0.628 0.2577 29.23)'))
+            ae('rgb(var(--x))', cc('rgb(var(--x))'))
+
+        def test_is_guide_ref_start(self) -> None:
+            from ebook_convert.ebooks.oeb.base import OEBBook
+            from ebook_convert.utils.logging import default_log
+
+            guide = OEBBook(default_log).guide
+            # A non-standard type gets no default title
+            self.assertFalse(is_guide_ref_start(guide.add('foo', None, 'a.html')))
+            self.assertTrue(is_guide_ref_start(guide.add('text', 'Main', 'b.html')))
+            self.assertTrue(is_guide_ref_start(guide.add('bar', 'Start', 'c.html')))
+
+    return unittest.defaultTestLoader.loadTestsFromTestCase(TestConvertColor)

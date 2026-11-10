@@ -3,6 +3,10 @@
 #
 #   install   create .venv with uv and install the project in editable mode
 #   test      run the test-suite
+#   check     import every vendored module and scan for unrewritten imports
+#   survey    run a real conversion through every registered plugin
+#   vendor    regenerate ebook_convert/ from a Calibre checkout:
+#             ./make.sh vendor /path/to/calibre
 #   build     build sdist + wheel into dist/
 #   binary    build a single-file executable into dist/ with PyInstaller
 #   publish   upload dist/* to PyPI (needs UV_PUBLISH_TOKEN or trusted publishing)
@@ -16,6 +20,24 @@ install() {
 
 test() {
 	uv run --all-extras pytest "$@"
+}
+
+check() {
+	python3 tools/vendor.py --check
+	uv run python tools/check_imports.py
+}
+
+survey() {
+	uv run python tools/survey.py "$@"
+}
+
+vendor() {
+	if [ $# -lt 1 ]; then
+		echo "usage: ./make.sh vendor /path/to/calibre/checkout" >&2
+		exit 2
+	fi
+	python3 tools/vendor.py "$@"
+	check
 }
 
 build() {

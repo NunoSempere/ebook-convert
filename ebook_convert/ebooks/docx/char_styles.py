@@ -1,15 +1,21 @@
+#!/usr/bin/env python
+# License: GPLv3 Copyright: 2013, Kovid Goyal <kovid at kovidgoyal.net>
+
+from __future__ import annotations
 from collections import OrderedDict
-from ebook_convert.ebooks.docx.block_styles import (  # noqa
-    inherit, simple_color, LINE_STYLES, simple_float, binary_property, read_shd)
+from typing import TYPE_CHECKING
 
+from ebook_convert.ebooks.docx.block_styles import LINE_STYLES, Inherit, binary_property, inherit, read_shd, simple_color, simple_float
 
-__license__ = 'GPL v3'
-__copyright__ = '2013, Kovid Goyal <kovid at kovidgoyal.net>'
+if TYPE_CHECKING:
+    from lxml.etree import _Element
+
+    from ebook_convert.ebooks.docx.names import AttrGetter, DOCXNamespace, XPathFunc
 
 # Read from XML {{{
 
 
-def read_text_border(parent, dest, XPath, get):
+def read_text_border(parent: _Element, dest: RunStyle, XPath: XPathFunc, get: AttrGetter) -> None:
     border_color = border_style = border_width = padding = inherit
     elems = XPath('./w:bdr')(parent)
     if elems and elems[0].attrib:
@@ -31,37 +37,43 @@ def read_text_border(parent, dest, XPath, get):
                 pass
         sz = get(elem, 'w:sz')
         if sz is not None:
-            # we dont care about art borders (they are only used for page borders)
+            # we don't care about art borders (they are only used for page borders)
             try:
                 # A border of less than 1pt is not rendered by WebKit
                 border_width = min(96, max(8, float(sz))) / 8
             except (ValueError, TypeError):
                 pass
 
-    setattr(dest, 'border_color', border_color)
-    setattr(dest, 'border_style', border_style)
-    setattr(dest, 'border_width', border_width)
-    setattr(dest, 'padding', padding)
+    dest.border_color = border_color
+    dest.border_style = border_style
+    dest.border_width = border_width
+    dest.padding = padding
 
 
-def read_color(parent, dest, XPath, get):
+def read_color(parent: _Element, dest: RunStyle, XPath: XPathFunc, get: AttrGetter) -> None:
     ans = inherit
     for col in XPath('./w:color[@w:val]')(parent):
         val = get(col, 'w:val')
         if not val:
             continue
         ans = simple_color(val)
-    setattr(dest, 'color', ans)
+    dest.color = ans
 
 
-def convert_highlight_color(val):
+def convert_highlight_color(val: str) -> str:
     return {
-        'darkBlue': '#000080', 'darkCyan': '#008080', 'darkGray': '#808080',
-        'darkGreen': '#008000', 'darkMagenta': '#800080', 'darkRed': '#800000', 'darkYellow': '#808000',
-        'lightGray': '#c0c0c0'}.get(val, val)
+        'darkBlue': '#000080',
+        'darkCyan': '#008080',
+        'darkGray': '#808080',
+        'darkGreen': '#008000',
+        'darkMagenta': '#800080',
+        'darkRed': '#800000',
+        'darkYellow': '#808000',
+        'lightGray': '#c0c0c0',
+    }.get(val, val)
 
 
-def read_highlight(parent, dest, XPath, get):
+def read_highlight(parent: _Element, dest: RunStyle, XPath: XPathFunc, get: AttrGetter) -> None:
     ans = inherit
     for col in XPath('./w:highlight[@w:val]')(parent):
         val = get(col, 'w:val')
@@ -72,10 +84,10 @@ def read_highlight(parent, dest, XPath, get):
         else:
             val = convert_highlight_color(val)
         ans = val
-    setattr(dest, 'highlight', ans)
+    dest.highlight = ans
 
 
-def read_lang(parent, dest, XPath, get):
+def read_lang(parent: _Element, dest: RunStyle, XPath: XPathFunc, get: AttrGetter) -> None:
     ans = inherit
     for col in XPath('./w:lang[@w:val]')(parent):
         val = get(col, 'w:val')
@@ -87,35 +99,47 @@ def read_lang(parent, dest, XPath, get):
             ans = val
         else:
             from ebook_convert.ebooks.docx.lcid import lcid
+
             val = lcid.get(code, None)
             if val:
                 ans = val
-    setattr(dest, 'lang', ans)
+    dest.lang = ans
 
 
-def read_letter_spacing(parent, dest, XPath, get):
+def read_letter_spacing(parent: _Element, dest: RunStyle, XPath: XPathFunc, get: AttrGetter) -> None:
     ans = inherit
     for col in XPath('./w:spacing[@w:val]')(parent):
         val = simple_float(get(col, 'w:val'), 0.05)
         if val is not None:
             ans = val
-    setattr(dest, 'letter_spacing', ans)
+    dest.letter_spacing = ans
 
 
-def read_underline(parent, dest, XPath, get):
+def read_underline(parent: _Element, dest: RunStyle, XPath: XPathFunc, get: AttrGetter) -> None:
     ans = inherit
     for col in XPath('./w:u[@w:val]')(parent):
         val = get(col, 'w:val')
         if val:
             style = {
-                'dotted': 'dotted', 'dash': 'dashed',
-                'dashDotDotHeavy': 'dotted', 'dashDotHeavy': 'dashed',
-                'dashedHeavy': 'dashed', 'dashLong': 'dashed',
-                'dashLongHeavy': 'dashed', 'dotDash': 'dotted',
-                'dotDotDash': 'dotted', 'dottedHeavy': 'dotted',
-                'double': 'double', 'none': 'none', 'single': 'solid',
-                'thick': 'solid', 'wave': 'wavy', 'wavyDouble': 'wavy',
-                'wavyHeavy': 'wavy', 'words': 'solid'}.get(val, 'solid')
+                'dotted': 'dotted',
+                'dash': 'dashed',
+                'dashDotDotHeavy': 'dotted',
+                'dashDotHeavy': 'dashed',
+                'dashedHeavy': 'dashed',
+                'dashLong': 'dashed',
+                'dashLongHeavy': 'dashed',
+                'dotDash': 'dotted',
+                'dotDotDash': 'dotted',
+                'dottedHeavy': 'dotted',
+                'double': 'double',
+                'none': 'none',
+                'single': 'solid',
+                'thick': 'solid',
+                'wave': 'wavy',
+                'wavyDouble': 'wavy',
+                'wavyHeavy': 'wavy',
+                'words': 'solid',
+            }.get(val, 'solid')
             if style == 'none':
                 ans = 'none'
             else:
@@ -123,95 +147,183 @@ def read_underline(parent, dest, XPath, get):
                 color = get(col, 'w:color')
                 if color and color != 'auto':
                     ans += ' #' + color
-    setattr(dest, 'text_decoration', ans)
+    dest.text_decoration = ans
 
 
-def read_vert_align(parent, dest, XPath, get):
+def read_vert_align(parent: _Element, dest: RunStyle, XPath: XPathFunc, get: AttrGetter) -> None:
     ans = inherit
     for col in XPath('./w:vertAlign[@w:val]')(parent):
         val = get(col, 'w:val')
         if val and val in {'baseline', 'subscript', 'superscript'}:
             ans = val
-    setattr(dest, 'vert_align', ans)
+    dest.vert_align = ans
 
 
-def read_position(parent, dest, XPath, get):
+def read_position(parent: _Element, dest: RunStyle, XPath: XPathFunc, get: AttrGetter) -> None:
     ans = inherit
     for col in XPath('./w:position[@w:val]')(parent):
-        val = get(col, 'w:val')
+        val = get(col, 'w:val', '')
         try:
-            ans = float(val)/2.0
+            ans = float(val) / 2.0
         except Exception:
             pass
-    setattr(dest, 'position', ans)
+    dest.position = ans
 
 
-def read_font(parent, dest, XPath, get):
+def read_font(parent: _Element, dest: RunStyle, XPath: XPathFunc, get: AttrGetter) -> None:
     ff = inherit
     for col in XPath('./w:rFonts')(parent):
         val = get(col, 'w:asciiTheme')
         if val:
-            val = '|%s|' % val
+            val = f'|{val}|'
         else:
             val = get(col, 'w:ascii')
         if val:
             ff = val
-    setattr(dest, 'font_family', ff)
+    dest.font_family = ff
     for col in XPath('./w:sz[@w:val]')(parent):
         val = simple_float(get(col, 'w:val'), 0.5)
         if val is not None:
-            setattr(dest, 'font_size', val)
+            dest.font_size = val
             return
-    setattr(dest, 'font_size', inherit)
+    dest.font_size = inherit
 
 
-def read_font_cs(parent, dest, XPath, get):
+def read_font_cs(parent: _Element, dest: RunStyle, XPath: XPathFunc, get: AttrGetter) -> None:
     ff = inherit
     for col in XPath('./w:rFonts')(parent):
         val = get(col, 'w:csTheme')
         if val:
-            val = '|%s|' % val
+            val = f'|{val}|'
         else:
             val = get(col, 'w:cs')
         if val:
             ff = val
-    setattr(dest, 'cs_font_family', ff)
+    dest.cs_font_family = ff
     for col in XPath('./w:szCS[@w:val]')(parent):
         val = simple_float(get(col, 'w:val'), 0.5)
         if val is not None:
-            setattr(dest, 'font_size', val)
+            dest.font_size = val
             return
-    setattr(dest, 'cs_font_size', inherit)
+    dest.cs_font_size = inherit
+
 
 # }}}
 
 
-class RunStyle(object):
-
+class RunStyle:
     all_properties = {
-        'b', 'bCs', 'caps', 'cs', 'dstrike', 'emboss', 'i', 'iCs', 'imprint',
-        'rtl', 'shadow', 'smallCaps', 'strike', 'vanish', 'webHidden',
-
-        'border_color', 'border_style', 'border_width', 'padding', 'color', 'highlight', 'background_color',
-        'letter_spacing', 'font_size', 'text_decoration', 'vert_align', 'lang', 'font_family', 'position',
-        'cs_font_size', 'cs_font_family'
+        'b',
+        'bCs',
+        'caps',
+        'cs',
+        'dstrike',
+        'emboss',
+        'i',
+        'iCs',
+        'imprint',
+        'rtl',
+        'shadow',
+        'smallCaps',
+        'strike',
+        'vanish',
+        'webHidden',
+        'border_color',
+        'border_style',
+        'border_width',
+        'padding',
+        'color',
+        'highlight',
+        'background_color',
+        'letter_spacing',
+        'font_size',
+        'text_decoration',
+        'vert_align',
+        'lang',
+        'font_family',
+        'position',
+        'cs_font_size',
+        'cs_font_family',
     }
 
     toggle_properties = {
-        'b', 'bCs', 'caps', 'emboss', 'i', 'iCs', 'imprint', 'shadow', 'smallCaps', 'strike', 'vanish',
+        'b',
+        'bCs',
+        'caps',
+        'emboss',
+        'i',
+        'iCs',
+        'imprint',
+        'shadow',
+        'smallCaps',
+        'strike',
+        'vanish',
     }
+    b: bool | Inherit
+    bCs: bool | Inherit
+    caps: bool | Inherit
+    cs: bool | Inherit
+    dstrike: bool | Inherit
+    emboss: bool | Inherit
+    i: bool | Inherit
+    iCs: bool | Inherit
+    imprint: bool | Inherit
+    rtl: bool | Inherit
+    shadow: bool | Inherit
+    smallCaps: bool | Inherit
+    strike: bool | Inherit
+    vanish: bool | Inherit
+    webHidden: bool | Inherit
+    border_color: str | Inherit
+    border_style: str | Inherit
+    border_width: float | Inherit
+    padding: float | Inherit
+    color: str | Inherit
+    highlight: str | Inherit
+    background_color: str | Inherit
+    letter_spacing: float | Inherit
+    font_size: float | Inherit
+    text_decoration: str | Inherit
+    vert_align: str | Inherit
+    lang: str | Inherit
+    font_family: str | Inherit
+    position: float | Inherit
+    cs_font_size: float | Inherit
+    cs_font_family: str | Inherit
 
-    def __init__(self, namespace, rPr=None):
+    linked_style: str | None = None
+    b = bCs = caps = cs = dstrike = inherit
+    emboss = i = iCs = imprint = rtl = inherit
+    shadow = smallCaps = strike = vanish = webHidden = inherit
+    border_color = border_style = border_width = padding = inherit
+    color = highlight = background_color = inherit
+    letter_spacing = font_size = text_decoration = vert_align = inherit
+    lang = font_family = position = inherit
+    cs_font_size = cs_font_family = inherit
+
+    def __init__(self, namespace: DOCXNamespace, rPr: _Element | None = None) -> None:
         self.namespace = namespace
-        self.linked_style = None
         if rPr is None:
             for p in self.all_properties:
                 setattr(self, p, inherit)
         else:
             X, g = namespace.XPath, namespace.get
             for p in (
-                'b', 'bCs', 'caps', 'cs', 'dstrike', 'emboss', 'i', 'iCs', 'imprint', 'rtl', 'shadow',
-                'smallCaps', 'strike', 'vanish', 'webHidden',
+                'b',
+                'bCs',
+                'caps',
+                'cs',
+                'dstrike',
+                'emboss',
+                'i',
+                'iCs',
+                'imprint',
+                'rtl',
+                'shadow',
+                'smallCaps',
+                'strike',
+                'vanish',
+                'webHidden',
             ):
                 setattr(self, p, binary_property(rPr, p, X, g))
 
@@ -230,9 +342,9 @@ class RunStyle(object):
             for s in X('./w:rStyle[@w:val]')(rPr):
                 self.linked_style = g(s, 'w:val')
 
-        self._css = None
+        self._css: OrderedDict[str, str] | None = None
 
-    def update(self, other):
+    def update(self, other: RunStyle) -> None:
         for prop in self.all_properties:
             nval = getattr(other, prop)
             if nval is not inherit:
@@ -240,31 +352,32 @@ class RunStyle(object):
         if other.linked_style is not None:
             self.linked_style = other.linked_style
 
-    def resolve_based_on(self, parent):
+    def resolve_based_on(self, parent: RunStyle) -> None:
         for p in self.all_properties:
             val = getattr(self, p)
             if val is inherit:
                 setattr(self, p, getattr(parent, p))
 
-    def get_border_css(self, ans):
+    def get_border_css(self, ans: dict[str, str]) -> None:
         for x in ('color', 'style', 'width'):
-            val = getattr(self, 'border_'+x)
+            val = getattr(self, 'border_' + x)
             if x == 'width' and val is not inherit:
-                val = '%.3gpt' % val
+                val = f'{val:.3g}pt'
             if val is not inherit:
-                ans['border-%s' % x] = val
+                ans[f'border-{x}'] = val
 
-    def clear_border_css(self):
+    def clear_border_css(self) -> None:
         for x in ('color', 'style', 'width'):
-            setattr(self, 'border_'+x, inherit)
+            setattr(self, 'border_' + x, inherit)
 
     @property
-    def css(self):
+    def css(self) -> OrderedDict[str, str]:
         if self._css is None:
             c = self._css = OrderedDict()
             td = set()
-            if self.text_decoration is not inherit:
-                td.add(self.text_decoration)
+            text_dec = self.text_decoration
+            if isinstance(text_dec, str):
+                td.add(text_dec)
             if self.strike and self.strike is not inherit:
                 td.add('line-through')
             if self.dstrike and self.dstrike is not inherit:
@@ -284,7 +397,7 @@ class RunStyle(object):
 
             self.get_border_css(c)
             if self.padding is not inherit:
-                c['padding'] = '%.3gpt' % self.padding
+                c['padding'] = f'{self.padding:.3g}pt'
 
             for x in ('color', 'background_color'):
                 val = getattr(self, x)
@@ -294,10 +407,10 @@ class RunStyle(object):
             for x in ('letter_spacing', 'font_size'):
                 val = getattr(self, x)
                 if val is not inherit:
-                    c[x.replace('_', '-')] = '%.3gpt' % val
+                    c[x.replace('_', '-')] = f'{val:.3g}pt'
 
             if self.position is not inherit:
-                c['vertical-align'] = '%.3gpt' % self.position
+                c['vertical-align'] = f'{self.position:.3g}pt'
 
             if self.highlight is not inherit and self.highlight != 'transparent':
                 c['background-color'] = self.highlight
@@ -310,10 +423,9 @@ class RunStyle(object):
 
         return self._css
 
-    def same_border(self, other):
-        # get_border_css() fills its argument and returns None, so the
-        # dicts must be compared, not the return values
-        a, b = {}, {}
+    def same_border(self, other: RunStyle) -> bool:
+        a: dict[str, str] = {}
+        b: dict[str, str] = {}
         self.get_border_css(a)
         other.get_border_css(b)
         return a == b

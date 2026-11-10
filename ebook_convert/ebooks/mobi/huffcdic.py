@@ -1,72 +1,78 @@
+#!/usr/bin/env python
+# License: GPLv3 Copyright: 2011, Kovid Goyal <kovid@kovidgoyal.net>
+
 """
-Decompress MOBI files compressed with the Huff/cdic algorithm. Code thanks to
-darkninja and igorsk.
+Decompress MOBI files compressed with the Huff/cdic algorithm. Code thanks to darkninja
+and igorsk.
 """
+
+from __future__ import annotations
 import struct
+from typing import TYPE_CHECKING
 
 from ebook_convert.ebooks.mobi import MobiError
 
-
-__license__ = 'GPL v3'
-__copyright__ = '2011, Kovid Goyal <kovid@kovidgoyal.net>'
-__docformat__ = 'restructuredtext en'
+if TYPE_CHECKING:
+    from collections.abc import Sequence
 
 
-class Reader(object):
-
-    def __init__(self):
+class Reader:
+    def __init__(self) -> None:
         self.q = struct.Struct(b'>Q').unpack_from
 
-    def load_huff(self, huff):
+    def load_huff(self, huff: bytes) -> None:
         if huff[0:8] != b'HUFF\x00\x00\x00\x18':
             raise MobiError('Invalid HUFF header')
         off1, off2 = struct.unpack_from(b'>LL', huff, 8)
 
-        def dict1_unpack(v):
-            codelen, term, maxcode = v&0x1f, v&0x80, v>>8
+        def dict1_unpack(v: int) -> tuple[int, int, int]:
+            codelen, term, maxcode = v & 0x1F, v & 0x80, v >> 8
             assert codelen != 0
             if codelen <= 8:
                 assert term
             maxcode = ((maxcode + 1) << (32 - codelen)) - 1
-            return (codelen, term, maxcode)
+            return codelen, term, maxcode
+
         self.dict1 = tuple(map(dict1_unpack, struct.unpack_from(b'>256L', huff, off1)))
 
         dict2 = struct.unpack_from(b'>64L', huff, off2)
-        self.mincode, self.maxcode = (), ()
+        self.mincode: tuple[int, ...] = ()
+        self.maxcode: tuple[int, ...] = ()
         for codelen, mincode in enumerate((0,) + dict2[0::2]):
-            self.mincode += (mincode << (32 - codelen), )
+            self.mincode += (mincode << (32 - codelen),)
         for codelen, maxcode in enumerate((0,) + dict2[1::2]):
-            self.maxcode += (((maxcode + 1) << (32 - codelen)) - 1, )
+            self.maxcode += (((maxcode + 1) << (32 - codelen)) - 1,)
 
-        self.dictionary = []
+        self.dictionary: list[tuple[bytes, int] | None] = []
 
-    def load_cdic(self, cdic):
+    def load_cdic(self, cdic: bytes) -> None:
         if cdic[0:8] != b'CDIC\x00\x00\x00\x10':
             raise MobiError('Invalid CDIC header')
         phrases, bits = struct.unpack_from(b'>LL', cdic, 8)
-        n = min(1<<bits, phrases-len(self.dictionary))
+        n = min(1 << bits, phrases - len(self.dictionary))
         h = struct.Struct(b'>H').unpack_from
 
-        def getslice(off):
-            blen, = h(cdic, 16+off)
-            slice = cdic[18+off:18+off+(blen&0x7fff)]
-            return (slice, blen&0x8000)
+        def getslice(off: int) -> tuple[bytes, int]:
+            (blen,) = h(cdic, 16 + off)
+            slice = cdic[18 + off : 18 + off + (blen & 0x7FFF)]
+            return (slice, blen & 0x8000)
+
         self.dictionary += map(getslice, struct.unpack_from(b'>%dH' % n, cdic, 16))
 
-    def unpack(self, data):
+    def unpack(self, data: bytes) -> bytes:
         q = self.q
 
         bitsleft = len(data) * 8
         data += b'\x00\x00\x00\x00\x00\x00\x00\x00'
         pos = 0
-        x, = q(data, pos)
+        (x,) = q(data, pos)
         n = 32
 
         s = []
         while True:
             if n <= 0:
                 pos += 4
-                x, = q(data, pos)
+                (x,) = q(data, pos)
                 n += 32
             code = (x >> n) & ((1 << 32) - 1)
 
@@ -91,13 +97,12 @@ class Reader(object):
         return b''.join(s)
 
 
-class HuffReader(object):
-
-    def __init__(self, huffs):
+class HuffReader:
+    def __init__(self, huffs: Sequence[bytes]) -> None:
         self.reader = Reader()
         self.reader.load_huff(huffs[0])
         for cdic in huffs[1:]:
             self.reader.load_cdic(cdic)
 
-    def unpack(self, section):
+    def unpack(self, section: bytes) -> bytes:
         return self.reader.unpack(section)

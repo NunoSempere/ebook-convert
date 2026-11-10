@@ -1,30 +1,29 @@
-from struct import unpack_from, unpack, calcsize
+#!/usr/bin/env python
+# License: GPLv3 Copyright: 2012, Kovid Goyal <kovid at kovidgoyal.net>
+
+from __future__ import annotations
 from functools import partial
+from struct import calcsize, unpack, unpack_from
+from typing import TYPE_CHECKING
 
 from ebook_convert.utils.fonts.sfnt import UnknownTable
-from ebook_convert.utils.fonts.sfnt.errors import UnsupportedFont, NoGlyphs
-from ebook_convert.utils.fonts.sfnt.cff.dict_data import TopDict, PrivateDict
-from ebook_convert.utils.fonts.sfnt.cff.constants import (cff_standard_strings,
-        STANDARD_CHARSETS)
+from ebook_convert.utils.fonts.sfnt.cff.constants import STANDARD_CHARSETS, cff_standard_strings
+from ebook_convert.utils.fonts.sfnt.cff.dict_data import PrivateDict, TopDict
+from ebook_convert.utils.fonts.sfnt.errors import NoGlyphs, UnsupportedFont
 
-
-__license__ = 'GPL v3'
-__copyright__ = '2012, Kovid Goyal <kovid at kovidgoyal.net>'
-__docformat__ = 'restructuredtext en'
+if TYPE_CHECKING:
+    from collections.abc import Iterable
 
 # Useful links
 # http://www.adobe.com/content/dam/Adobe/en/devnet/font/pdfs/5176.CFF.pdf
 # http://www.adobe.com/content/dam/Adobe/en/devnet/font/pdfs/5177.Type2.pdf
 
 
-class CFF(object):
-
-    def __init__(self, raw):
-        (self.major_version, self.minor_version, self.header_size,
-                self.offset_size) = unpack_from(b'>4B', raw)
+class CFF:
+    def __init__(self, raw: bytes) -> None:
+        (self.major_version, self.minor_version, self.header_size, self.offset_size) = unpack_from(b'>4B', raw)
         if (self.major_version, self.minor_version) != (1, 0):
-            raise UnsupportedFont('The CFF table has unknown version: '
-                    '(%d, %d)'%(self.major_version, self.minor_version))
+            raise UnsupportedFont(f'The CFF table has unknown version: ({self.major_version}, {self.minor_version})')
         offset = self.header_size
 
         # Read Names Index
@@ -59,8 +58,7 @@ class CFF(object):
             raise ValueError('This font has no CharStrings')
         cs_type = self.top_dict.safe_get('CharstringType')
         if cs_type != 2:
-            raise UnsupportedFont('This font has unsupported CharstringType: '
-                    '%s'%cs_type)
+            raise UnsupportedFont(f'This font has unsupported CharstringType: {cs_type}')
         self.char_strings = CharStringsIndex(raw, offset)
         self.num_glyphs = len(self.char_strings)
 
@@ -70,15 +68,12 @@ class CFF(object):
         if pd:
             size, offset = pd
             self.private_dict = PrivateDict()
-            self.private_dict.decompile(self.strings, self.global_subrs,
-                    raw[offset:offset+size])
+            self.private_dict.decompile(self.strings, self.global_subrs, raw[offset : offset + size])
             if 'Subrs' in self.private_dict:
-                self.private_subrs = Subrs(raw, offset +
-                        self.private_dict['Subrs'])
+                self.private_subrs = Subrs(raw, offset + self.private_dict['Subrs'])
 
         # Read charset (Glyph names)
-        self.charset = Charset(raw, self.top_dict.safe_get('charset'),
-                self.strings, self.num_glyphs, self.is_CID)
+        self.charset = Charset(raw, self.top_dict.safe_get('charset'), self.strings, self.num_glyphs, self.is_CID)
 
         # import pprint
         # pprint.pprint(self.top_dict)
@@ -86,8 +81,7 @@ class CFF(object):
 
 
 class Index(list):
-
-    def __init__(self, raw, offset, prepend=()):
+    def __init__(self, raw: bytes, offset: int, prepend: Iterable[bytes] = ()) -> None:
         list.__init__(self)
         self.extend(prepend)
 
@@ -99,17 +93,16 @@ class Index(list):
             self.offset_size = unpack_from(b'>B', raw, offset)[0]
             offset += 1
             if self.offset_size == 3:
-                offsets = [unpack(b'>L', b'\0' + raw[i:i+3])[0]
-                            for i in range(offset, offset+3*(count+1), 3)]
+                offsets = [unpack(b'>L', b'\0' + raw[i : i + 3])[0] for i in range(offset, offset + 3 * (count + 1), 3)]
             else:
-                fmt = {1:'B', 2:'H', 4:'L'}[self.offset_size]
-                fmt = ('>%d%s'%(count+1, fmt)).encode('ascii')
+                fmt = {1: 'B', 2: 'H', 4: 'L'}[self.offset_size]
+                fmt = f'>{count + 1}{fmt}'.encode('ascii')
                 offsets = unpack_from(fmt, raw, offset)
-            offset += self.offset_size * (count+1) - 1
+            offset += self.offset_size * (count + 1) - 1
 
-            for i in range(len(offsets)-1):
-                off, noff = offsets[i:i+2]
-                obj = raw[offset+off:offset+noff]
+            for i in range(len(offsets) - 1):
+                off, noff = offsets[i : i + 2]
+                obj = raw[offset + off : offset + noff]
                 self.append(obj)
 
             try:
@@ -119,41 +112,35 @@ class Index(list):
 
 
 class Strings(Index):
-
-    def __init__(self, raw, offset):
-        super(Strings, self).__init__(raw, offset, prepend=[x.encode('ascii')
-            for x in cff_standard_strings])
+    def __init__(self, raw: bytes, offset: int) -> None:
+        super().__init__(raw, offset, prepend=[x.encode('ascii') for x in cff_standard_strings])
 
 
 class Charset(list):
-
-    def __init__(self, raw, offset, strings, num_glyphs, is_CID):
-        super(Charset, self).__init__()
+    def __init__(self, raw: bytes, offset: int, strings: Strings, num_glyphs: int, is_CID: bool) -> None:
+        super().__init__()
         self.standard_charset = offset if offset in {0, 1, 2} else None
         if is_CID and self.standard_charset is not None:
-            raise ValueError("CID font must not use a standard charset")
+            raise ValueError('CID font must not use a standard charset')
         if self.standard_charset is None:
             self.append(b'.notdef')
             fmt = unpack_from(b'>B', raw, offset)[0]
             offset += 1
-            f = {0:self.parse_fmt0, 1:self.parse_fmt1,
-                2:partial(self.parse_fmt1, is_two_byte=True)}.get(fmt, None)
+            f = {0: self.parse_fmt0, 1: self.parse_fmt1, 2: partial(self.parse_fmt1, is_two_byte=True)}.get(fmt, None)
             if f is None:
-                raise UnsupportedFont('This font uses unsupported charset '
-                        'table format: %d'%fmt)
+                raise UnsupportedFont(f'This font uses unsupported charset table format: {fmt}')
             f(raw, offset, strings, num_glyphs, is_CID)
 
-    def parse_fmt0(self, raw, offset, strings, num_glyphs, is_CID):
-        fmt = ('>%dH'%(num_glyphs-1)).encode('ascii')
+    def parse_fmt0(self, raw: bytes, offset: int, strings: Strings, num_glyphs: int, is_CID: bool) -> None:
+        fmt = f'>{num_glyphs - 1}H'.encode('ascii')
         ids = unpack_from(fmt, raw, offset)
         if is_CID:
-            ids = ('cid%05d'%x for x in ids)
+            ids = (f'cid{x:05}' for x in ids)
         else:
             ids = (strings[x] for x in ids)
         self.extend(ids)
 
-    def parse_fmt1(self, raw, offset, strings, num_glyphs, is_CID,
-            is_two_byte=False):
+    def parse_fmt1(self, raw: bytes, offset: int, strings: Strings, num_glyphs: int, is_CID: bool, is_two_byte: bool = False) -> None:
         fmt = b'>2H' if is_two_byte else b'>HB'
         sz = calcsize(fmt)
         count = 1
@@ -161,15 +148,14 @@ class Charset(list):
             first, nleft = unpack_from(fmt, raw, offset)
             offset += sz
             count += nleft + 1
-            self.extend('cid%05d'%x if is_CID else strings[x] for x in
-                    range(first, first + nleft+1))
+            self.extend(f'cid{x:05}' if is_CID else strings[x] for x in range(first, first + nleft + 1))
 
-    def lookup(self, glyph_id):
+    def lookup(self, glyph_id: int) -> bytes | str:
         if self.standard_charset is None:
             return self[glyph_id]
         return STANDARD_CHARSETS[self.standard_charset][glyph_id].encode('ascii')
 
-    def safe_lookup(self, glyph_id):
+    def safe_lookup(self, glyph_id: int) -> bytes | str | None:
         try:
             return self.lookup(glyph_id)
         except (KeyError, IndexError, ValueError):
@@ -185,22 +171,20 @@ class CharStringsIndex(Index):
 
 
 class CFFTable(UnknownTable):
-
-    def decompile(self):
+    def decompile(self) -> None:
         self.cff = CFF(self.raw)
 
-    def subset(self, character_map, extra_glyphs):
+    def subset(self, character_map: dict[int, int], extra_glyphs: Iterable[int]) -> None:
         from ebook_convert.utils.fonts.sfnt.cff.writer import Subset
+
         # Map codes from the cmap table to glyph names, this will be used to
         # reconstruct character_map for the subset font
-        charset_map = {code:self.cff.charset.safe_lookup(glyph_id) for code,
-                glyph_id in character_map.items()}
+        charset_map = {code: self.cff.charset.safe_lookup(glyph_id) for code, glyph_id in character_map.items()}
         charset = set(charset_map.values())
         charset.discard(None)
         if not charset and character_map:
             raise NoGlyphs('This font has no glyphs for the specified characters')
-        charset |= {
-            self.cff.charset.safe_lookup(glyph_id) for glyph_id in extra_glyphs}
+        charset |= {self.cff.charset.safe_lookup(glyph_id) for glyph_id in extra_glyphs}
         charset.discard(None)
         s = Subset(self.cff, charset)
 

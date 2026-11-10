@@ -1,60 +1,61 @@
+# License: GPLv3 Copyright: 2009, John Schember <john@nachtimwald.com>
+
 """
 Read the header data from a pdb file.
 """
 
+from __future__ import annotations
 import re
 import struct
 import time
+from typing import IO, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
 
 
-__license__ = 'GPL v3'
-__copyright__ = '2009, John Schember <john@nachtimwald.com>'
-__docformat__ = 'restructuredtext en'
-
-
-class PdbHeaderReader(object):
-
-    def __init__(self, stream):
+class PdbHeaderReader:
+    def __init__(self, stream: IO[bytes]) -> None:
         self.stream = stream
         self.ident = self.identity()
         self.num_sections = self.section_count()
         self.title = self.name()
 
-    def identity(self):
+    def identity(self) -> str:
         self.stream.seek(60)
         ident = self.stream.read(8)
         return ident.decode('utf-8')
 
-    def section_count(self):
+    def section_count(self) -> int:
         self.stream.seek(76)
         return struct.unpack('>H', self.stream.read(2))[0]
 
-    def name(self):
+    def name(self) -> bytes:
         self.stream.seek(0)
-        return re.sub(b'[^-A-Za-z0-9 ]+', b'_', self.stream.read(32).replace(b'\x00', b''))
+        return re.sub(rb'[^-A-Za-z0-9 ]+', b'_', self.stream.read(32).replace(b'\x00', b''))
 
-    def full_section_info(self, number):
+    def full_section_info(self, number: int) -> tuple[int, int, int]:
         if not (0 <= number < self.num_sections):
-            raise ValueError('Not a valid section number %i' % number)
+            raise ValueError(f'Not a valid section number {number}')
 
         self.stream.seek(78 + number * 8)
-        offset, a1, a2, a3, a4 = struct.unpack('>LBBBB', self.stream.read(8))[0]
+        offset, a1, a2, a3, a4 = struct.unpack('>LBBBB', self.stream.read(8))
         flags, val = a1, a2 << 16 | a3 << 8 | a4
-        return (offset, flags, val)
+        return offset, flags, val
 
-    def section_offset(self, number):
+    def section_offset(self, number: int) -> int:
         if not (0 <= number < self.num_sections):
-            raise ValueError('Not a valid section number %i' % number)
+            raise ValueError(f'Not a valid section number {number}')
 
         self.stream.seek(78 + number * 8)
         return struct.unpack('>LBBBB', self.stream.read(8))[0]
 
-    def section_data(self, number):
+    def section_data(self, number: int) -> bytes:
         if not (0 <= number < self.num_sections):
-            raise ValueError('Not a valid section number %i' % number)
+            raise ValueError(f'Not a valid section number {number}')
 
         start = self.section_offset(number)
-        if number == self.num_sections -1:
+        if number == self.num_sections - 1:
             self.stream.seek(0, 2)
             end = self.stream.tell()
         else:
@@ -63,16 +64,17 @@ class PdbHeaderReader(object):
         return self.stream.read(end - start)
 
 
-class PdbHeaderBuilder(object):
-
-    def __init__(self, identity, title):
+class PdbHeaderBuilder:
+    def __init__(self, identity: str, title: str | bytes) -> None:
         self.identity = identity.ljust(3, '\x00')[:8].encode('utf-8')
-        self.title = b'%s\x00' % re.sub('[^-A-Za-z0-9 ]+', '_', title).ljust(31, '\x00')[:31].encode('ascii', 'replace')
+        if isinstance(title, str):
+            title = title.encode('ascii', 'replace')
+        self.title = b'%s\x00' % re.sub(rb'[^-A-Za-z0-9 ]+', b'_', title).ljust(31, b'\x00')[:31]
 
-    def build_header(self, section_lengths, out_stream):
-        '''
-        section_lengths = Lenght of each section in file.
-        '''
+    def build_header(self, section_lengths: Sequence[int], out_stream: IO[bytes]) -> None:
+        """
+        section_lengths = Length of each section in file.
+        """
 
         now = int(time.time())
         nrecords = len(section_lengths)

@@ -1,40 +1,47 @@
-import mimetypes
-import os
+# License: GPLv3 Copyright: 2011, John Schember <john@nachtimwald.com>
 
+from __future__ import annotations
+import os
+from typing import IO, TYPE_CHECKING, cast
+
+from ebook_convert import guess_type
 from ebook_convert.customize.conversion import InputFormatPlugin
+from ebook_convert.ebooks.conversion.plugins.archive_input import archive_file_data
+from ebook_convert.utils.localization import _
+
+if TYPE_CHECKING:
+    from optparse import Values
+
+    from ebook_convert.ebooks.oeb.base import OEBBook
+    from ebook_convert.utils.logging import Log
 
 
 class HTMLZInput(InputFormatPlugin):
-
     name = 'HTLZ Input'
     author = 'John Schember'
-    description = 'Convert HTML files to HTML'
+    description = _('Convert HTMLZ files to HTML')
     file_types = {'htmlz'}
     commit_name = 'htmlz_input'
 
-    def convert(self, stream, options, file_ext, log,
-                accelerators):
+    def convert(self, stream: IO[bytes], options: Values, file_ext: str, log: Log, accelerators: dict[str, str]) -> OEBBook:
         from ebook_convert.ebooks.chardet import xml_to_unicode
         from ebook_convert.ebooks.metadata.opf2 import OPF
         from ebook_convert.utils.zipfile import ZipFile
 
         self.log = log
-        html = u''
+        html = ''
         top_levels = []
 
         # Extract content from zip archive.
         zf = ZipFile(stream)
         zf.extractall()
-        # The HTML input plugin run below changes the working directory, so
-        # remember where the archive was unpacked.
-        base_dir = os.getcwd()
 
         # Find the HTML file in the archive. It needs to be
         # top level.
-        index = u''
-        multiple_html = False
+        index = ''
+        multiple_html = []
         # Get a list of all top level files in the archive.
-        for x in os.listdir(u'.'):
+        for x in os.listdir('.'):
             if os.path.isfile(x):
                 top_levels.append(x)
         # Try to find an index. file.
@@ -45,50 +52,53 @@ class HTMLZInput(InputFormatPlugin):
         # Look for multiple HTML files in the archive. We look at the
         # top level files only as only they matter in HTMLZ.
         for x in top_levels:
-            if os.path.splitext(x)[1].lower() in ('.html', '.xhtml',
-                                                  '.htm'):
+            if os.path.splitext(x)[1].lower() in ('.html', '.xhtml', '.htm'):
                 # Set index to the first HTML file found if it's not
                 # called index.
                 if not index:
                     index = x
-                else:
-                    multiple_html = True
+                elif x != index:
+                    if not multiple_html:
+                        multiple_html = [index]
+                    multiple_html.append(x)
         # Warn the user if there multiple HTML file in the archive. HTMLZ
         # supports a single HTML file. A conversion with a multiple HTML file
         # HTMLZ archive probably won't turn out as the user expects. With
         # Multiple HTML files ZIP input should be used in place of HTMLZ.
         if multiple_html:
-            log.warning('Multiple HTML files found in the archive. Only %s '
-                        'will be used.', index)
+            log.warn(_('Multiple HTML files found in the archive {0}. Only {1} will be used.').format(', '.join(multiple_html), index))
 
         if index:
             with open(index, 'rb') as tf:
                 html = tf.read()
         else:
-            raise Exception('No top level HTML file found.')
+            raise Exception(_('No top level HTML file found.'))
 
         if not html:
-            raise Exception('Top level HTML file %s is empty' % index)
+            raise Exception(_('Top level HTML file %s is empty') % index)
 
         # Encoding
         if options.input_encoding:
             ienc = options.input_encoding
         else:
             ienc = xml_to_unicode(html[:4096])[-1]
+            assert ienc is not None  # always detected for non-empty bytes
         html = html.decode(ienc, 'replace')
 
         # Run the HTML through the html processing plugin.
         from ebook_convert.customize.ui import plugin_for_input_format
+
         html_input = plugin_for_input_format('html')
+        assert html_input is not None
         for opt in html_input.options:
             setattr(options, opt.option.name, opt.recommended_value)
         options.input_encoding = 'utf-8'
         base = os.getcwd()
-        htmlfile = os.path.join(base, u'index.html')
+        htmlfile = os.path.join(base, 'index.html')
         c = 0
         while os.path.exists(htmlfile):
             c += 1
-            htmlfile = u'index%d.html' % c
+            htmlfile = f'index{c}.html'
         with open(htmlfile, 'wb') as f:
             f.write(html.encode('utf-8'))
         odi = options.debug_pipeline
@@ -96,12 +106,14 @@ class HTMLZInput(InputFormatPlugin):
         # Generate oeb from html conversion.
         with open(htmlfile, 'rb') as f:
             oeb = html_input.convert(f, options, 'html', log, {})
+            assert oeb is not None and not isinstance(oeb, str)  # HTML input returns an OEBBook
         options.debug_pipeline = odi
         os.remove(htmlfile)
 
         # Set metadata from file.
         from ebook_convert.customize.ui import get_file_type_metadata
         from ebook_convert.ebooks.oeb.transforms.metadata import meta_info_to_oeb_metadata
+
         mi = get_file_type_metadata(stream, file_ext)
         meta_info_to_oeb_metadata(mi, oeb.metadata, log)
 
@@ -109,22 +121,20 @@ class HTMLZInput(InputFormatPlugin):
         cover_path = None
         opf = None
         for x in top_levels:
-            if os.path.splitext(x)[1].lower() == u'.opf':
+            if os.path.splitext(x)[1].lower() == '.opf':
                 opf = x
                 break
         if opf:
-            opf = OPF(os.path.join(base_dir, opf), basedir=base_dir)
-            cover_path = opf.raster_cover or opf.cover
+            opf_parsed = OPF(opf, basedir=os.getcwd())
+            cover_path = opf_parsed.raster_cover or opf_parsed.cover
+            os.remove(opf)  # don't confuse code that searches for OPF files later on the oeb object will create its own OPF
         # Set the cover.
         if cover_path:
-            # the cover must live inside the extracted archive
-            from ebook_convert.utils.filenames import archive_file_data
-            cover_data = archive_file_data(base_dir, cover_path)
+            cover_data = archive_file_data(os.getcwd(), cover_path)
             if cover_data is not None:
                 cover_name, cdata = cover_data
                 id, href = oeb.manifest.generate('cover', cover_name)
-                oeb.manifest.add(id, href, mimetypes.guess_type(cover_name)[0],
-                                 data=cdata)
+                oeb.manifest.add(id, href, cast('str', guess_type(cover_name)[0]), data=cdata)
                 oeb.guide.add('cover', 'Cover', href)
 
         return oeb

@@ -10,6 +10,8 @@
 #                                                                       #
 #                                                                       #
 #########################################################################
+from __future__ import annotations
+from typing import IO
 
 
 class GetCharMap:
@@ -19,22 +21,17 @@ class GetCharMap:
 
     """
 
-    def __init__(self, bug_handler, char_file):
+    def __init__(self, bug_handler: type[Exception], char_file: IO[str]) -> None:
         """
-
         Required:
-
             'char_file'--the file with the mappings
-
         Returns:
-
             nothing
-
-            """
+        """
         self.__char_file = char_file
         self.__bug_handler = bug_handler
 
-    def get_char_map(self, map):
+    def get_char_map(self, map: str) -> dict[str, str]:
         # if map == 'ansicpg10000':
         #   map = 'mac_roman'
         found_map = False
@@ -43,8 +40,8 @@ class GetCharMap:
         for line in self.__char_file:
             if not line.strip():
                 continue
-            begin_element = '<%s>' % map
-            end_element = '</%s>' % map
+            begin_element = f'<{map}>'
+            end_element = f'</{map}>'
             if not found_map:
                 if begin_element in line:
                     found_map = True
@@ -56,6 +53,6 @@ class GetCharMap:
                 map_dict[fields[1]] = fields[3]
 
         if not found_map:
-            msg = 'no map found\nmap is "%s"\n'%(map,)
+            msg = f'no map found\nmap is "{map}"\n'
             raise self.__bug_handler(msg)
         return map_dict

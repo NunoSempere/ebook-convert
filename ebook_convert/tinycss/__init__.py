@@ -9,14 +9,15 @@
     :license: BSD, see LICENSE for more details.
 """
 
+from __future__ import annotations
 from .version import VERSION
+
 __version__ = VERSION
 
 from ebook_convert.tinycss.css21 import CSS21Parser
-from ebook_convert.tinycss.page3 import CSSPage3Parser
 from ebook_convert.tinycss.fonts3 import CSSFonts3Parser
 from ebook_convert.tinycss.media3 import CSSMedia3Parser
-
+from ebook_convert.tinycss.page3 import CSSPage3Parser
 
 PARSER_MODULES = {
     'page3': CSSPage3Parser,

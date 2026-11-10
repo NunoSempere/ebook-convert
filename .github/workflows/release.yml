@@ -1,7 +1,7 @@
 name: Release
 
 # Publishes to PyPI and attaches single-file binaries to the GitHub release.
-# Trigger by pushing a tag like v4.13.0 (which must match pyproject version).
+# Trigger by pushing a tag like v5.0.0 (which must match pyproject version).
 #
 # PyPI side: set up "trusted publishing" for this repository once at
 # https://pypi.org/manage/account/publishing/ (owner, repo name, workflow
@@ -49,7 +49,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
-      - run: uv sync --all-extras --python 3.12
+      - run: uv sync --all-extras --python 3.13
       - run: uv run pyinstaller --noconfirm --clean packaging/ebook-convert.spec
       - name: Smoke-test binary
         run: |

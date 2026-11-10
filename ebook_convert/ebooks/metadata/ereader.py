@@ -1,0 +1,114 @@
+# License: GPLv3 Copyright: 2009, John Schember <john@nachtimwald.com>
+
+"""
+Read meta information from eReader pdb files.
+"""
+
+from __future__ import annotations
+import re
+import struct
+from typing import IO, TYPE_CHECKING
+
+from ebook_convert.ebooks.metadata import MetaInformation, authors_to_string
+from ebook_convert.ebooks.pdb.ereader.reader132 import HeaderRecord
+from ebook_convert.ebooks.pdb.header import PdbHeaderBuilder, PdbHeaderReader
+from ebook_convert.utils.localization import _
+
+if TYPE_CHECKING:
+    from ebook_convert.ebooks.metadata.book.base import Metadata
+
+
+def get_cover(pheader: PdbHeaderReader, eheader: HeaderRecord) -> tuple[str, bytes | None]:
+    cover_data = None
+
+    for i in range(eheader.image_count):
+        raw = pheader.section_data(eheader.image_data_offset + i)
+
+        if raw[4 : 4 + 32].strip(b'\x00') == b'cover.png':
+            cover_data = raw[62:]
+            break
+
+    return ('png', cover_data)
+
+
+def get_metadata(stream: IO[bytes], extract_cover: bool = True) -> Metadata:
+    """
+    Return metadata as a L{MetaInfo} object
+    """
+    mi = MetaInformation(None, [_('Unknown')])
+    stream.seek(0)
+
+    pheader = PdbHeaderReader(stream)
+
+    # Only Dropbook produced 132 byte record0 files are supported
+    if len(pheader.section_data(0)) == 132:
+        hr = HeaderRecord(pheader.section_data(0))
+
+        if hr.compression in (2, 10) and hr.has_metadata == 1:
+            try:
+                mdata = pheader.section_data(hr.metadata_offset)
+
+                mdata = mdata.decode('cp1252', 'replace').split('\x00')
+                mi.title = re.sub(r'[^a-zA-Z0-9 \._=\+\-!\?,\'\"]', '', mdata[0])
+                mi.authors = [re.sub(r'[^a-zA-Z0-9 \._=\+\-!\?,\'\"]', '', mdata[1])]
+                mi.publisher = re.sub(r'[^a-zA-Z0-9 \._=\+\-!\?,\'\"]', '', mdata[3])
+                mi.isbn = re.sub(r'[^a-zA-Z0-9 \._=\+\-!\?,\'\"]', '', mdata[4])
+            except Exception:
+                pass
+
+            if extract_cover:
+                mi.cover_data = get_cover(pheader, hr)
+
+    if not mi.title:
+        mi.title = pheader.title.decode('utf-8', 'replace') or _('Unknown')
+
+    return mi
+
+
+def set_metadata(stream: IO[bytes], mi: Metadata) -> None:
+    pheader = PdbHeaderReader(stream)
+
+    # Only Dropbook produced 132 byte record0 files are supported
+    if len(pheader.section_data(0)) != 132:
+        return
+
+    sections = [pheader.section_data(x) for x in range(pheader.section_count())]
+    hr = HeaderRecord(sections[0])
+
+    if hr.compression not in (2, 10):
+        return
+
+    # Create a metadata record for the file if one does not already exist
+    if not hr.has_metadata:
+        sections += [b'', b'MeTaInFo\x00']
+        last_data = len(sections) - 1
+        header = bytearray(sections[0])
+
+        for i in range(0, 132, 2):
+            (val,) = struct.unpack('>H', header[i : i + 2])
+            if val >= hr.last_data_offset:
+                header[i : i + 2] = struct.pack('>H', last_data)
+
+        header[24:26] = struct.pack('>H', 1)  # Set has metadata
+        header[44:46] = struct.pack('>H', last_data - 1)  # Set location of metadata
+        header[52:54] = struct.pack('>H', last_data)  # Ensure last data offset is updated
+        sections[0] = bytes(header)
+        hr = HeaderRecord(sections[0])
+
+    # Merge the metadata into the file
+    file_mi = get_metadata(stream, False)
+    file_mi.smart_update(mi)
+    sections[hr.metadata_offset] = (
+        '{}\x00{}\x00{}\x00{}\x00{}\x00'.format(file_mi.title, authors_to_string(file_mi.authors), '', file_mi.publisher or '', file_mi.isbn or '')
+    ).encode('cp1252', 'replace')
+
+    # Rebuild the PDB wrapper because the offsets have changed due to the
+    # new metadata.
+    pheader_builder = PdbHeaderBuilder(pheader.ident, pheader.title)
+    stream.seek(0)
+    stream.truncate(0)
+    pheader_builder.build_header([len(x) for x in sections], stream)
+
+    # Write the data back to the file
+    for item in sections:
+        stream.write(item)

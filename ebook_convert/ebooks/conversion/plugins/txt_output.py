@@ -1,105 +1,144 @@
+# License: GPLv3 Copyright: 2009, John Schember <john@nachtimwald.com>
+
+from __future__ import annotations
 import os
 import shutil
+from typing import TYPE_CHECKING
 
-from ebook_convert.customize.conversion import OutputFormatPlugin, \
-    OptionRecommendation
+from ebook_convert.customize.conversion import InputFormatPlugin, OptionRecommendation, OutputFormatPlugin
 from ebook_convert.ptempfile import TemporaryDirectory, TemporaryFile
+from ebook_convert.utils import StreamOrPath
+from ebook_convert.utils.localization import _
 
+if TYPE_CHECKING:
+    from optparse import Values
 
-__license__ = 'GPL 3'
-__copyright__ = '2009, John Schember <john@nachtimwald.com>'
-__docformat__ = 'restructuredtext en'
+    from ebook_convert.ebooks.oeb.base import OEBBook
+    from ebook_convert.utils.logging import Log
 
 NEWLINE_TYPES = ['system', 'unix', 'old_mac', 'windows']
 
 
 class TXTOutput(OutputFormatPlugin):
-
     name = 'TXT Output'
     author = 'John Schember'
     file_type = 'txt'
     commit_name = 'txt_output'
     ui_data = {
-            'newline_types': NEWLINE_TYPES,
-            'formatting_types': {
-                'plain': 'Plain text',
-                'markdown': 'Markdown formatted text',
-                'textile': 'TexTile formatted text'
-            },
+        'newline_types': NEWLINE_TYPES,
+        'formatting_types': {
+            'plain': _('Plain text'),
+            'markdown': _('Markdown formatted text'),
+            'textile': _('Textile formatted text'),
+        },
     }
 
     options = {
-        OptionRecommendation(name='newline', recommended_value='system',
+        OptionRecommendation(
+            name='newline',
+            recommended_value='system',
             level=OptionRecommendation.LOW,
-            short_switch='n', choices=NEWLINE_TYPES,
-            help='Type of newline to use. Options are %s. Default is \'system\'. '
-                'Use \'old_mac\' for compatibility with Mac OS 9 and earlier. '
-                'For macOS use \'unix\'. \'system\' will default to the newline '
-                'type used by this OS.' % sorted(NEWLINE_TYPES)),
-        OptionRecommendation(name='txt_output_encoding', recommended_value='utf-8',
+            short_switch='n',
+            choices=NEWLINE_TYPES,
+            help=_(
+                "Type of newline to use. Options are %s. Default is 'system'. "
+                "Use 'old_mac' for compatibility with Mac OS 9 and earlier. "
+                "For macOS use 'unix'. 'system' will default to the newline "
+                'type used by this OS.'
+            )
+            % sorted(NEWLINE_TYPES),
+        ),
+        OptionRecommendation(
+            name='txt_output_encoding',
+            recommended_value='utf-8',
             level=OptionRecommendation.LOW,
-            help='Specify the character encoding of the output document. '
-                 'The default is utf-8.'),
-        OptionRecommendation(name='inline_toc',
-            recommended_value=False, level=OptionRecommendation.LOW,
-            help='Add Table of Contents to beginning of the book.'),
-        OptionRecommendation(name='max_line_length',
-            recommended_value=0, level=OptionRecommendation.LOW,
-            help='The maximum number of characters per line. This splits on '
-                 'the first space before the specified value. If no space is '
-                 'found the line will be broken at the space after and will '
-                 'exceed the specified value. Also, there is a minimum of 25 '
-                 'characters. Use 0 to disable line splitting.'),
-        OptionRecommendation(name='force_max_line_length',
-            recommended_value=False, level=OptionRecommendation.LOW,
-            help='Force splitting on the max-line-length value when no space '
-                 'is present. Also allows max-line-length to be below the '
-                 'minimum'),
-        OptionRecommendation(name='txt_output_formatting',
-             recommended_value='plain',
-             choices=list(ui_data['formatting_types']),
-             help='Formatting used within the document.\n'
-                  '* plain: {plain}\n'
-                  '* markdown: {markdown}\n'
-                  '* textile: {textile}'
-                  ''.format(**ui_data['formatting_types'])),
-        OptionRecommendation(name='keep_links',
-            recommended_value=False, level=OptionRecommendation.LOW,
-            help='Do not remove links within the document. This is only '
-                 'useful when paired with a txt-output-formatting option that '
-                 'is not none because links are always removed with plain '
-                 'text output.'),
-        OptionRecommendation(name='keep_image_references',
-            recommended_value=False, level=OptionRecommendation.LOW,
-            help='Do not remove image references within the document. This is '
-                 'only useful when paired with a txt-output-formatting option '
-                 'that is not none because links are always removed with '
-                 'plain text output.'),
-        OptionRecommendation(name='use_alt_text_for_images',
-            recommended_value=False, level=OptionRecommendation.LOW,
-            help='Replace images with the text from the alt attribute, if '
-                 'any. Ignored if the option to keep image references is '
-                 'specified.'),
-        OptionRecommendation(name='keep_color',
-            recommended_value=False, level=OptionRecommendation.LOW,
-            help='Do not remove font color from output. This is only useful '
-                 'when txt-output-formatting is set to textile. Textile is '
-                 'the only formatting that supports setting font color. If '
-                 'this option is not specified font color will not be set and '
-                 'default to the color displayed by the reader (generally '
-                 'this is black).')
-     }
+            help=_('Specify the character encoding of the output document. The default is utf-8.'),
+        ),
+        OptionRecommendation(
+            name='inline_toc',
+            recommended_value=False,
+            level=OptionRecommendation.LOW,
+            help=_('Add Table of Contents to beginning of the book.'),
+        ),
+        OptionRecommendation(
+            name='max_line_length',
+            recommended_value=0,
+            level=OptionRecommendation.LOW,
+            help=_(
+                'The maximum number of characters per line. This splits on '
+                'the first space before the specified value. If no space is found '
+                'the line will be broken at the space after and will exceed the '
+                'specified value. Also, there is a minimum of 25 characters. '
+                'Use 0 to disable line splitting.'
+            ),
+        ),
+        OptionRecommendation(
+            name='force_max_line_length',
+            recommended_value=False,
+            level=OptionRecommendation.LOW,
+            help=_('Force splitting on the max-line-length value when no space is present. Also allows max-line-length to be below the minimum'),
+        ),
+        OptionRecommendation(
+            name='txt_output_formatting',
+            recommended_value='plain',
+            choices=list(ui_data['formatting_types']),
+            help=_('Formatting used within the document.\n* plain: {plain}\n* markdown: {markdown}\n* textile: {textile}').format(
+                **ui_data['formatting_types']
+            ),
+        ),
+        OptionRecommendation(
+            name='keep_links',
+            recommended_value=False,
+            level=OptionRecommendation.LOW,
+            help=_(
+                'Do not remove links within the document. This is only '
+                'useful when paired with a TXT output formatting option that '
+                'is not none because links are always removed with plain text output.'
+            ),
+        ),
+        OptionRecommendation(
+            name='keep_image_references',
+            recommended_value=False,
+            level=OptionRecommendation.LOW,
+            help=_(
+                'Do not remove image references within the document. This is only '
+                'useful when paired with a TXT output formatting option that '
+                'is not none because links are always removed with plain text output.'
+            ),
+        ),
+        OptionRecommendation(
+            name='use_alt_text_for_images',
+            recommended_value=False,
+            level=OptionRecommendation.LOW,
+            help=_('Replace images with the text from the alt attribute, if any. Ignored if the option to keep image references is specified.'),
+        ),
+        OptionRecommendation(
+            name='keep_color',
+            recommended_value=False,
+            level=OptionRecommendation.LOW,
+            help=_(
+                'Do not remove font color from output. This is only useful when '
+                'TXT output formatting is set to textile. Textile is the only '
+                'formatting that supports setting font color. If this option is '
+                'not specified font color will not be set and default to the '
+                'color displayed by the reader (generally this is black).'
+            ),
+        ),
+    }
 
-    def convert(self, oeb_book, output_path, input_plugin, opts, log):
+    def convert(self, oeb_book: OEBBook, output: str, input_plugin: InputFormatPlugin, opts: Values, log: Log) -> None:
+        output_path = output
+        from ebook_convert.ebooks.txt.newlines import TxtNewlines, specified_newlines
         from ebook_convert.ebooks.txt.txtml import TXTMLizer
         from ebook_convert.utils.cleantext import clean_ascii_chars
-        from ebook_convert.ebooks.txt.newlines import specified_newlines, TxtNewlines
 
         if opts.txt_output_formatting.lower() == 'markdown':
             from ebook_convert.ebooks.txt.markdownml import MarkdownMLizer
+
             self.writer = MarkdownMLizer(log)
         elif opts.txt_output_formatting.lower() == 'textile':
             from ebook_convert.ebooks.txt.textileml import TextileMLizer
+
             self.writer = TextileMLizer(log)
         else:
             self.writer = TXTMLizer(log)
@@ -110,35 +149,22 @@ class TXTOutput(OutputFormatPlugin):
         log.debug('\tReplacing newlines with selected type...')
         txt = specified_newlines(TxtNewlines(opts.newline).newline, txt)
 
-        close = False
-        if not hasattr(output_path, 'write'):
-            close = True
-            if not os.path.exists(os.path.dirname(output_path)) and os.path.dirname(output_path) != '':
-                os.makedirs(os.path.dirname(output_path))
-            out_stream = open(output_path, 'wb')
-        else:
-            out_stream = output_path
-
-        out_stream.seek(0)
-        out_stream.truncate()
-        out_stream.write(txt.encode(opts.txt_output_encoding, 'replace'))
-
-        if close:
-            out_stream.close()
+        with StreamOrPath(output_path, 'wb', makedirs=True) as out_stream:
+            out_stream.seek(0)
+            out_stream.truncate()
+            out_stream.write(txt.encode(opts.txt_output_encoding, 'replace'))
 
 
 class TXTZOutput(TXTOutput):
-
     name = 'TXTZ Output'
     author = 'John Schember'
     file_type = 'txtz'
 
-    def convert(self, oeb_book, output_path, input_plugin, opts, log):
+    def convert(self, oeb_book: OEBBook, output: str, input_plugin: InputFormatPlugin, opts: Values, log: Log) -> None:
+        output_path = output
         from ebook_convert.ebooks.oeb.base import OEB_IMAGES, xml2str
         from ebook_convert.utils.zipfile import ZipFile
 
-        # Calibre 79db6e1f75: only keep images if the text format can
-        # reference them.
         can_reference_images = opts.txt_output_formatting.lower() in ('markdown', 'textile')
         can_reference_images = can_reference_images and opts.keep_image_references
 
@@ -161,8 +187,9 @@ class TXTZOutput(TXTOutput):
                 if item.media_type in OEB_IMAGES:
                     if hasattr(self.writer, 'images'):
                         path = os.path.join(tdir, 'images')
-                        if item.href in self.writer.images:
-                            href = self.writer.images[item.href]
+                        writer_images = getattr(self.writer, 'images')
+                        if item.href in writer_images:
+                            href = writer_images[item.href]
                         else:
                             continue
                     else:
@@ -173,12 +200,12 @@ class TXTZOutput(TXTOutput):
                     if can_reference_images or is_cover:
                         os.makedirs(path, exist_ok=True)
                         with open(ipath, 'wb') as imgf:
-                            imgf.write(item.data)
+                            # SVG images have parsed data, so serialize them
+                            imgf.write(item.bytes_representation)
                     if is_cover:
                         cover_relhref = os.path.relpath(ipath, tdir).replace(os.sep, '/')
 
-            # Metadata (Calibre 17be87e85a, c86de09698: record the text
-            # formatting and the cover path so TXTZ input can use them)
+            # Metadata
             with open(os.path.join(tdir, 'metadata.opf'), 'wb') as mdataf:
                 root = oeb_book.metadata.to_opf1()
                 elem = root.makeelement('text-formatting')

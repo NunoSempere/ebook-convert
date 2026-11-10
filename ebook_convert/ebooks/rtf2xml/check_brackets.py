@@ -11,39 +11,40 @@
 #                                                                       #
 #########################################################################
 
-
+from __future__ import annotations
 from . import open_for_read
 
 
 class CheckBrackets:
     """Check that brackets match up"""
 
-    def __init__(self, bug_handler=None, file=None):
-        self.__file=file
+    def __init__(self, bug_handler: type[Exception] | None = None, file: str | None = None) -> None:
+        self.__file = file
         self.__bug_handler = bug_handler
-        self.__bracket_count=0
+        self.__bracket_count = 0
         self.__ob_count = 0
         self.__cb_count = 0
-        self.__open_bracket_num = []
+        self.__open_bracket_num: list[str] = []
 
-    def open_brack(self, line):
+    def open_brack(self, line: str) -> None:
         num = line[-5:-1]
         self.__open_bracket_num.append(num)
         self.__bracket_count += 1
 
-    def close_brack(self, line):
+    def close_brack(self, line: str) -> bool:
         num = line[-5:-1]
         try:
             last_num = self.__open_bracket_num.pop()
-        except:
+        except Exception:
             return False
         if num != last_num:
             return False
         self.__bracket_count -= 1
         return True
 
-    def check_brackets(self):
+    def check_brackets(self) -> tuple[bool, str]:
         line_count = 0
+        assert self.__file is not None
         with open_for_read(self.__file) as read_obj:
             for line in read_obj:
                 line_count += 1
@@ -52,10 +53,9 @@ class CheckBrackets:
                     self.open_brack(line)
                 if self.__token_info == 'cb<nu<clos-brack':
                     if not self.close_brack(line):
-                        return (False, "closed bracket doesn't match, line %s" % line_count)
+                        return False, f"closed bracket doesn't match, line {line_count}"
 
         if self.__bracket_count != 0:
-            msg = ('At end of file open and closed brackets don\'t match\n'
-                        'total number of brackets is %s') % self.__bracket_count
-            return (False, msg)
-        return (True, "Brackets match!")
+            msg = f"At end of file open and closed brackets don't match\ntotal number of brackets is {self.__bracket_count}"
+            return False, msg
+        return True, 'Brackets match!'

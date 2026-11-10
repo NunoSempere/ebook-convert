@@ -1,11 +1,17 @@
+#!/usr/bin/env python
+# vim:fileencoding=utf-8
+
+
+from __future__ import annotations
+__license__ = 'GPL v3'
+__copyright__ = '2014, Kovid Goyal <kovid at kovidgoyal.net>'
+
+
 import re
 
 from ebook_convert.tinycss.css21 import CSS21Parser, ParseError
-from ebook_convert.tinycss.tokenizer import tokenize_grouped
 
-
-__license__ = 'GPL v3'
-__copyright__ = '2014, Kovid Goyal <kovid at kovidgoyal.net>'
+from .tokenizer import tokenize_grouped
 
 
 def parse_font_family_tokens(tokens):
@@ -182,7 +188,7 @@ def parse_font(css_string):
     return ans
 
 
-class FontFaceRule(object):
+class FontFaceRule:
 
     at_keyword = '@font-face'
     __slots__ = 'declarations', 'line', 'column'

@@ -1,156 +1,158 @@
+# License: GPLv3 Copyright: 2008, Kovid Goyal <kovid at kovidgoyal.net>
+
 """
 Provides platform independent temporary files that persist even after
 being closed.
 """
-import atexit
+
+from __future__ import annotations
 import os
 import tempfile
+from contextlib import contextmanager
+from typing import IO, TYPE_CHECKING, Any, Self
 
-from ebook_convert.constants_old import __version__, __appname__, \
-        filesystem_encoding
-from ebook_convert import polyglot
+from ebook_convert.constants import __appname__, filesystem_encoding, get_windows_temp_path, ismacos, iswindows
+from ebook_convert.utils.safe_atexit import remove_dir, remove_file_atexit, remove_folder_atexit, unlink
 
+if TYPE_CHECKING:
+    from collections.abc import Buffer, Generator, Iterable, Iterator
 
-def cleanup(path):
-    try:
-        import os as oss
-        if oss.path.exists(path):
-            oss.remove(path)
-    except Exception:
-        pass
-
-
-_base_dir = None
+_base_dir = _osx_cache_dir = None
+_prevent_recursion = False
+cleanup = unlink  # some plugins import this function
 
 
-def remove_dir(x):
-    try:
-        import shutil
-        shutil.rmtree(x, ignore_errors=True)
-    except Exception:
-        pass
-
-
-def determined_remove_dir(x):
-    for i in range(10):
-        try:
-            import shutil
-            shutil.rmtree(x)
-            return
-        except Exception:
-            import os  # noqa
-            if os.path.exists(x):
-                # In case some other program has one of the temp files open.
-                import time
-                time.sleep(0.1)
-            else:
-                return
-    try:
-        import shutil
-        shutil.rmtree(x, ignore_errors=True)
-    except Exception:
-        pass
-
-
-def app_prefix(prefix):
-    return '%s_%s_%s' % (__appname__, __version__, prefix)
-
-
-_osx_cache_dir = None
-
-
-def osx_cache_dir():
+def osx_cache_dir() -> str | None:
     global _osx_cache_dir
     if _osx_cache_dir:
         return _osx_cache_dir
     if _osx_cache_dir is None:
         _osx_cache_dir = False
         import ctypes
+
         libc = ctypes.CDLL(None)
         buf = ctypes.create_string_buffer(512)
-        # _CS_DARWIN_USER_CACHE_DIR = 65538
-        buflen = libc.confstr(65538, ctypes.byref(buf), len(buf))
-        if 0 < buflen < len(buf):
+        l = libc.confstr(65538, ctypes.byref(buf), len(buf))  # _CS_DARWIN_USER_CACHE_DIR = 65538
+        if 0 < l < len(buf):
             try:
                 q = buf.value.decode('utf-8').rstrip('\0')
             except ValueError:
                 pass
-            if q and os.path.isdir(q) and os.access(q, os.R_OK | os.W_OK |
-                                                    os.X_OK):
+            if q and os.path.isdir(q) and os.access(q, os.R_OK | os.W_OK | os.X_OK):
                 _osx_cache_dir = q
                 return q
 
 
-def base_dir():
-    global _base_dir
+get_default_tempdir = tempfile.gettempdir
+
+
+def base_dir() -> str:
+    global _base_dir, _prevent_recursion
     if _base_dir is not None and not os.path.exists(_base_dir):
         # Some people seem to think that running temp file cleaners that
         # delete the temp dirs of running programs is a good idea!
-        _base_dir = None
+        if _prevent_recursion:
+            _base_dir = get_default_tempdir()
+        else:
+            _base_dir = None
     if _base_dir is None:
         td = os.environ.get('CALIBRE_WORKER_TEMP_DIR', None)
         if td is not None:
             from ebook_convert.utils.serialize import msgpack_loads
+            from ebook_convert.polyglot.binary import from_hex_bytes
+
             try:
-                td = msgpack_loads(polyglot.from_hex_bytes(td))
+                td = msgpack_loads(from_hex_bytes(td))
             except Exception:
                 td = None
         if td and os.path.exists(td):
             _base_dir = td
         else:
             base = os.environ.get('CALIBRE_TEMP_DIR', None)
-            prefix = app_prefix('tmp_')
-            _base_dir = tempfile.mkdtemp(prefix=prefix, dir=base)
-            atexit.register(remove_dir, _base_dir)
+            if base is not None and iswindows:
+                base = os.getenv('CALIBRE_TEMP_DIR')
+            prefix = f'{__appname__}-'
+            if base is None:
+                if iswindows:
+                    # On windows, if the TMP env var points to a path that
+                    # cannot be encoded using the mbcs encoding, then the
+                    # python 2 tempfile algorithm for getting the temporary
+                    # directory breaks. So we use the win32 api to get a
+                    # unicode temp path instead. See
+                    # https://bugs.launchpad.net/bugs/937389
+                    base = get_windows_temp_path()
+                elif ismacos:
+                    # Use the cache dir rather than the temp dir for temp files as Apple
+                    # thinks deleting unused temp files is a good idea. See note under
+                    # _CS_DARWIN_USER_TEMP_DIR here
+                    # https://developer.apple.com/library/mac/documentation/Darwin/Reference/ManPages/man3/confstr.3.html
+                    base = osx_cache_dir()
 
-        try:
-            tempfile.gettempdir()
-        except Exception:
-            # Widows temp vars set to a path not encodable in mbcs
-            # Use our temp dir
-            tempfile.tempdir = _base_dir
+            _base_dir = tempfile.mkdtemp(prefix=prefix, dir=base or get_default_tempdir())
+            orig = _prevent_recursion
+            _prevent_recursion = True
+            try:
+                remove_folder_atexit(_base_dir)
+            finally:
+                _prevent_recursion = orig
 
     return _base_dir
 
 
-def reset_base_dir():
+def fix_tempfile_module() -> None:
+    # We want the tempfile module to use base_dir() as its tempdir, but we dont
+    # want to call base_dir() now as it will possibly create a tempdir, do that
+    # only on demand.
+    global get_default_tempdir
+    if tempfile._gettempdir is not base_dir:  # type: ignore
+        get_default_tempdir = tempfile._gettempdir  # type: ignore
+        tempfile._gettempdir = base_dir  # type: ignore
+
+
+def reset_base_dir() -> None:
     global _base_dir
     _base_dir = None
-    base_dir()
 
 
-def _force_unicode(x):
+@contextmanager
+def override_base_dir(newval: str) -> Generator[None]:
+    global _base_dir
+    before, _base_dir = _base_dir, newval
+    try:
+        yield
+    finally:
+        _base_dir = before
+
+
+def force_unicode(x: str | bytes) -> str:
     # Cannot use the implementation in calibre.__init__ as it causes a circular
     # dependency
-    # NOTE(gryf): Congratulations! that's a 3rd function in this codebase
-    # called force_unicode! I guess that forcing unicode on text objects is
-    # some kind of hobby.
     if isinstance(x, bytes):
         x = x.decode(filesystem_encoding)
     return x
 
 
-def _make_file(suffix, prefix, base):
-    suffix, prefix = map(_force_unicode, (suffix, prefix))  # no2to3
+def _make_file(suffix: str | bytes, prefix: str | bytes, base: str) -> tuple[int, str]:
+    suffix, prefix = map(force_unicode, (suffix, prefix))  # no2to3
     return tempfile.mkstemp(suffix, prefix, dir=base)
 
 
-def _make_dir(suffix, prefix, base):
-    suffix, prefix = map(_force_unicode, (suffix, prefix))  # no2to3
+def _make_dir(suffix: str | bytes, prefix: str | bytes, base: str) -> str:
+    suffix, prefix = map(force_unicode, (suffix, prefix))  # no2to3
     return tempfile.mkdtemp(suffix, prefix, base)
 
 
-class PersistentTemporaryFile(object):
+class PersistentTemporaryFile:
     """
-    A file-like object that is a temporary file that is available even after
-    being closed on all platforms. It is automatically deleted on normal
-    program termination.
+    A file-like object that is a temporary file that is available even after being closed on
+    all platforms. It is automatically deleted on normal program termination.
     """
-    _file = None
 
-    def __init__(self, suffix="", prefix="", dir=None, mode='w+b'):
+    _file: IO[bytes]
+
+    def __init__(self, suffix: str = '', prefix: str | None = '', dir: str | None = None, mode: str = 'w+b') -> None:
         if prefix is None:
-            prefix = ""
+            prefix = ''
         if dir is None:
             dir = base_dir()
         fd, name = _make_file(suffix, prefix, dir)
@@ -158,27 +160,85 @@ class PersistentTemporaryFile(object):
         self._file = os.fdopen(fd, mode)
         self._name = name
         self._fd = fd
-        atexit.register(cleanup, name)
+        remove_file_atexit(name)
 
-    def __getattr__(self, name):
-        if name == 'name':
-            return self.__dict__['_name']
-        return getattr(self.__dict__['_file'], name)
+    @property
+    def name(self) -> str:
+        return self._name
 
-    def __enter__(self):
+    @name.setter
+    def name(self, val: str) -> None:
+        self._name = val
+
+    def read(self, size: int = -1, /) -> bytes:
+        return self._file.read(size)
+
+    def readline(self, size: int = -1, /) -> bytes:
+        return self._file.readline(size)
+
+    def readlines(self, hint: int = -1, /) -> list[bytes]:
+        return self._file.readlines(hint)
+
+    def write(self, data: Buffer, /) -> int:
+        return self._file.write(data)
+
+    def writelines(self, lines: Iterable[Buffer], /) -> None:
+        self._file.writelines(lines)
+
+    def seek(self, offset: int, whence: int = os.SEEK_SET, /) -> int:
+        return self._file.seek(offset, whence)
+
+    def tell(self) -> int:
+        return self._file.tell()
+
+    def truncate(self, size: int | None = None, /) -> int:
+        return self._file.truncate(size)
+
+    def flush(self) -> None:
+        self._file.flush()
+
+    def close(self) -> None:
+        self._file.close()
+
+    def fileno(self) -> int:
+        return self._file.fileno()
+
+    def isatty(self) -> bool:
+        return self._file.isatty()
+
+    def readable(self) -> bool:
+        return self._file.readable()
+
+    def writable(self) -> bool:
+        return self._file.writable()
+
+    def seekable(self) -> bool:
+        return self._file.seekable()
+
+    @property
+    def closed(self) -> bool:
+        return self._file.closed
+
+    def __iter__(self) -> Iterator[bytes]:
+        return iter(self._file)
+
+    def __next__(self) -> bytes:
+        return next(self._file)
+
+    def __enter__(self) -> Self:
         return self
 
-    def __exit__(self, *args):
+    def __exit__(self, *args: object) -> None:
         self.close()
 
-    def __del__(self):
+    def __del__(self) -> None:
         try:
             self.close()
         except Exception:
             pass
 
 
-def PersistentTemporaryDirectory(suffix='', prefix='', dir=None):
+def PersistentTemporaryDirectory(suffix: str = '', prefix: str = '', dir: str | None = None) -> str:
     """
     Return the path to a newly created temporary directory that will
     be automatically deleted on application exit.
@@ -186,17 +246,16 @@ def PersistentTemporaryDirectory(suffix='', prefix='', dir=None):
     if dir is None:
         dir = base_dir()
     tdir = _make_dir(suffix, prefix, dir)
-
-    atexit.register(remove_dir, tdir)
+    remove_folder_atexit(tdir)
     return tdir
 
 
-class TemporaryDirectory(object):
+class TemporaryDirectory:
     """
     A temporary directory to be used in a with statement.
     """
 
-    def __init__(self, suffix='', prefix='', dir=None, keep=False):
+    def __init__(self, suffix: str = '', prefix: str = '', dir: str | None = None, keep: bool = False) -> None:
         self.suffix = suffix
         self.prefix = prefix
         if dir is None:
@@ -204,46 +263,42 @@ class TemporaryDirectory(object):
         self.dir = dir
         self.keep = keep
 
-    def __enter__(self):
+    def __enter__(self) -> str:
         if not hasattr(self, 'tdir'):
             self.tdir = _make_dir(self.suffix, self.prefix, self.dir)
         return self.tdir
 
-    def __exit__(self, *args):
+    def __exit__(self, *args: object) -> None:
         if not self.keep and os.path.exists(self.tdir):
             remove_dir(self.tdir)
 
 
-class TemporaryFile(object):
-
-    def __init__(self, suffix="", prefix="", dir=None, mode='w+b'):
+class TemporaryFile:
+    def __init__(self, suffix: str = '', prefix: str | None = '', dir: str | None = None, mode: str = 'w+b') -> None:
         if prefix is None:
             prefix = ''
         if suffix is None:
             suffix = ''
         if dir is None:
             dir = base_dir()
-        self.mode = mode
-        self.dir = dir
-        self.suffix = suffix
-        self.prefix = prefix
+        self.prefix, self.suffix, self.dir, self.mode = prefix, suffix, dir, mode
         self._file = None
 
-    def __enter__(self):
+    def __enter__(self) -> str:
         fd, name = _make_file(self.suffix, self.prefix, self.dir)
         self._file = os.fdopen(fd, self.mode)
         self._name = name
         self._file.close()
         return name
 
-    def __exit__(self, *args):
-        cleanup(self._name)
+    def __exit__(self, *args: object) -> None:
+        unlink(self._name)
 
 
 class SpooledTemporaryFile(tempfile.SpooledTemporaryFile):
-
-    def __init__(self, max_size=0, suffix="", prefix="", dir=None, mode='w+b',
-                 bufsize=-1):
+    def __init__(
+        self, max_size: int = 0, suffix: str | None = '', prefix: str | None = '', dir: str | None = None, mode: str = 'w+b', bufsize: int = -1
+    ) -> None:
         if prefix is None:
             prefix = ''
         if suffix is None:
@@ -251,25 +306,58 @@ class SpooledTemporaryFile(tempfile.SpooledTemporaryFile):
         if dir is None:
             dir = base_dir()
         self._name = None
-        tempfile.SpooledTemporaryFile.__init__(self, max_size=max_size,
-                                               suffix=suffix, prefix=prefix,
-                                               dir=dir, mode=mode)
+        tempfile.SpooledTemporaryFile.__init__(self, max_size=max_size, suffix=suffix, prefix=prefix, dir=dir, mode=mode)
 
     @property
-    def name(self):
+    def name(self) -> str | None:
         return self._name
 
     @name.setter
-    def name(self, val):
+    def name(self, val: str | None) -> None:
         self._name = val
 
-    def truncate(self, *args):
-        # The stdlib SpooledTemporaryFile implementation of truncate() doesn't
-        # allow specifying a size.
-        self._file.truncate(*args)
+    # See https://bugs.python.org/issue26175
+    def readable(self) -> bool:
+        return self._file.readable()
+
+    def seekable(self) -> bool:
+        return self._file.seekable()
+
+    def writable(self) -> bool:
+        return self._file.writable()
 
 
-def better_mktemp(*args, **kwargs):
+def better_mktemp(*args: Any, **kwargs: Any) -> str:  # ruff: ignore[any-type]
     fd, path = tempfile.mkstemp(*args, **kwargs)
     os.close(fd)
     return path
+
+
+def is_in_system_tempdir(path: str) -> bool:
+    """Check if path is an existing file or folder inside the temporary folder
+    of the system. Used to sanity check paths that are going to be deleted."""
+    from ebook_convert.utils.filenames import is_path_inside
+
+    try:
+        # realpath() so that neither symlinks nor, on Windows, short names can
+        # be used to make a path outside the temporary folder look like one
+        # inside it
+        tdir = os.path.realpath(get_default_tempdir(), strict=True)  # type: ignore
+        path = os.path.realpath(path, strict=True)  # type: ignore
+    except OSError:
+        return False
+    return is_path_inside(tdir, path, case_sensitive=not iswindows)
+
+
+def delete_temp_file(path: str) -> None:
+    """Delete a temporary file, also deleting the folder containing it, if that
+    folder is now empty and is itself a folder inside the temporary folder of
+    the system, as is the case for files made in a folder from mkdtemp()."""
+    from ebook_convert.utils.filenames import remove_dir_if_empty
+
+    parent = os.path.dirname(os.path.abspath(path))
+    unlink(path)
+    # is_in_system_tempdir() is False for the temporary folder of the system
+    # itself, which must never be deleted
+    if is_in_system_tempdir(parent):
+        remove_dir_if_empty(parent, ignore_metadata_caches=True)

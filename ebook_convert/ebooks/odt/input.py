@@ -1,48 +1,56 @@
+# License: GPLv3 Copyright: 2008, Kovid Goyal kovid@kovidgoyal.net
+
 """
 Convert an ODT file into a Open Ebook
 """
+
+from __future__ import annotations
 import logging
 import os
+from typing import IO, TYPE_CHECKING
 
 from css_parser import CSSParser
 from css_parser.css import CSSRule
 from lxml import etree
-
+from odf.draw import Frame as odFrame
+from odf.draw import Image as odImage
+from odf.namespaces import TEXTNS as odTEXTNS
 from odf.odf2xhtml import ODF2XHTML
 from odf.opendocument import load as odLoad
-from odf.draw import Frame as odFrame, Image as odImage
-from odf.namespaces import TEXTNS as odTEXTNS
 
-from ebook_convert.utils import directory
-from ebook_convert.ebooks.oeb import parse_utils
+from ebook_convert import CurrentDir, walk
 from ebook_convert.ebooks.oeb.base import _css_logger
-from ebook_convert import polyglot
+from ebook_convert.utils.localization import _
+from ebook_convert.utils.xml_parse import safe_xml_fromstring
+from ebook_convert.polyglot.builtins import as_bytes
 
+if TYPE_CHECKING:
+    from css_parser.css import CSSStyleRule
+    from lxml.etree import _Element
+
+    from ebook_convert.ebooks.metadata.book.base import Metadata
+    from ebook_convert.utils.logging import Log
+    from ebook_convert.utils.zipfile import ZipFile
 
 
 class Extract(ODF2XHTML):
-
-    def _extract_pictures(self, zf):
+    def extract_pictures(self, zf: ZipFile) -> None:
         if not os.path.exists('Pictures'):
             os.makedirs('Pictures')
-        # Calibre e1b5f9b45a / 4eabb38427: never write outside the
-        # container directory
         base = os.path.abspath(os.getcwd())
         if not base.endswith(os.sep):
             base += os.sep
         for name in zf.namelist():
-            if (name.startswith('Pictures') and
-                    name not in {'Pictures', 'Pictures/'}):
+            if name.startswith('Pictures') and name not in {'Pictures', 'Pictures/'}:
                 dest = os.path.abspath(os.path.join(base, name))
-                if os.path.commonprefix([base, dest]) != base:
+                if not dest.startswith(base):
                     continue
                 data = zf.read(name)
-                os.makedirs(os.path.dirname(dest), exist_ok=True)
                 with open(dest, 'wb') as f:
                     f.write(data)
 
-    def _apply_list_starts(self, root, log):
-        if not hasattr(self, "list_starts") or not self.list_starts:
+    def apply_list_starts(self, root: _Element, log: Log) -> None:
+        if not self.list_starts:
             return
         list_starts = frozenset(self.list_starts)
         for ol in root.xpath('//*[local-name() = "ol" and @class]'):
@@ -52,19 +60,17 @@ class Extract(ODF2XHTML):
                 val = self.list_starts[next(iter(found))]
                 ol.set('start', val)
 
-    def fix_markup(self, html, log):
-        root = etree.fromstring(html)
+    def fix_markup(self, html: str, log: Log) -> bytes:
+        root = safe_xml_fromstring(html)
         self.filter_css(root, log)
         self.extract_css(root, log)
         self.epubify_markup(root, log)
-        self._apply_list_starts(root, log)
-        html = etree.tostring(root, encoding='utf-8', xml_declaration=True)
-        return html
+        self.apply_list_starts(root, log)
+        return etree.tostring(root, encoding='utf-8', xml_declaration=True)
 
-    def extract_css(self, root, log):
-        ans = []
-        for s in root.xpath('//*[local-name() = "style" and '
-                            '@type="text/css"]'):
+    def extract_css(self, root: _Element, log: Log) -> None:
+        ans: list[str] = []
+        for s in root.xpath('//*[local-name() = "style" and @type="text/css"]'):
             ans.append(s.text)
             s.getparent().remove(s)
 
@@ -73,20 +79,17 @@ class Extract(ODF2XHTML):
             head = head[0]
             ns = head.nsmap.get(None, '')
             if ns:
-                ns = '{%s}'%ns
-            etree.SubElement(head, ns+'link', {'type':'text/css',
-                                               'rel':'stylesheet',
-                                               'href':'odfpy.css'})
+                ns = f'{{{ns}}}'
+            etree.SubElement(head, ns + 'link', {'type': 'text/css', 'rel': 'stylesheet', 'href': 'odfpy.css'})
 
-        css = u'\n\n'.join(ans)
+        css = '\n\n'.join(ans)
         parser = CSSParser(loglevel=logging.WARNING, log=_css_logger)
-        # odfpy's ODF2XHTML keeps its own self.css attribute, do not clobber it
         self._parsed_css = parser.parseString(css, validate=False)
 
         with open('odfpy.css', 'wb') as f:
             f.write(css.encode('utf-8'))
 
-    def get_css_for_class(self, cls):
+    def get_css_for_class(self, cls: str) -> CSSStyleRule | None:
         if not cls:
             return None
         for rule in self._parsed_css.cssRules.rulesOfType(CSSRule.STYLE_RULE):
@@ -95,22 +98,24 @@ class Extract(ODF2XHTML):
                 if q == '.' + cls:
                     return rule
 
-    def epubify_markup(self, root, log):
+    def epubify_markup(self, root: _Element, log: Log) -> None:
+        from ebook_convert.ebooks.oeb.base import XHTML, XPath
+
         # Fix empty title tags
-        for t in parse_utils.XPath('//h:title')(root):
+        for t in XPath('//h:title')(root):
             if not t.text:
-                t.text = u' '
+                t.text = ' '
         # Fix <p><div> constructs as the asinine epubchecker complains
         # about them
-        pdiv = parse_utils.XPath('//h:p/h:div')
+        pdiv = XPath('//h:p/h:div')
         for div in pdiv(root):
-            div.getparent().tag = parse_utils.XHTML('div')
+            div.getparent().tag = XHTML('div')
 
         # Remove the position:relative as it causes problems with some epub
         # renderers. Remove display: block on an image inside a div as it is
         # redundant and prevents text-align:center from working in ADE
         # Also ensure that the img is contained in its containing div
-        imgpath = parse_utils.XPath('//h:div/h:img[@style]')
+        imgpath = XPath('//h:div/h:img[@style]')
         for img in imgpath(root):
             div = img.getparent()
             if len(div) == 1:
@@ -130,41 +135,39 @@ class Extract(ODF2XHTML):
         # works in both WebKit and ADE.
         # https://bugs.launchpad.net/bugs/1063207
         # https://bugs.launchpad.net/calibre/+bug/859343
-        imgpath = parse_utils.XPath('descendant::h:div/h:div/h:img')
+        imgpath = XPath('descendant::h:div/h:div/h:img')
         for img in imgpath(root):
             div2 = img.getparent()
             div1 = div2.getparent()
             if (len(div1), len(div2)) != (1, 1):
                 continue
             cls = div1.get('class', '')
-            first_rules = list(filter(None, [self.get_css_for_class(x) for x in
-                cls.split()]))
+            first_rules = list(filter(None, [self.get_css_for_class(x) for x in cls.split()]))
             has_align = False
             for r in first_rules:
-                if r.style.getProperty(u'text-align') is not None:
+                if r.style.getProperty('text-align') is not None:
                     has_align = True
             ml = mr = None
             if not has_align:
                 aval = None
-                cls = div2.get(u'class', u'')
-                rules = list(filter(None, [self.get_css_for_class(x) for x in
-                    cls.split()]))
+                cls = div2.get('class', '')
+                rules = list(filter(None, [self.get_css_for_class(x) for x in cls.split()]))
                 for r in rules:
-                    ml = r.style.getPropertyCSSValue(u'margin-left') or ml
-                    mr = r.style.getPropertyCSSValue(u'margin-right') or mr
+                    ml = r.style.getPropertyCSSValue('margin-left') or ml
+                    mr = r.style.getPropertyCSSValue('margin-right') or mr
                     ml = getattr(ml, 'value', None)
                     mr = getattr(mr, 'value', None)
-                if ml == mr == u'auto':
-                    aval = u'center'
-                elif ml == u'auto' and mr != u'auto':
+                if ml == mr == 'auto':
+                    aval = 'center'
+                elif ml == 'auto' and mr != 'auto':
                     aval = 'right'
-                elif ml != u'auto' and mr == u'auto':
+                elif ml != 'auto' and mr == 'auto':
                     aval = 'left'
                 if aval is not None:
                     style = div1.attrib.get('style', '').strip()
                     if style and not style.endswith(';'):
                         style = style + ';'
-                    style += 'text-align:%s'%aval
+                    style += f'text-align:{aval}'
                     has_align = True
                     div1.attrib['style'] = style
 
@@ -172,9 +175,9 @@ class Extract(ODF2XHTML):
                 # This is needed for ADE, without it the text-align has no
                 # effect
                 style = div2.attrib['style']
-                div2.attrib['style'] = 'display:inline;'+style
+                div2.attrib['style'] = 'display:inline;' + style
 
-    def filter_css(self, root, log):
+    def filter_css(self, root: _Element, log: Log) -> None:
         style = root.xpath('//*[local-name() = "style" and @type="text/css"]')
         if style:
             style = style[0]
@@ -192,42 +195,41 @@ class Extract(ODF2XHTML):
                     if extra:
                         x.set('class', orig + ' ' + ' '.join(extra))
 
-    def do_filter_css(self, css):
+    def do_filter_css(self, css: str) -> tuple[str | bytes, dict[str, list[str]]]:
         from css_parser import parseString
         from css_parser.css import CSSRule
+
         sheet = parseString(css, validate=False)
         rules = list(sheet.cssRules.rulesOfType(CSSRule.STYLE_RULE))
-        sel_map = {}
+        sel_map: dict[str, list[str]] = {}
         count = 0
         for r in rules:
             # Check if we have only class selectors for this rule
-            nc = [x for x in r.selectorList if not
-                    x.selectorText.startswith('.')]
+            nc = [x for x in r.selectorList if not x.selectorText.startswith('.')]
             if len(r.selectorList) > 1 and not nc:
                 # Replace all the class selectors with a single class selector
                 # This will be added to the class attribute of all elements
                 # that have one of these selectors.
-                replace_name = 'c_odt%d'%count
+                replace_name = f'c_odt{count}'
                 count += 1
                 for sel in r.selectorList:
                     s = sel.selectorText[1:]
                     if s not in sel_map:
                         sel_map[s] = []
                     sel_map[s].append(replace_name)
-                r.selectorText = '.'+replace_name
+                r.selectorText = '.' + replace_name
         return sheet.cssText, sel_map
 
-    def search_page_img(self, mi, log):
+    def search_page_img(self, mi: Metadata, log: Log) -> None:
         for frm in self.document.topnode.getElementsByType(odFrame):
             try:
-                if frm.getAttrNS(odTEXTNS,u'anchor-type') == 'page':
-                    log.warning('Document has Pictures anchored to Page, will '
-                                'all end up before first page!')
+                if frm.getAttrNS(odTEXTNS, 'anchor-type') == 'page':
+                    log.warn('Document has Pictures anchored to Page, will all end up before first page!')
                     break
             except ValueError:
                 pass
 
-    def filter_cover(self, mi, log):
+    def filter_cover(self, mi: Metadata, log: Log) -> None:
         # filter the Element tree (remove the detected cover)
         if mi.cover and mi.odf_cover_frame:
             for frm in self.document.topnode.getElementsByType(odFrame):
@@ -237,30 +239,28 @@ class Extract(ODF2XHTML):
                     # only one draw:image allowed in the draw:frame
                     if len(img) == 1 and img[0].getAttribute('href') == mi.cover:
                         # ok, this is the right frame with the right image
-                        # check if there are more childs
+                        # check if there are more children
                         if len(frm.childNodes) != 1:
                             break
-                        # check if the parent paragraph more childs
+                        # check if the parent paragraph more children
                         para = frm.parentNode
                         if para.tagName != 'text:p' or len(para.childNodes) != 1:
                             break
                         # now it should be safe to remove the text:p
                         parent = para.parentNode
                         parent.removeChild(para)
-                        log.info("Removed cover image paragraph from "
-                                 "document...")
+                        log('Removed cover image paragraph from document...')
                         break
 
-    def filter_load(self, odffile, mi, log):
-        """ This is an adaption from ODF2XHTML. It adds a step between
-            load and parse of the document where the Element tree can be
-            modified.
+    def filter_load(self, odffile: IO[bytes], mi: Metadata, log: Log) -> None:
+        """This is an adaption from ODF2XHTML. It adds a step between
+        load and parse of the document where the Element tree can be
+        modified.
         """
         # first load the odf structure
         self.lines = []
         self._wfunc = self._wlines
-        if isinstance(odffile, (str, bytes)) \
-                or hasattr(odffile, 'read'):  # Added by Kovid
+        if isinstance(odffile, (str, bytes)) or hasattr(odffile, 'read'):  # Added by Kovid
             self.document = odLoad(odffile)
         else:
             self.document = odffile
@@ -268,51 +268,45 @@ class Extract(ODF2XHTML):
         self.search_page_img(mi, log)
         try:
             self.filter_cover(mi, log)
-        except:
+        except Exception:
             pass
         # parse the modified tree and generate xhtml
         self._walknode(self.document.topnode)
 
-    def __call__(self, stream, odir, log):
-        from ebook_convert.utils.zipfile import ZipFile
+    def __call__(self, stream: IO[bytes], odir: str, log: Log) -> str:
         from ebook_convert.ebooks.metadata.odt import get_metadata
         from ebook_convert.ebooks.metadata.opf2 import OPFCreator
+        from ebook_convert.utils.zipfile import ZipFile
 
         if not os.path.exists(odir):
             os.makedirs(odir)
-        with directory.CurrentDir(odir):
-            log.info('Extracting ODT file...')
+        with CurrentDir(odir):
+            log('Extracting ODT file...')
             stream.seek(0)
-            mi = get_metadata(stream, 'odt')
+            mi = get_metadata(stream, True)
             if not mi.title:
-                mi.title = 'Unknown'
+                mi.title = _('Unknown')
             if not mi.authors:
-                mi.authors = ['Unknown']
+                mi.authors = [_('Unknown')]
             self.filter_load(stream, mi, log)
-
-            # NOTE(gryf): Here is a workaround for ODF2XHTML.xhtml() method,
-            # which expects, that all lines are strings.
-            html = ''.join([str(l) for l in self.lines])
-
+            html = self.xhtml()
             # A blanket img specification like this causes problems
             # with EPUB output as the containing element often has
             # an absolute height and width set that is larger than
             # the available screen real estate
             html = html.replace('img { width: 100%; height: 100%; }', '')
             # odf2xhtml creates empty title tag
-            html = html.replace('<title></title>','<title>%s</title>'%(mi.title,))
+            html = html.replace('<title></title>', f'<title>{mi.title}</title>')
             try:
                 html = self.fix_markup(html, log)
-            except:
+            except Exception:
                 log.exception('Failed to filter CSS, conversion may be slow')
             with open('index.xhtml', 'wb') as f:
-                f.write(polyglot.as_bytes(html))
+                f.write(as_bytes(html))
             zf = ZipFile(stream, 'r')
-            self._extract_pictures(zf)
+            self.extract_pictures(zf)
             opf = OPFCreator(os.path.abspath(os.getcwd()), mi)
-            opf.create_manifest([(os.path.abspath(os.path.join(r, f2)), None)
-                                 for r, _, fnames in os.walk(os.getcwd())
-                                 for f2 in fnames])
+            opf.create_manifest([(os.path.abspath(f2), None) for f2 in walk(os.getcwd())])
             opf.create_spine([os.path.abspath('index.xhtml')])
             with open('metadata.opf', 'wb') as f:
                 opf.render(f)

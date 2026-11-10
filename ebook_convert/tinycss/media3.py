@@ -1,8 +1,17 @@
+#!/usr/bin/env python
+# vim:fileencoding=utf-8
+
+
+from __future__ import annotations
+__license__ = 'GPL v3'
+__copyright__ = '2014, Kovid Goyal <kovid at kovidgoyal.net>'
+
+from ebook_convert.polyglot.builtins import error_message
 from ebook_convert.tinycss.css21 import CSS21Parser
-from ebook_convert.tinycss.parsing import remove_whitespace, split_on_comma, ParseError
+from ebook_convert.tinycss.parsing import ParseError, remove_whitespace, split_on_comma
 
 
-class MediaQuery(object):
+class MediaQuery:
 
     __slots__ = 'media_type', 'expressions', 'negated'
 
@@ -91,7 +100,7 @@ class CSSMedia3Parser(CSS21Parser):
 
                     expressions.append((media_feature, expr))
             except MalformedExpression as err:
-                errors.append(ParseError(err.tok, str(err)))
+                errors.append(ParseError(err.tok, error_message(err)))
                 media_type, negated, expressions = 'all', True, ()
             queries.append(MediaQuery(media_type or 'all', expressions=tuple(expressions), negated=negated))
 

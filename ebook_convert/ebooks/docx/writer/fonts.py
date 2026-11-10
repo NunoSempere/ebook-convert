@@ -1,37 +1,50 @@
+#!/usr/bin/env python
+# License: GPLv3 Copyright: 2015, Kovid Goyal <kovid at kovidgoyal.net>
+
+from __future__ import annotations
 from collections import defaultdict
+from typing import TYPE_CHECKING
 from uuid import uuid4
 
 from ebook_convert.ebooks.oeb.base import OEB_STYLES
 from ebook_convert.ebooks.oeb.transforms.subset import find_font_face_rules
 
+if TYPE_CHECKING:
+    from collections.abc import Iterable
+    from optparse import Values
+    from uuid import UUID
 
-__license__ = 'GPL v3'
-__copyright__ = '2015, Kovid Goyal <kovid at kovidgoyal.net>'
+    from lxml.etree import _Element
+
+    from ebook_convert.ebooks.conversion.plumber import OptionValues
+    from ebook_convert.ebooks.docx.names import DOCXNamespace
+    from ebook_convert.ebooks.docx.writer.styles import TextStyle
+    from ebook_convert.ebooks.oeb.base import Manifest, OEBBook
 
 
-def obfuscate_font_data(data, key):
+def obfuscate_font_data(data: bytes, key: UUID) -> bytes:
     prefix = bytearray(data[:32])
-    key = bytearray(reversed(key.bytes))
-    prefix = bytes(bytearray(prefix[i]^key[i % len(key)] for i in range(len(prefix))))
+    key_bytes = bytearray(reversed(key.bytes))
+    prefix = bytes(bytearray(prefix[i] ^ key_bytes[i % len(key_bytes)] for i in range(len(prefix))))
     return prefix + data[32:]
 
 
-class FontsManager(object):
-
-    def __init__(self, namespace, oeb, opts):
+class FontsManager:
+    def __init__(self, namespace: DOCXNamespace, oeb: OEBBook, opts: Values | OptionValues) -> None:
         self.namespace = namespace
         self.oeb, self.log, self.opts = oeb, oeb.log, opts
 
-    def serialize(self, text_styles, fonts, embed_relationships, font_data_map):
+    def serialize(self, text_styles: Iterable[TextStyle], fonts: _Element, embed_relationships: _Element, font_data_map: dict[str, bytes]) -> None:
         makeelement = self.namespace.makeelement
-        font_families, seen = set(), set()
+        font_families: set[str] = set()
+        seen: set[str] = set()
         for ts in text_styles:
             if ts.font_family:
                 lf = ts.font_family.lower()
                 if lf not in seen:
                     seen.add(lf)
                     font_families.add(ts.font_family)
-        family_map = {}
+        family_map: dict[str, _Element] = {}
         for family in sorted(font_families):
             family_map[family] = makeelement(fonts, 'w:font', w_name=family)
 
@@ -41,8 +54,8 @@ class FontsManager(object):
                 embedded_fonts.extend(find_font_face_rules(item, self.oeb))
 
         num = 0
-        face_map = defaultdict(set)
-        rel_map = {}
+        face_map: defaultdict[str, set[str]] = defaultdict(set)
+        rel_map: dict[Manifest.Item, str] = {}
         for ef in embedded_fonts:
             ff = ef['font-family'][0]
             if ff not in font_families:
@@ -65,10 +78,22 @@ class FontsManager(object):
             item = ef['item']
             rid = rel_map.get(item)
             if rid is None:
-                rel_map[item] = rid = 'rId%d' % num
-                fname = 'fonts/font%d.odttf' % num
-                makeelement(embed_relationships, 'Relationship', Id=rid, Type=self.namespace.names['EMBEDDED_FONT'], Target=fname)
-                font_data_map['word/' + fname] = obfuscate_font_data(item.data, key)
-            makeelement(font, 'w:embed' + tag, r_id=rid,
-                        w_fontKey='{%s}' % key.urn.rpartition(':')[-1].upper(),
-                        w_subsetted="true" if self.opts.subset_embedded_fonts else "false")
+                rel_map[item] = rid = f'rId{num}'
+                fname = f'fonts/font{num}.odttf'
+                makeelement(
+                    embed_relationships,
+                    'Relationship',
+                    Id=rid,
+                    Type=self.namespace.names['EMBEDDED_FONT'],
+                    Target=fname,
+                )
+                font_data = item.data
+                assert isinstance(font_data, bytes)  # font files are not parsed
+                font_data_map['word/' + fname] = obfuscate_font_data(font_data, key)
+            makeelement(
+                font,
+                'w:embed' + tag,
+                r_id=rid,
+                w_fontKey='{{{}}}'.format(key.urn.rpartition(':')[-1].upper()),
+                w_subsetted='true' if self.opts.subset_embedded_fonts else 'false',
+            )

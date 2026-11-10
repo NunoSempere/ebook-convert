@@ -1,17 +1,37 @@
-import collections
-import re
+#!/usr/bin/env python
+# License: GPLv3 Copyright: 2013, Kovid Goyal <kovid at kovidgoyal.net>
 
-from ebook_convert.ebooks.docx.writer.container import create_skeleton, page_size, page_effective_area
+from __future__ import annotations
+import re
+from collections import Counter
+from typing import TYPE_CHECKING, cast
+
+from lxml import etree
+
+from ebook_convert.ebooks.docx.writer.container import create_skeleton, page_effective_area, page_size
 from ebook_convert.ebooks.docx.writer.fonts import FontsManager
 from ebook_convert.ebooks.docx.writer.images import ImagesManager
 from ebook_convert.ebooks.docx.writer.links import LinksManager
 from ebook_convert.ebooks.docx.writer.lists import ListsManager
-from ebook_convert.ebooks.docx.writer.styles import StylesManager, FloatSpec
+from ebook_convert.ebooks.docx.writer.styles import FloatSpec, StylesManager
 from ebook_convert.ebooks.docx.writer.tables import Table
-from ebook_convert.ebooks.oeb import base
-from ebook_convert.ebooks.oeb import parse_utils
-from ebook_convert.ebooks.oeb.stylizer import Stylizer as Sz, Style as St
+from ebook_convert.ebooks.oeb.base import XPath, barename
+from ebook_convert.ebooks.oeb.stylizer import Style as St
+from ebook_convert.ebooks.oeb.stylizer import Stylizer as Sz
 from ebook_convert.utils.localization import lang_as_iso639_1
+
+if TYPE_CHECKING:
+    from types import TracebackType
+
+    from lxml.etree import _Element
+
+    from ebook_convert.ebooks.docx.names import DOCXNamespace
+    from ebook_convert.ebooks.docx.writer.container import DOCX
+    from ebook_convert.ebooks.docx.writer.images import Image
+    from ebook_convert.ebooks.docx.writer.links import Link
+    from ebook_convert.ebooks.docx.writer.styles import CombinedStyle, DescendantTextStyle, TextStyle
+    from ebook_convert.ebooks.metadata.book.base import Metadata
+    from ebook_convert.ebooks.oeb.base import Manifest, OEBBook
 
 # The whitespace characters that are collapsible under the CSS/HTML whitespace
 # processing rules. Deliberately ASCII only: NBSP and the other non-breaking
@@ -19,25 +39,25 @@ from ebook_convert.utils.localization import lang_as_iso639_1
 # reach Word verbatim. Note that unlike oeb.base.COLLAPSE_RE this includes the
 # form feed, since lxml refuses to serialize control characters.
 COLLAPSIBLE_WS = ' \t\r\n\f\v'
-COLLAPSE_WS_PAT = re.compile('[%s]+' % COLLAPSIBLE_WS)
+COLLAPSE_WS_PAT = re.compile(f'[{COLLAPSIBLE_WS}]+')
 
 
-def lang_for_tag(tag):
+def lang_for_tag(tag: _Element) -> str | None:
     for attr in ('lang', '{http://www.w3.org/XML/1998/namespace}lang'):
         val = lang_as_iso639_1(tag.get(attr))
         if val:
             return val
+    return None
 
 
 class Style(St):
-
-    def __init__(self, *args, **kwargs):
-        St.__init__(self, *args, **kwargs)
-        self._letterSpacing = None
+    def __init__(self, element: _Element, stylizer: Sz) -> None:
+        St.__init__(self, element, stylizer)
+        self._letterSpacing: str | float | None = None
 
     @property
-    def letterSpacing(self):
-        if self._letterSpacing is not None:
+    def letterSpacing(self) -> str | float | None:
+        if self._letterSpacing is None:
             val = self._get('letter-spacing')
             if val == 'normal':
                 self._letterSpacing = val
@@ -47,33 +67,30 @@ class Style(St):
 
 
 class Stylizer(Sz):
-
-    def style(self, element):
+    def style(self, element: _Element) -> St:
         try:
             return self._styles[element]
         except KeyError:
             return Style(element, self)
 
 
-class TextRun(object):
+class TextRun:
+    soft_hyphen_pat: re.Pattern[str] | None = None
 
-    soft_hyphen_pat = None
-
-    def __init__(self, namespace, style, first_html_parent, lang=None):
+    def __init__(self, namespace: DOCXNamespace, style: TextStyle, first_html_parent: _Element, lang: str | None = None) -> None:
         self.first_html_parent = first_html_parent
         if self.soft_hyphen_pat is None:
-            TextRun.soft_hyphen_pat = self.soft_hyphen_pat = re.compile('(\xad)')
+            TextRun.soft_hyphen_pat = self.soft_hyphen_pat = re.compile(r'(\xad)')
         self.style = style
-        # (text, preserve_whitespace, bookmark) or (None, clear, bookmark) for
-        # breaks or (drawing, drawing_link, bookmark) for images
-        self.texts = []
-        self.link = None
+        # (text, preserve_whitespace, bookmark) or (None, clear, bookmark) for breaks or (drawing, drawing_link, bookmark) for images
+        self.texts: list[tuple[str | _Element | None, bool | str | Link | None, str | None]] = []
+        self.link: Link | None = None
         self.lang = lang
-        self.parent_style = None
+        self.parent_style: TextStyle | None = None
         self.makeelement = namespace.makeelement
-        self.descendant_style = None
+        self.descendant_style: DescendantTextStyle | None = None
 
-    def add_text(self, text, preserve_whitespace, bookmark=None, link=None):
+    def add_text(self, text: str, preserve_whitespace: bool, bookmark: str | None = None, link: Link | None = None) -> None:
         if not preserve_whitespace:
             text = COLLAPSE_WS_PAT.sub(' ', text)
             if text.strip(COLLAPSIBLE_WS) != text:
@@ -83,28 +100,30 @@ class TextRun(object):
         self.texts.append((text, preserve_whitespace, bookmark))
         self.link = link
 
-    def add_break(self, clear='none', bookmark=None):
+    def add_break(self, clear: str = 'none', bookmark: str | None = None) -> None:
         self.texts.append((None, clear, bookmark))
 
-    def add_image(self, drawing, bookmark=None, drawing_link=None):
+    def add_image(self, drawing: _Element, bookmark: str | None = None, drawing_link: Link | None = None) -> None:
         # As for breaks, the second slot is overloaded, for drawings it holds
         # the link to put on the drawing itself (used for floating images)
         self.texts.append((drawing, drawing_link, bookmark))
 
-    def serialize(self, p, links_manager, parent=None):
+    def serialize(self, p: _Element, links_manager: LinksManager, parent: _Element | None = None) -> None:
         makeelement = self.makeelement
         if parent is None:
             parent = p if self.link is None else links_manager.serialize_hyperlink(p, self.link)
         r = makeelement(parent, 'w:r')
         rpr = makeelement(r, 'w:rPr', append=False)
         if getattr(self.descendant_style, 'id', None) is not None:
-            makeelement(rpr, 'w:rStyle', w_val=self.descendant_style.id)
+            ds = self.descendant_style
+            assert ds is not None
+            makeelement(rpr, 'w:rStyle', w_val=cast('str', ds.id))  # ids are assigned in StylesManager.finalize()
         if self.lang:
             makeelement(rpr, 'w:lang', w_bidi=self.lang, w_val=self.lang, w_eastAsia=self.lang)
         if len(rpr) > 0:
             r.append(rpr)
 
-        def add_text(text, preserve_whitespace):
+        def add_text(text: str, preserve_whitespace: object) -> None:
             t = makeelement(r, 'w:t')
             t.text = text
             if preserve_whitespace:
@@ -115,14 +134,16 @@ class TextRun(object):
                 bid = links_manager.bookmark_id
                 makeelement(r, 'w:bookmarkStart', w_id=str(bid), w_name=bookmark)
             if text is None:
-                makeelement(r, 'w:br', w_clear=preserve_whitespace)
+                makeelement(r, 'w:br', w_clear=cast('str', preserve_whitespace))  # holds clear for breaks
             elif hasattr(text, 'xpath'):
-                drawing_link = preserve_whitespace  # holds the link for images
+                drawing_link = cast('Link | None', preserve_whitespace)  # holds the link for images
                 if drawing_link is not None:
-                    links_manager.serialize_drawing_link(text, drawing_link)
-                r.append(text)
+                    links_manager.serialize_drawing_link(cast('_Element', text), drawing_link)
+                r.append(cast('_Element', text))
             elif text:
-                for x in self.soft_hyphen_pat.split(text):
+                soft_hyphen_pat = self.soft_hyphen_pat
+                assert soft_hyphen_pat is not None
+                for x in soft_hyphen_pat.split(text):
                     if x == '\u00ad':
                         # trailing spaces in <w:t> before a soft hyphen are
                         # ignored, so put them in a preserve whitespace
@@ -132,7 +153,7 @@ class TextRun(object):
                             add_text(' ', True)
                         makeelement(r, 'w:softHyphen')
                     elif x:
-                        if not preserve_whitespace and x.startswith(' ') and len(r) and r[-1].tag and 'softHyphen' in r[-1].tag:
+                        if not preserve_whitespace and x.startswith(' ') and len(r) and r[-1].tag and 'softHyphen' in cast('str', r[-1].tag):
                             x = x.lstrip(COLLAPSIBLE_WS)
                             add_text(' ', True)
                         add_text(x, preserve_whitespace)
@@ -141,10 +162,10 @@ class TextRun(object):
             if bookmark is not None:
                 makeelement(r, 'w:bookmarkEnd', w_id=str(bid))
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return repr(self.texts)
 
-    def is_empty(self):
+    def is_empty(self) -> bool:
         if not self.texts:
             return True
         if len(self.texts) == 1 and self.texts[0][:2] == ('', False):
@@ -152,11 +173,11 @@ class TextRun(object):
         return False
 
     @property
-    def has_text(self):
+    def has_text(self) -> bool:
         return any(isinstance(text, str) for text, preserve_whitespace, bookmark in self.texts)
 
     @property
-    def style_weight(self):
+    def style_weight(self) -> int:
         ans = 0
         for text, preserve_whitespace, bookmark in self.texts:
             if isinstance(text, str):
@@ -164,18 +185,30 @@ class TextRun(object):
         return ans
 
 
-class Block(object):
-
-    def __init__(self, namespace, styles_manager, links_manager, html_block, style, is_table_cell=False, float_spec=None, is_list_item=False, parent_bg=None):
+class Block:
+    def __init__(
+        self,
+        namespace: DOCXNamespace,
+        styles_manager: StylesManager,
+        links_manager: LinksManager,
+        html_block: _Element,
+        style: St,
+        is_table_cell: bool = False,
+        float_spec: FloatSpec | None = None,
+        is_list_item: bool = False,
+        parent_bg: str | None = None,
+    ) -> None:
         self.force_not_empty = False
         self.namespace = namespace
-        self.bookmarks = set()
+        self.bookmarks: set[str] = set()
         self.list_tag = (html_block, style) if is_list_item else None
         self.is_first_block = False
-        self.numbering_id = None
-        self.parent_items = None
+        self.numbering_id: tuple[int, int] | None = None
+        self.parent_items: list[Block | Table] | None = None
         self.html_block = html_block
-        self.html_tag = parse_utils.barename(html_block.tag)
+        html_block_tag = html_block.tag
+        assert isinstance(html_block_tag, str)  # blocks are only created for elements with str tags
+        self.html_tag = barename(html_block_tag)
         self.float_spec = float_spec
         if float_spec is not None:
             float_spec.blocks.append(self)
@@ -183,15 +216,15 @@ class Block(object):
         self.style = styles_manager.create_block_style(style, html_block, is_table_cell=is_table_cell, parent_bg=parent_bg)
         self.styles_manager, self.links_manager = styles_manager, links_manager
         self.keep_next = False
-        self.runs = []
+        self.runs: list[TextRun] = []
         self.skipped = False
-        self.linked_style = None
+        self.linked_style: CombinedStyle | None = None
         self.page_break_before = style['page-break-before'] == 'always'
         self.keep_lines = style['page-break-inside'] == 'avoid'
         self.page_break_after = False
-        self.block_lang = None
+        self.block_lang: str | None = None
 
-    def resolve_skipped(self, next_block):
+    def resolve_skipped(self, next_block: Block) -> None:
         if not self.is_empty():
             return
         if len(self.html_block) > 0 and self.html_block[0] is next_block.html_block:
@@ -199,12 +232,21 @@ class Block(object):
             if self.list_tag is not None:
                 next_block.list_tag = self.list_tag
 
-    def add_text(self, text, style, ignore_leading_whitespace=False, html_parent=None, is_parent_style=False, bookmark=None, link=None, lang=None):
+    def add_text(
+        self,
+        text: str,
+        style: St,
+        ignore_leading_whitespace: bool = False,
+        html_parent: _Element | None = None,
+        is_parent_style: bool = False,
+        bookmark: str | None = None,
+        link: Link | None = None,
+        lang: str | None = None,
+    ) -> None:
         ws = style['white-space']
         preserve_whitespace = ws in {'pre', 'pre-wrap', '-o-pre-wrap'}
         ts = self.styles_manager.create_text_style(style, is_parent_style=is_parent_style)
-        # Each source anchor has its own link tuple, even when its destination
-        # and tooltip match another anchor.
+        # Each source anchor has its own link tuple, even when its destination and tooltip match another anchor.
         if self.runs and ts == self.runs[-1].style and link is self.runs[-1].link and lang == self.runs[-1].lang:
             run = self.runs[-1]
         else:
@@ -213,14 +255,14 @@ class Block(object):
         if ignore_leading_whitespace and not preserve_whitespace:
             text = text.lstrip(COLLAPSIBLE_WS)
         if preserve_whitespace or ws == 'pre-line':
-            for text in text.splitlines():
-                run.add_text(text, preserve_whitespace, bookmark=bookmark, link=link)
+            for line in text.splitlines():
+                run.add_text(line, preserve_whitespace, bookmark=bookmark, link=link)
                 bookmark = None
                 run.add_break()
         else:
             run.add_text(text, preserve_whitespace, bookmark=bookmark, link=link)
 
-    def add_break(self, clear='none', bookmark=None):
+    def add_break(self, clear: str = 'none', bookmark: str | None = None) -> None:
         if self.runs:
             run = self.runs[-1]
         else:
@@ -228,7 +270,7 @@ class Block(object):
             self.runs.append(run)
         run.add_break(clear=clear, bookmark=bookmark)
 
-    def add_image(self, drawing, bookmark=None, link=None, floating=False):
+    def add_image(self, drawing: _Element, bookmark: str | None = None, link: Link | None = None, floating: bool = False) -> None:
         drawing_link = None
         if link is not None and floating:
             # Floating image, the link must go on the image itself, not on the
@@ -250,10 +292,10 @@ class Block(object):
             self.runs.insert(pos, run)
         run.add_image(drawing, bookmark=bookmark, drawing_link=drawing_link)
 
-    def serialize(self, body):
+    def serialize(self, body: _Element) -> None:
         makeelement = self.namespace.makeelement
         p = makeelement(body, 'w:p')
-        end_bookmarks = []
+        end_bookmarks: list[str] = []
         for bmark in self.bookmarks:
             end_bookmarks.append(str(self.links_manager.bookmark_id))
             makeelement(p, 'w:bookmarkStart', w_id=end_bookmarks[-1], w_name=bmark)
@@ -271,7 +313,7 @@ class Block(object):
             makeelement(numpr, 'w:ilvl', w_val=str(self.numbering_id[1]))
             makeelement(numpr, 'w:numId', w_val=str(self.numbering_id[0]))
         if self.linked_style is not None:
-            makeelement(ppr, 'w:pStyle', w_val=self.linked_style.id)
+            makeelement(ppr, 'w:pStyle', w_val=cast('str', self.linked_style.id))  # ids are assigned in StylesManager.finalize()
         elif self.style.id:
             makeelement(ppr, 'w:pStyle', w_val=self.style.id)
         if self.is_first_block:
@@ -280,7 +322,6 @@ class Block(object):
             makeelement(ppr, 'w:pageBreakBefore', w_val='on')
         if self.keep_lines:
             makeelement(ppr, 'w:keepLines', w_val='on')
-        # Runs sharing a link share a single <w:hyperlink>
         current_link, parent = None, p
         for run in self.runs:
             if run.link is not current_link:
@@ -290,39 +331,36 @@ class Block(object):
         for bmark in end_bookmarks:
             makeelement(p, 'w:bookmarkEnd', w_id=bmark)
 
-    def __repr__(self):
-        return 'Block(%r)' % self.runs
+    def __repr__(self) -> str:
+        return f'Block({self.runs!r})'
+
     __str__ = __repr__
 
-    def is_empty(self):
+    def is_empty(self) -> bool:
         if self.force_not_empty:
             return False
-        for run in self.runs:
-            if not run.is_empty():
-                return False
-        return True
+        return all(run.is_empty() for run in self.runs)
 
 
-class Blocks(object):
-
-    def __init__(self, namespace, styles_manager, links_manager):
-        self.top_bookmark = None
+class Blocks:
+    def __init__(self, namespace: DOCXNamespace, styles_manager: StylesManager, links_manager: LinksManager) -> None:
+        self.top_bookmark: str | None = None
         self.namespace = namespace
         self.styles_manager = styles_manager
         self.links_manager = links_manager
-        self.all_blocks = []
+        self.all_blocks: list[Block] = []
         self.pos = 0
-        self.current_block = None
-        self.items = []
-        self.tables = []
-        self.current_table = None
-        self.open_html_blocks = set()
-        self.html_tag_start_blocks = {}
+        self.current_block: Block | None = None
+        self.items: list[Block | Table] = []
+        self.tables: list[Table] = []
+        self.current_table: Table | None = None
+        self.open_html_blocks: set[_Element] = set()
+        self.html_tag_start_blocks: dict[_Element, Block] = {}
 
-    def current_or_new_block(self, html_tag, tag_style):
+    def current_or_new_block(self, html_tag: _Element, tag_style: St) -> Block:
         return self.current_block or self.start_new_block(html_tag, tag_style)
 
-    def end_current_block(self):
+    def end_current_block(self) -> None:
         if self.current_block is not None:
             self.all_blocks.append(self.current_block)
             if self.current_table is not None and self.current_table.current_row is not None:
@@ -333,7 +371,9 @@ class Blocks(object):
                 self.current_block.parent_items = self.items
         self.current_block = None
 
-    def start_new_block(self, html_block, style, is_table_cell=False, float_spec=None, is_list_item=False):
+    def start_new_block(
+        self, html_block: _Element, style: St, is_table_cell: bool = False, float_spec: FloatSpec | None = None, is_list_item: bool = False
+    ) -> Block:
         parent_bg = None
         if html_block is not None:
             p = html_block.getparent()
@@ -344,28 +384,37 @@ class Blocks(object):
                     parent_bg = ps.background_color
         self.end_current_block()
         self.current_block = Block(
-            self.namespace, self.styles_manager, self.links_manager, html_block, style,
-            is_table_cell=is_table_cell, float_spec=float_spec, is_list_item=is_list_item,
-            parent_bg=parent_bg)
+            self.namespace,
+            self.styles_manager,
+            self.links_manager,
+            html_block,
+            style,
+            is_table_cell=is_table_cell,
+            float_spec=float_spec,
+            is_list_item=is_list_item,
+            parent_bg=parent_bg,
+        )
         self.html_tag_start_blocks[html_block] = self.current_block
         self.open_html_blocks.add(html_block)
         return self.current_block
 
-    def start_new_table(self, html_tag, tag_style=None):
+    def start_new_table(self, html_tag: _Element, tag_style: St | None = None) -> None:
         self.current_table = Table(self.namespace, html_tag, tag_style)
         self.tables.append(self.current_table)
 
-    def start_new_row(self, html_tag, tag_style):
+    def start_new_row(self, html_tag: _Element, tag_style: St) -> None:
         if self.current_table is None:
             self.start_new_table(html_tag)
+        assert self.current_table is not None
         self.current_table.start_new_row(html_tag, tag_style)
 
-    def start_new_cell(self, html_tag, tag_style):
+    def start_new_cell(self, html_tag: _Element, tag_style: St) -> None:
         if self.current_table is None:
             self.start_new_table(html_tag)
+        assert self.current_table is not None
         self.current_table.start_new_cell(html_tag, tag_style)
 
-    def finish_tag(self, html_tag):
+    def finish_tag(self, html_tag: _Element) -> None:
         if self.current_block is not None and html_tag in self.open_html_blocks:
             start_block = self.html_tag_start_blocks.get(html_tag)
             if start_block is not None and start_block.html_style['page-break-after'] == 'always':
@@ -386,11 +435,11 @@ class Blocks(object):
                     self.block_map[table] = len(self.items)
                     self.items.append(table)
 
-    def serialize(self, body):
+    def serialize(self, body: _Element) -> None:
         for item in self.items:
             item.serialize(body)
 
-    def delete_block_at(self, pos=None):
+    def delete_block_at(self, pos: int | None = None) -> None:
         pos = self.pos if pos is None else pos
         block = self.all_blocks[pos]
         del self.all_blocks[pos]
@@ -411,11 +460,11 @@ class Blocks(object):
         except (IndexError, KeyError):
             pass
 
-    def __enter__(self):
+    def __enter__(self) -> None:
         self.pos = len(self.all_blocks)
-        self.block_map = {}
+        self.block_map: dict[Block | Table, int] = {}
 
-    def __exit__(self, etype, value, traceback):
+    def __exit__(self, etype: type[BaseException] | None, value: BaseException | None, traceback: TracebackType | None) -> None:
         if value is not None:
             return  # Since there was an exception, the data structures are not in a consistent state
         if self.current_block is not None:
@@ -428,22 +477,22 @@ class Blocks(object):
         if self.pos > 0 and self.pos < len(self.all_blocks):
             # Insert a page break corresponding to the start of the html file
             self.all_blocks[self.pos].page_break_before = True
-        if self.top_bookmark is not None and self.pos < len(self.all_blocks):
-            self.all_blocks[self.pos].bookmarks.add(self.top_bookmark)
+            if self.top_bookmark is not None:
+                self.all_blocks[self.pos].bookmarks.add(self.top_bookmark)
         self.top_bookmark = None
         self.block_map = {}
 
-    def apply_page_break_after(self):
+    def apply_page_break_after(self) -> None:
         for i, block in enumerate(self.all_blocks):
             if block.page_break_after and i < len(self.all_blocks) - 1:
                 next_block = self.all_blocks[i + 1]
                 if next_block.parent_items is block.parent_items and block.parent_items is self.items:
                     next_block.page_break_before = True
 
-    def resolve_language(self):
+    def resolve_language(self) -> None:
         default_lang = self.styles_manager.document_lang
         for block in self.all_blocks:
-            count = collections.Counter()
+            count: Counter[str | None] = Counter()
             for run in block.runs:
                 # Runs containing only images have no language and must not
                 # influence the language of the block
@@ -458,9 +507,7 @@ class Blocks(object):
                     block.block_lang = None
 
 
-
-class Convert(object):
-
+class Convert:
     # Word does not apply default styling to hyperlinks, so we ensure they get
     # default styling (the conversion pipeline does not apply any styling to
     # them).
@@ -468,27 +515,19 @@ class Convert(object):
     a[href] { text-decoration: underline; color: blue }
     '''
 
-    def __init__(self, oeb, docx, mi, add_cover, add_toc):
+    def __init__(self, oeb: OEBBook, docx: DOCX, mi: Metadata, add_cover: bool, add_toc: bool) -> None:
         self.oeb, self.docx, self.add_cover, self.add_toc = oeb, docx, add_cover, add_toc
         self.log, self.opts = docx.log, docx.opts
         self.mi = mi
-        self.cover_img = None
+        self.cover_img: Image | _Element | None = None
         p = self.opts.output_profile
         p.width_pts, p.height_pts = page_effective_area(self.opts)
 
-    def __call__(self):
-        from ebook_convert.ebooks.oeb.transforms.rasterize import SVGRasterizer, Unavailable
-        self.stylizer_cache = {}
-        self.svg_rasterizer = None
-        try:
-            self.svg_rasterizer = SVGRasterizer(base_css=self.base_css,
-                                                save_svg_originals=True)
-        except Unavailable:
-            self.log.warning('SVG rasterizer unavailable, SVG will not be '
-                             'converted')
-        else:
-            self.svg_rasterizer(self.oeb, self.opts)
-            self.stylizer_cache = self.svg_rasterizer.stylizer_cache
+    def __call__(self) -> None:
+        from ebook_convert.ebooks.oeb.transforms.rasterize import SVGRasterizer
+
+        self.svg_rasterizer = SVGRasterizer(base_css=self.base_css)
+        self.svg_rasterizer(self.oeb, self.opts)
 
         self.styles_manager = StylesManager(self.docx.namespace, self.log, self.mi.language)
         self.links_manager = LinksManager(self.docx.namespace, self.docx.document_relationships, self.log)
@@ -496,10 +535,11 @@ class Convert(object):
         self.lists_manager = ListsManager(self.docx)
         self.fonts_manager = FontsManager(self.docx.namespace, self.oeb, self.opts)
         self.blocks = Blocks(self.docx.namespace, self.styles_manager, self.links_manager)
-        self.current_link = self.current_lang = None
+        self.current_link: Link | None = None
+        self.current_lang: str | None = None
 
         for item in self.oeb.spine:
-            self.log.debug('Processing %s', item.href)
+            self.log.debug('Processing', item.href)
             self.process_item(item)
         if self.add_toc:
             self.links_manager.process_toc_links(self.oeb)
@@ -513,7 +553,7 @@ class Convert(object):
         remove_blocks = []
         for i, block in enumerate(all_blocks):
             try:
-                nb = all_blocks[i+1]
+                nb = all_blocks[i + 1]
             except IndexError:
                 break
             block.resolve_skipped(nb)
@@ -526,35 +566,44 @@ class Convert(object):
         self.blocks.resolve_language()
 
         if self.cover_img is not None:
-            self.cover_img = self.images_manager.create_cover_markup(self.cover_img, self.opts.preserve_cover_aspect_ratio, *page_size(self.opts))
+            # cover_img is the Image from read_image() at this point
+            self.cover_img = self.images_manager.create_cover_markup(
+                cast('Image', self.cover_img), self.opts.preserve_cover_aspect_ratio, *page_size(self.opts)
+            )
         self.lists_manager.finalize(all_blocks)
         self.styles_manager.finalize(all_blocks)
         self.write()
 
-    def process_item(self, item):
-        self.current_item = item
-        stylizer = self.stylizer_cache.get(item)
-        if stylizer is None:
-            stylizer = Stylizer(item.data, item.href, self.oeb, self.opts, profile=self.opts.output_profile, base_css=self.base_css)
-        self.abshref = self.images_manager.abshref = item.abshref
+    def abshref(self, x: str) -> str:
+        return x
 
-        self.current_lang = lang_for_tag(item.data) or self.styles_manager.document_lang
-        for i, body in enumerate(base.XPath('//h:body')(item.data)):
+    def process_item(self, item: Manifest.Item) -> None:
+        self.current_item = item
+        stylizer = self.svg_rasterizer.stylizer(item)
+        self.abshref = self.images_manager.abshref = item.abshref  # ty: ignore[invalid-assignment]  # instance attribute shadows the default method
+
+        root = item.data
+        assert isinstance(root, etree._Element)  # spine items are parsed HTML
+        self.current_lang = lang_for_tag(root) or self.styles_manager.document_lang
+        for i, body in enumerate(XPath('//h:body')(root)):
             with self.blocks:
                 self.blocks.top_bookmark = self.links_manager.bookmark_for_anchor(self.links_manager.top_anchor, self.current_item, body)
                 self.process_tag(body, stylizer, is_first_tag=i == 0)
 
-    def process_tag(self, html_tag, stylizer, is_first_tag=False, float_spec=None):
-        tagname = parse_utils.barename(html_tag.tag)
+    def process_tag(self, html_tag: _Element, stylizer: Sz, is_first_tag: bool = False, float_spec: FloatSpec | None = None) -> None:
+        html_tag_name = html_tag.tag
+        assert isinstance(html_tag_name, str)  # only called for elements with str tags
+        tagname = barename(html_tag_name)
         tag_style = stylizer.style(html_tag)
         ignore_tag_contents = tagname in {'script', 'style', 'title', 'meta'} or tag_style.is_hidden
-        display = tag_style._get('display')
+        display = cast('str', tag_style._get('display'))  # the display default is a str
         is_block = False
 
         if not ignore_tag_contents:
             previous_link = self.current_link
             if tagname == 'a' and html_tag.get('href'):
-                self.current_link = (self.current_item, html_tag.get('href'), html_tag.get('title'))
+                # href is not empty, checked above
+                self.current_link = (self.current_item, cast('str', html_tag.get('href')), html_tag.get('title'))
             previous_lang = self.current_lang
             tag_lang = lang_for_tag(html_tag)
             if tag_lang:
@@ -564,8 +613,8 @@ class Convert(object):
             if float_spec is None and is_float:
                 float_spec = FloatSpec(self.docx.namespace, html_tag, tag_style)
 
-            if display in {'inline', 'inline-block'} or tagname == 'br':  # <br> has display:block but we dont want to start a new paragraph
-                if is_float and float_spec.is_dropcaps:
+            if display in {'inline', 'inline-block'} or tagname == 'br':  # <br> has display:block but we don't want to start a new paragraph
+                if is_float and float_spec is not None and float_spec.is_dropcaps:
                     self.add_block_tag(tagname, html_tag, tag_style, stylizer, float_spec=float_spec)
                     float_spec = None
                 else:
@@ -581,15 +630,14 @@ class Convert(object):
                 elif display in {'table', 'inline-table'}:
                     self.blocks.end_current_block()
                     self.blocks.start_new_table(html_tag, tag_style)
+            elif tagname == 'img' and is_float:
+                # Image is floating so don't start a new paragraph for it
+                self.add_inline_tag(tagname, html_tag, tag_style, stylizer)
             else:
-                if tagname == 'img' and is_float:
-                    # Image is floating so dont start a new paragraph for it
-                    self.add_inline_tag(tagname, html_tag, tag_style, stylizer)
-                else:
-                    if tagname == 'hr':
-                        for edge in 'right bottom left'.split():
-                            tag_style.set('border-%s-style' % edge, 'none')
-                    self.add_block_tag(tagname, html_tag, tag_style, stylizer, float_spec=float_spec)
+                if tagname == 'hr':
+                    for edge in 'right bottom left'.split():
+                        tag_style.set(f'border-{edge}-style', 'none')
+                self.add_block_tag(tagname, html_tag, tag_style, stylizer, float_spec=float_spec)
 
             for child in html_tag.iterchildren():
                 if isinstance(getattr(child, 'tag', None), (str, bytes)):
@@ -618,18 +666,33 @@ class Convert(object):
             # Ignore trailing space after a block tag, as otherwise it will
             # become a new empty paragraph
             block = self.create_block_from_parent(html_tag, stylizer)
-            block.add_text(html_tag.tail, stylizer.style(html_tag.getparent()), is_parent_style=True, link=self.current_link, lang=self.current_lang)
+            block.add_text(
+                html_tag.tail,
+                stylizer.style(cast('_Element', html_tag.getparent())),  # all processed tags are inside <body>
+                is_parent_style=True,
+                link=self.current_link,
+                lang=self.current_lang,
+            )
 
-    def create_block_from_parent(self, html_tag, stylizer):
+    def create_block_from_parent(self, html_tag: _Element, stylizer: Sz) -> Block:
         parent = html_tag.getparent()
+        assert parent is not None  # all processed tags are inside <body>
         block = self.blocks.current_or_new_block(parent, stylizer.style(parent))
         # Do not inherit page-break-before from parent
         block.page_break_before = False
         return block
 
-    def add_block_tag(self, tagname, html_tag, tag_style, stylizer, is_table_cell=False, float_spec=None, is_list_item=False):
-        block = self.blocks.start_new_block(
-            html_tag, tag_style, is_table_cell=is_table_cell, float_spec=float_spec, is_list_item=is_list_item)
+    def add_block_tag(
+        self,
+        tagname: str,
+        html_tag: _Element,
+        tag_style: St,
+        stylizer: Sz,
+        is_table_cell: bool = False,
+        float_spec: FloatSpec | None = None,
+        is_list_item: bool = False,
+    ) -> None:
+        block = self.blocks.start_new_block(html_tag, tag_style, is_table_cell=is_table_cell, float_spec=float_spec, is_list_item=is_list_item)
         anchor = html_tag.get('id') or html_tag.get('name')
         if anchor:
             block.bookmarks.add(self.bookmark_for_anchor(anchor, html_tag))
@@ -638,47 +701,61 @@ class Convert(object):
         else:
             text = html_tag.text
             is_list_item = tagname == 'li'
-            # html_tag[0] may be a comment, whose tag is not a string
-            has_sublist = (is_list_item and len(html_tag) and isinstance(html_tag[0].tag, str) and
-                           parse_utils.barename(html_tag[0].tag) in ('ul', 'ol') and len(html_tag[0]))
+            has_sublist = is_list_item and len(html_tag) and isinstance(html_tag[0].tag, str) and barename(html_tag[0].tag) in ('ul', 'ol') and len(html_tag[0])
             if text and has_sublist and not text.strip(COLLAPSIBLE_WS):
                 text = ''  # whitespace only, ignore
             if text:
-                block.add_text(text, tag_style, ignore_leading_whitespace=True, is_parent_style=True, link=self.current_link, lang=self.current_lang)
+                block.add_text(
+                    text,
+                    tag_style,
+                    ignore_leading_whitespace=True,
+                    is_parent_style=True,
+                    link=self.current_link,
+                    lang=self.current_lang,
+                )
             elif has_sublist:
                 block.force_not_empty = True
 
-    def add_inline_tag(self, tagname, html_tag, tag_style, stylizer):
+    def add_inline_tag(self, tagname: str, html_tag: _Element, tag_style: St, stylizer: Sz) -> None:
         anchor = html_tag.get('id') or html_tag.get('name') or None
         bmark = None
         if anchor:
             bmark = self.bookmark_for_anchor(anchor, html_tag)
         if tagname == 'br':
-            if html_tag.tail or html_tag is not tuple(html_tag.getparent().iterchildren('*'))[-1]:
+            if html_tag.tail or html_tag is not tuple(cast('_Element', html_tag.getparent()).iterchildren('*'))[-1]:
                 block = self.create_block_from_parent(html_tag, stylizer)
-                block.add_break(clear={'both':'all', 'left':'left', 'right':'right'}.get(tag_style['clear'], 'none'), bookmark=bmark)
+                block.add_break(
+                    clear={'both': 'all', 'left': 'left', 'right': 'right'}.get(tag_style['clear'], 'none'),
+                    bookmark=bmark,
+                )
         elif tagname == 'img':
             block = self.create_block_from_parent(html_tag, stylizer)
             self.images_manager.add_image(html_tag, block, stylizer, bookmark=bmark, link=self.current_link)
-        else:
-            if html_tag.text:
-                block = self.create_block_from_parent(html_tag, stylizer)
-                block.add_text(html_tag.text, tag_style, is_parent_style=False, bookmark=bmark, link=self.current_link, lang=self.current_lang)
-            elif bmark:
-                block = self.create_block_from_parent(html_tag, stylizer)
-                block.add_text('', tag_style, is_parent_style=False, bookmark=bmark, link=self.current_link, lang=self.current_lang)
+        elif html_tag.text:
+            block = self.create_block_from_parent(html_tag, stylizer)
+            block.add_text(
+                html_tag.text,
+                tag_style,
+                is_parent_style=False,
+                bookmark=bmark,
+                link=self.current_link,
+                lang=self.current_lang,
+            )
+        elif bmark:
+            block = self.create_block_from_parent(html_tag, stylizer)
+            block.add_text('', tag_style, is_parent_style=False, bookmark=bmark, link=self.current_link, lang=self.current_lang)
 
-    def bookmark_for_anchor(self, anchor, html_tag):
+    def bookmark_for_anchor(self, anchor: str, html_tag: _Element) -> str:
         return self.links_manager.bookmark_for_anchor(anchor, self.current_item, html_tag)
 
-    def write(self):
+    def write(self) -> None:
         self.docx.document, self.docx.styles, body = create_skeleton(self.opts)
         self.blocks.serialize(body)
         body.append(body[0])  # Move <sectPr> to the end
         if self.links_manager.toc:
             self.links_manager.serialize_toc(body, self.styles_manager.primary_heading_style)
         if self.cover_img is not None:
-            self.images_manager.write_cover_block(body, self.cover_img)
+            self.images_manager.write_cover_block(body, cast('_Element', self.cover_img))  # replaced by the markup in __call__()
         self.styles_manager.serialize(self.docx.styles)
         self.images_manager.serialize(self.docx.images)
         self.fonts_manager.serialize(self.styles_manager.text_styles, self.docx.font_table, self.docx.embedded_fonts, self.docx.fonts)

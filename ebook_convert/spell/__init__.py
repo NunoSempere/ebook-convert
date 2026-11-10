@@ -1,54 +1,32 @@
-from collections import namedtuple
-import importlib.resources
-import json
+#!/usr/bin/env python
+# License: GPLv3 Copyright: 2014, Kovid Goyal <kovid at kovidgoyal.net>
 
-from ebook_convert.utils.localization import canonicalize_lang
+from __future__ import annotations
+from typing import NamedTuple
 
-
-__license__ = 'GPL v3'
-__copyright__ = '2014, Kovid Goyal <kovid at kovidgoyal.net>'
-
-DictionaryLocale = namedtuple('DictionaryLocale', 'langcode countrycode')
-
-ccodes, ccodemap, country_names = None, None, None
+from ebook_convert.utils.localization import canonicalize_lang, load_iso3166
 
 
-def get_codes():
-    global ccodes, ccodemap, country_names
-    if ccodes is None:
-        with open(importlib.resources.files('ebook_convert') /
-                  'data/iso_3166-1.json', 'rb') as f:
-            db = json.load(f)
-        codes = set()
-        three_map = {}
-        name_map = {}
-        for x in db['3166-1']:
-            two = x.get('alpha_2')
-            if two:
-                two = str(two)
-            codes.add(two)
-            name_map[two] = x.get('name')
-            if name_map[two]:
-                name_map[two] = str(name_map[two])
-            three = x.get('alpha_3')
-            if three:
-                three_map[str(three)] = two
-        data = {'names': name_map,
-                'codes': frozenset(codes),
-                'three_map': three_map}
-
-        ccodes, ccodemap, country_names = (data['codes'], data['three_map'],
-                                           data['names'])
-    return ccodes, ccodemap
+class DictionaryLocale(NamedTuple):
+    langcode: str
+    countrycode: str | None
 
 
-def parse_lang_code(raw):
+def get_codes() -> tuple[set[str], dict[str, str]]:
+    data = load_iso3166()
+    return data['codes'], data['three_map']
+
+
+def parse_lang_code(raw: str | None) -> DictionaryLocale:
     raw = raw or ''
     parts = raw.replace('_', '-').split('-')
     lc = canonicalize_lang(parts[0])
     if lc is None:
-        raise ValueError('Invalid language code: %r' % raw)
+        raise ValueError(f'Invalid language code: {raw!r}')
     cc = None
+    for sc in ['Cyrl', 'Latn']:
+        if sc in parts:
+            parts.remove(sc)
     if len(parts) > 1:
         ccodes, ccodemap = get_codes()[:2]
         q = parts[1].upper()

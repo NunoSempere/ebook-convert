@@ -10,14 +10,16 @@
 #                                                                       #
 #                                                                       #
 #########################################################################
-import sys, os
+from __future__ import annotations
+import os
+import sys
 
-from ebook_convert.ebooks.rtf2xml import copy, border_parse
+from ebook_convert.ebooks.rtf2xml import border_parse, copy
 from ebook_convert.ptempfile import better_mktemp
 
 from . import open_for_read, open_for_write
 
-"""
+'''
 States.
 1. 'not_in_table'
     1. 'cw<tb<row-def___' start a row definition
@@ -27,8 +29,8 @@ States.
     2. 'mi<mk<not-in-tbl', end the table.
     3. 'cw<tb<row-def___' start a row definition
 3. in_row_definition
-    1.  'mi<mk<not-in-tbl'  :   end the row defintion. If in table, end the table.
-    2.  'mi<mk<pard-start'  :   end the row defintion
+    1.  'mi<mk<not-in-tbl'  :   end the row definition. If in table, end the table.
+    2.  'mi<mk<pard-start'  :   end the row definition
         if already in the table, start a row and cell.
     3.  'cw<tb<row_______'  : end the row definition, end the row
     4.  'cw...' use another method to handle the control word
@@ -42,7 +44,7 @@ States.
 5. 'in_cell'
     1. 'mi<mk<not-in-tbl', end table
     2. 'cw<tb<cell______', end cell
-"""
+'''
 
 
 class Table:
@@ -53,11 +55,13 @@ class Table:
     'not_in_table'. Look for either a 'cw<tb<in-table__', or a row definition.
     """
 
-    def __init__(self,
-            in_file,
-            bug_handler,
-            copy=None,
-            run_level=1,):
+    def __init__(
+        self,
+        in_file: str,
+        bug_handler: type[Exception],
+        copy: int | None = None,
+        run_level: int = 1,
+    ) -> None:
         """
         Required:
             'file'--file to parse
@@ -67,40 +71,40 @@ class Table:
             directory from which the script is run.)
         Returns:
             nothing
-            """
+        """
         self.__file = in_file
         self.__bug_handler = bug_handler
         self.__copy = copy
         self.__run_level = run_level
         self.__write_to = better_mktemp()
 
-    def __initiate_values(self):
+    def __initiate_values(self) -> None:
         """
         Initiate all values.
         """
         self.__state_dict = {
-        'in_table':         self.__in_table_func,
-        'in_row_def':       self.__in_row_def_func,
-        'not_in_table':     self.__not_in_table_func,
-        'in_cell':          self.__in_cell_func,
-        'in_row':           self.__in_row_func,
+            'in_table': self.__in_table_func,
+            'in_row_def': self.__in_row_def_func,
+            'not_in_table': self.__not_in_table_func,
+            'in_cell': self.__in_cell_func,
+            'in_row': self.__in_row_func,
         }
         self.__not_in_table_dict = {
-        'cw<tb<row-def___':   self.__found_row_def_func,
-        'cw<tb<in-table__': self.__start_table_func,
-        'mi<mk<in-table__'  : self.__start_table_func,
+            'cw<tb<row-def___': self.__found_row_def_func,
+            'cw<tb<in-table__': self.__start_table_func,
+            'mi<mk<in-table__': self.__start_table_func,
         }
         # can't use this dictionary. When in row_definition, many tokens
         # require multiple definitions
         self.__in_row_definition_dict = {
-        'mi<mk<not-in-tbl'  :   self.__end_row_table_func,
-        'mi<mk<pard-start'  :   self.__end_row_def_func,
+            'mi<mk<not-in-tbl': self.__end_row_table_func,
+            'mi<mk<pard-start': self.__end_row_def_func,
         }
         self.__in_row_dict = {
-        'mi<mk<not-in-tbl'  :   self.__close_table,
-        'mi<mk<pard-start'  :   self.__start_cell_func,
-        'cw<tb<row_______'  :   self.__end_row_func,
-        'cw<tb<cell______'  :   self.__empty_cell,
+            'mi<mk<not-in-tbl': self.__close_table,
+            'mi<mk<pard-start': self.__start_cell_func,
+            'cw<tb<row_______': self.__end_row_func,
+            'cw<tb<cell______': self.__empty_cell,
         }
         # set the default state
         self.__state = ['not_in_table']
@@ -111,7 +115,7 @@ class Table:
         self.__cell_list = []
         self.__cell_widths = []
 
-    def __in_table_func(self, line):
+    def __in_table_func(self, line: str) -> None:
         """
         Requires:
             line -- line to parse
@@ -120,11 +124,13 @@ class Table:
             Look for  'mi<mk<pard-start', which marks the beginning of a row. Start
             a row and start a cell.
         """
-        # 'cell'               :	('tb', 'cell______', self.default_func),
-        if self.__token_info == 'mi<mk<not-in-tbl' or\
-            self.__token_info == 'mi<mk<sect-start' or\
-            self.__token_info == 'mi<mk<sect-close' or\
-            self.__token_info == 'mi<mk<body-close':
+        # 'cell'               : ('tb', 'cell______', self.default_func),
+        if self.__token_info in {
+            'mi<mk<not-in-tbl',
+            'mi<mk<sect-start',
+            'mi<mk<sect-close',
+            'mi<mk<body-close',
+        }:
             self.__close_table(line)
         elif self.__token_info == 'mi<mk<pard-start':
             self.__start_row_func(line)
@@ -136,7 +142,7 @@ class Table:
             self.__empty_cell(line)
         self.__write_obj.write(line)
 
-    def __not_in_table_func(self, line):
+    def __not_in_table_func(self, line: str) -> None:
         """
         Requires:
             line -- the line of text read in from document
@@ -153,7 +159,7 @@ class Table:
             action(line)
         self.__write_obj.write(line)
 
-    def __close_table(self, line):
+    def __close_table(self, line: str) -> None:
         """
         Requires:
             line -- line to parse
@@ -173,7 +179,7 @@ class Table:
         average_cell_width = self.__mode(self.__cell_widths)
         self.__table_data[-1]['average-cell-width'] = average_cell_width
 
-    def __found_row_def_func(self, line):
+    def __found_row_def_func(self, line: str) -> None:
         """
         Requires:
             line don't need this except for consistency with other methods.
@@ -190,7 +196,7 @@ class Table:
         self.__cell_list.append({})
         self.__cell_widths = []
 
-    def __start_table_func(self, line):
+    def __start_table_func(self, line: str) -> None:
         """
         Requires:
             line -- line to parse
@@ -210,7 +216,7 @@ class Table:
         self.__write_obj.write('mi<mk<tabl-start\n')
         self.__state.append('in_table')
 
-    def __end_row_table_func(self, line):
+    def __end_row_table_func(self, line: str) -> None:
         """
         Requires:
             line --just for consistencey
@@ -221,7 +227,7 @@ class Table:
         """
         self.__close_table(line)
 
-    def __end_row_def_func(self, line):
+    def __end_row_def_func(self, line: str) -> None:
         """
         Requires:
             line --just for consistency
@@ -244,7 +250,7 @@ class Table:
             num_cells = len(width_list)
             self.__row_dict['number-of-cells'] = num_cells
 
-    def __in_row_def_func(self, line):
+    def __in_row_def_func(self, line: str) -> None:
         """
         Requires:
             line --line to parse
@@ -255,7 +261,7 @@ class Table:
             control word with another method.
             Check for states that will end this state.
             While in the row definition, certain tokens can end a row or end a table.
-            If a paragrah definition (pard-start) is found, and the you are already in
+            If a paragraph definition (pard-start) is found, and you are already in
             a table, start of a row.
         """
         if self.__token_info == 'cw<tb<row_______':
@@ -274,7 +280,7 @@ class Table:
         elif self.__token_info == 'mi<mk<pard-start':
             self.__end_row_def_func(line)
             # if already in the table, start a row, then cell.
-            if (self.__state) > 0 and self.__state[-1] == 'in_table':
+            if len(self.__state) > 0 and self.__state[-1] == 'in_table':
                 self.__start_row_func(line)
                 self.__start_cell_func(line)
             self.__write_obj.write(line)
@@ -287,22 +293,22 @@ class Table:
         else:
             self.__write_obj.write(line)
 
-    def __handle_row_token(self, line):
+    def __handle_row_token(self, line: str) -> None:
         """
-        Requires:
-            line -- line to parse
-        Returns:
-            ?
-        Logic:
-            the tokens in the row definition contain the following information:
-               1. row borders.
-               2. cell borders for all cells in the row.
-               3. cell postions for all cells in the row.
-            Put all information about row borders into a row dictionary.
-            Put all information about cell borders into into the dictionary in
-            the last item in the cell list. ([{border:something, width:something},
-                    {border:something, width:something}])
-    cw<bd<bor-t-r-to<nu<bdr-hair__|bdr-li-wid:0.50
+            Requires:
+                line -- line to parse
+            Returns:
+                ?
+            Logic:
+                the tokens in the row definition contain the following information:
+                   1. row borders.
+                   2. cell borders for all cells in the row.
+                   3. cell positions for all cells in the row.
+                Put all information about row borders into a row dictionary.
+                Put all information about cell borders into into the dictionary in
+                the last item in the cell list. ([{border:something, width:something},
+                        {border:something, width:something}])
+        cw<bd<bor-t-r-to<nu<bdr-hair__|bdr-li-wid:0.50
         """
         if line[3:5] == 'bd':
             border_obj = border_parse.BorderParse()
@@ -328,7 +334,7 @@ class Table:
         elif self.__token_info == 'cw<tb<row-header':
             self.__row_dict['header'] = 'true'
 
-    def __start_cell_func(self, line):
+    def __start_cell_func(self, line: str) -> None:
         """
         Required:
             line -- the line of text
@@ -349,7 +355,7 @@ class Table:
             cell_dict = self.__cell_list[0]
             keys = cell_dict.keys()
             for key in keys:
-                self.__write_obj.write('<%s>%s' % (key, cell_dict[key]))
+                self.__write_obj.write(f'<{key}>{cell_dict[key]}')
             self.__write_obj.write('\n')
             # self.__cell_list.pop()
             self.__cell_list.pop(0)
@@ -359,7 +365,7 @@ class Table:
         self.__cells_in_table += 1
         self.__cells_in_row += 1
 
-    def __start_row_func(self, line):
+    def __start_row_func(self, line: str) -> None:
         """
         Required:
             line -- the line of text
@@ -373,12 +379,12 @@ class Table:
         self.__write_obj.write('mi<tg<open-att__<row')
         keys = self.__row_dict.keys()
         for key in keys:
-            self.__write_obj.write('<%s>%s' % (key, self.__row_dict[key]))
+            self.__write_obj.write(f'<{key}>{self.__row_dict[key]}')
         self.__write_obj.write('\n')
         self.__cells_in_row = 0
         self.__rows_in_table += 1
 
-    def __found_cell_position(self, line):
+    def __found_cell_position(self, line: str) -> None:
         """
         needs:
             line: current line
@@ -398,18 +404,18 @@ class Table:
             left_position = float(left_position)
         width = new_cell_position - self.__last_cell_position - left_position
         # width = round(width, 2)
-        width = str('%.2f' % width)
+        width = f'{width:.2f}'
         self.__last_cell_position = new_cell_position
         widths_exists = self.__row_dict.get('widths')
         if widths_exists:
-            self.__row_dict['widths'] += ', %s' % str(width)
+            self.__row_dict['widths'] += f', {width!s}'
         else:
             self.__row_dict['widths'] = str(width)
         self.__cell_list[-1]['width'] = width
         self.__cell_list.append({})
         self.__cell_widths.append(width)
 
-    def __in_cell_func(self, line):
+    def __in_cell_func(self, line: str) -> None:
         """
         Required:
             line
@@ -425,20 +431,22 @@ class Table:
         """
         # cw<tb<cell______<nu<true
         # mi<mk<sect-start
-        if self.__token_info == 'mi<mk<not-in-tbl' or\
-            self.__token_info == 'mi<mk<sect-start' or\
-            self.__token_info == 'mi<mk<sect-close' or\
-            self.__token_info == 'mi<mk<body-close':
+        if self.__token_info in {
+            'mi<mk<not-in-tbl',
+            'mi<mk<sect-start',
+            'mi<mk<sect-close',
+            'mi<mk<body-close',
+        }:
             self.__end_cell_func(line)
             self.__end_row_func(line)
             self.__close_table(line)
             self.__write_obj.write(line)
-        elif self.__token_info ==  'cw<tb<cell______':
+        elif self.__token_info == 'cw<tb<cell______':
             self.__end_cell_func(line)
         else:
             self.__write_obj.write(line)
 
-    def __end_cell_func(self, line):
+    def __end_cell_func(self, line: str) -> None:
         """
         Requires:
             line
@@ -454,11 +462,13 @@ class Table:
         self.__write_obj.write('mi<tg<close_____<cell\n')
         self.__write_obj.write('mi<mk<closecell_\n')
 
-    def __in_row_func(self, line):
-        if self.__token_info == 'mi<mk<not-in-tbl' or\
-            self.__token_info == 'mi<mk<sect-start' or\
-            self.__token_info == 'mi<mk<sect-close' or\
-            self.__token_info == 'mi<mk<body-close':
+    def __in_row_func(self, line: str) -> None:
+        if self.__token_info in {
+            'mi<mk<not-in-tbl',
+            'mi<mk<sect-start',
+            'mi<mk<sect-close',
+            'mi<mk<body-close',
+        }:
             self.__end_row_func(line)
             self.__close_table(line)
             self.__write_obj.write(line)
@@ -467,31 +477,26 @@ class Table:
             if action:
                 action(line)
             self.__write_obj.write(line)
-        """
-        elif self.__token_info == 'mi<mk<pard-start':
-            self.__start_cell_func(line)
-            self.__write_obj.write(line)
-        elif self.__token_info == 'cw<tb<row_______':
-            self.__end_row_func(line)
-            self.__write_obj.write(line)
-        else:
-            self.__write_obj.write(line)
-        """
+        # elif self.__token_info == 'mi<mk<pard-start':
+        #     self.__start_cell_func(line)
+        #     self.__write_obj.write(line)
+        # elif self.__token_info == 'cw<tb<row_______':
+        #     self.__end_row_func(line)
+        #     self.__write_obj.write(line)
+        # else:
+        #     self.__write_obj.write(line)
 
-    def __end_row_func(self, line):
-        """
-        """
+    def __end_row_func(self, line: str) -> None:
         if len(self.__state) > 1 and self.__state[-1] == 'in_row':
             self.__state.pop()
             self.__write_obj.write('mi<tg<close_____<row\n')
         else:
             self.__write_obj.write('mi<tg<empty_____<row\n')
             self.__rows_in_table += 1
-        if self.__cells_in_row > self.__max_number_cells_in_row:
-            self.__max_number_cells_in_row = self.__cells_in_row
+        self.__max_number_cells_in_row = max(self.__max_number_cells_in_row, self.__cells_in_row)
         self.__list_of_cells_in_row.append(self.__cells_in_row)
 
-    def __empty_cell(self, line):
+    def __empty_cell(self, line: str) -> None:
         """
         Required:
             line -- line of text
@@ -499,21 +504,21 @@ class Table:
             nothing
         Logic:
             Write an empty tag with attributes if there are attributes.
-            Otherwise, writen an empty tag with cell as element.
+            Otherwise, written an empty tag with cell as element.
         """
         if len(self.__cell_list) > 0:
             self.__write_obj.write('mi<tg<empty-att_<cell')
             cell_dict = self.__cell_list[-1]
             keys = cell_dict.keys()
             for key in keys:
-                self.__write_obj.write('<%s>%s' % (key, cell_dict[key]))
+                self.__write_obj.write(f'<{key}>{cell_dict[key]}')
             self.__write_obj.write('\n')
         else:
             self.__write_obj.write('mi<tg<empty_____<cell\n')
         self.__cells_in_table += 1
         self.__cells_in_row += 1
 
-    def __mode(self, the_list):
+    def __mode[T](self, the_list: list[T]) -> T | str:
         """
         Required:
             the_list -- a list of something
@@ -532,7 +537,7 @@ class Table:
                 max = num_of_values
         return mode
 
-    def make_table(self):
+    def make_table(self) -> list[dict[str, int | str]]:
         """
         Requires:
             nothing
@@ -551,16 +556,17 @@ class Table:
             line = line_to_read
             self.__token_info = line[:16]
             action = self.__state_dict.get(self.__state[-1])
-            # print self.__state[-1]
+            # print(self.__state[-1])
             if action is None:
                 sys.stderr.write('No matching state in module table.py\n')
                 sys.stderr.write(self.__state[-1] + '\n')
+            assert action is not None
             action(line)
         read_obj.close()
         self.__write_obj.close()
         copy_obj = copy.Copy(bug_handler=self.__bug_handler)
         if self.__copy:
-            copy_obj.copy_file(self.__write_to, "table.data")
+            copy_obj.copy_file(self.__write_to, 'table.data')
         copy_obj.rename(self.__write_to, self.__file)
         os.remove(self.__write_to)
         return self.__table_data

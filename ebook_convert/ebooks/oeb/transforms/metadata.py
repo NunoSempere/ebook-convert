@@ -1,12 +1,27 @@
-import mimetypes
+#!/usr/bin/env python
+# License: GPLv3 Copyright: 2009, Kovid Goyal <kovid@kovidgoyal.net>
+
+from __future__ import annotations
 import os
 import re
+from typing import TYPE_CHECKING, cast
 
-from ebook_convert.ebooks.oeb import base
+from ebook_convert import guess_type
 from ebook_convert.utils.date import isoformat, now
 
+if TYPE_CHECKING:
+    from optparse import Values
 
-def meta_info_to_oeb_metadata(mi, m, log, override_input_metadata=False):
+    from ebook_convert.ebooks.conversion.plumber import OptionValues
+    from ebook_convert.ebooks.metadata.book.base import Metadata
+    from ebook_convert.ebooks.oeb.base import Manifest, OEBBook
+    from ebook_convert.ebooks.oeb.base import Metadata as OEBMetadata
+    from ebook_convert.utils.logging import Log
+
+
+def meta_info_to_oeb_metadata(mi: Metadata, m: OEBMetadata, log: Log, override_input_metadata: bool = False) -> None:
+    from ebook_convert.ebooks.oeb.base import OPF
+
     if not mi.is_null('title'):
         m.clear('title')
         m.add('title', mi.title)
@@ -20,25 +35,29 @@ def meta_info_to_oeb_metadata(mi, m, log, override_input_metadata=False):
         for a in mi.authors:
             attrib = {'role': 'aut'}
             if mi.author_sort:
-                attrib[base.tag('opf', 'file-as')] = mi.author_sort
+                attrib[OPF('file-as')] = mi.author_sort
             m.add('creator', a, attrib=attrib)
     if not mi.is_null('book_producer'):
         m.filter('contributor', lambda x: x.role.lower() == 'bkp')
+        assert mi.book_producer is not None  # not null
         m.add('contributor', mi.book_producer, role='bkp')
     elif override_input_metadata:
         m.filter('contributor', lambda x: x.role.lower() == 'bkp')
     if not mi.is_null('comments'):
         m.clear('description')
+        assert mi.comments is not None  # not null
         m.add('description', mi.comments)
     elif override_input_metadata:
         m.clear('description')
     if not mi.is_null('publisher'):
         m.clear('publisher')
+        assert mi.publisher is not None  # not null
         m.add('publisher', mi.publisher)
     elif override_input_metadata:
         m.clear('publisher')
     if not mi.is_null('series'):
         m.clear('series')
+        assert mi.series is not None  # not null
         m.add('series', mi.series)
     elif override_input_metadata:
         m.clear('series')
@@ -68,7 +87,7 @@ def meta_info_to_oeb_metadata(mi, m, log, override_input_metadata=False):
         m.clear('series_index')
     if not mi.is_null('rating'):
         m.clear('rating')
-        m.add('rating', '%.2f' % mi.rating)
+        m.add('rating', f'{mi.rating:.2f}')
     elif override_input_metadata:
         m.clear('rating')
     if not mi.is_null('tags'):
@@ -79,52 +98,53 @@ def meta_info_to_oeb_metadata(mi, m, log, override_input_metadata=False):
         m.clear('subject')
     if not mi.is_null('pubdate'):
         m.clear('date')
+        assert mi.pubdate is not None  # not null
         m.add('date', isoformat(mi.pubdate))
     if not mi.is_null('timestamp'):
         m.clear('timestamp')
+        assert mi.timestamp is not None  # not null
         m.add('timestamp', isoformat(mi.timestamp))
     if not mi.is_null('rights'):
         m.clear('rights')
+        assert mi.rights is not None  # not null
         m.add('rights', mi.rights)
     if not mi.is_null('publication_type'):
         m.clear('publication_type')
+        assert mi.publication_type is not None  # not null
         m.add('publication_type', mi.publication_type)
 
     if not m.timestamp:
         m.add('timestamp', isoformat(now()))
 
 
-class MergeMetadata(object):
-    'Merge in user metadata, including cover'
+class MergeMetadata:
+    "Merge in user metadata, including cover"
 
-    def __call__(self, oeb, mi, opts, override_input_metadata=False):
-        _oim = override_input_metadata
+    def __call__(self, oeb: OEBBook, mi: Metadata, opts: Values | OptionValues, override_input_metadata: bool = False) -> None:
         self.oeb, self.log = oeb, oeb.log
         m = self.oeb.metadata
-        self.log.info('Merging user specified metadata...')
-        meta_info_to_oeb_metadata(mi, m, oeb.log,
-                                  override_input_metadata=_oim)
+        self.log('Merging user specified metadata...')
+        meta_info_to_oeb_metadata(mi, m, oeb.log, override_input_metadata=override_input_metadata)
         cover_id = self.set_cover(mi, opts.prefer_metadata_cover)
         m.clear('cover')
         if cover_id is not None:
             m.add('cover', cover_id)
         if mi.uuid is not None:
             m.filter('identifier', lambda x: x.id == 'uuid_id')
-            self.oeb.metadata.add('identifier', mi.uuid, id='uuid_id',
-                                  scheme='uuid')
+            self.oeb.metadata.add('identifier', mi.uuid, id='uuid_id', scheme='uuid')
             self.oeb.uid = self.oeb.metadata.identifier[-1]
         if mi.application_id is not None:
             m.filter('identifier', lambda x: x.scheme == 'calibre')
-            self.oeb.metadata.add('identifier', mi.application_id,
-                                  scheme='calibre')
+            # application_id is an int for metadata from a library
+            self.oeb.metadata.add('identifier', str(mi.application_id), scheme='calibre')
 
-    def set_cover(self, mi, prefer_metadata_cover):
+    def set_cover(self, mi: Metadata, prefer_metadata_cover: bool) -> str | None:
         cdata, ext = b'', 'jpg'
         if mi.cover and os.access(mi.cover, os.R_OK):
             with open(mi.cover, 'rb') as f:
                 cdata = f.read()
             ext = mi.cover.rpartition('.')[-1].lower().strip()
-        elif mi.cover_data and mi.cover_data[-1]:
+        elif mi.cover_data[-1]:
             cdata = mi.cover_data[1]
             ext = mi.cover_data[0]
         if ext not in ('png', 'jpg', 'jpeg'):
@@ -137,9 +157,8 @@ class MergeMetadata(object):
         if cdata:
             self.oeb.guide.remove('cover')
             self.oeb.guide.remove('titlepage')
-        elif (self.oeb.plumber_output_format in {'mobi', 'azw3'} and
-                old_cover is not None):
-            # The amazon formats dont support html cover pages, so remove them
+        elif self.oeb.plumber_output_format in {'mobi', 'azw3'} and old_cover is not None:
+            # The amazon formats don't support html cover pages, so remove them
             # even if no cover was specified.
             self.oeb.guide.remove('titlepage')
         do_remove_old_cover = False
@@ -155,26 +174,29 @@ class MergeMetadata(object):
                 return id
         new_cover_item = None
         if cdata:
-            id, href = self.oeb.manifest.generate('cover', 'cover.'+ext)
-            new_cover_item = self.oeb.manifest.add(
-                id, href, mimetypes.guess_type('cover.'+ext)[0], data=cdata)
+            id, href = self.oeb.manifest.generate('cover', 'cover.' + ext)
+            new_cover_item = self.oeb.manifest.add(id, href, cast('str', guess_type('cover.' + ext)[0]), data=cdata)
             self.oeb.guide.add('cover', 'Cover', href)
         if do_remove_old_cover:
+            assert new_cover_item is not None
             self.remove_old_cover(item, new_cover_item.href)
         return id
 
-    def remove_old_cover(self, cover_item, new_cover_href=None):
-        from ebook_convert.ebooks.oeb.base import XPath, XLINK
+    def remove_old_cover(self, cover_item: Manifest.Item, new_cover_href: str | None = None) -> None:
         from lxml import etree
+
+        from ebook_convert.ebooks.oeb.base import XLINK, XPath
 
         self.oeb.manifest.remove(cover_item)
 
         # Remove any references to the cover in the HTML
-        affected_items = set()
+        affected_items: set[Manifest.Item] = set()
         xp = XPath('//h:img[@src]|//svg:image[@xl:href]')
         for i, item in enumerate(self.oeb.spine):
             try:
-                images = xp(item.data)
+                root = item.data
+                assert isinstance(root, etree._Element)  # spine items are always (X)HTML documents
+                images = xp(root)
             except Exception:
                 images = ()
             removed = False
@@ -187,8 +209,7 @@ class MergeMetadata(object):
                 if href == cover_item.href:
                     if new_cover_href is not None:
                         replacement_href = item.relhref(new_cover_href)
-                        attr = ('src' if img.tag.endswith('img')
-                                else XLINK('href'))
+                        attr = 'src' if img.tag.endswith('img') else XLINK('href')
                         img.set(attr, replacement_href)
                     else:
                         p = img.getparent()
@@ -202,16 +223,16 @@ class MergeMetadata(object):
 
         # Check if the resulting HTML has no content, if so remove it
         for item in affected_items:
-            body = XPath('//h:body')(item.data)
+            root = item.data
+            assert isinstance(root, etree._Element)  # affected_items are spine items
+            body = XPath('//h:body')(root)
             if body:
-                text = etree.tostring(body[0], method='text',
-                                      encoding='unicode')
+                text = etree.tostring(body[0], method='text', encoding='unicode')
             else:
                 text = ''
             text = re.sub(r'\s+', '', text)
-            if not text and not XPath('//h:img|//svg:svg')(item.data):
-                self.log.info('Removing %s as it is a wrapper around the '
-                              'cover image', item.href)
+            if not text and not XPath('//h:img|//svg:svg')(root):
+                self.log(f'Removing {item.href} as it is a wrapper around the cover image')
                 self.oeb.spine.remove(item)
                 self.oeb.manifest.remove(item)
                 self.oeb.guide.remove_by_href(item.href)

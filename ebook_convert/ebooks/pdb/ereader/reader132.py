@@ -1,52 +1,64 @@
+# License: GPLv3 Copyright: 2009, John Schember <john@nachtimwald.com>
+
 """
 Read content from ereader pdb file with a 132 byte header created by Dropbook.
 """
+
+from __future__ import annotations
 import os
 import re
 import struct
 import zlib
+from typing import IO, TYPE_CHECKING
 
+from ebook_convert import CurrentDir
 from ebook_convert.ebooks import DRMError
 from ebook_convert.ebooks.metadata.opf2 import OPFCreator
 from ebook_convert.ebooks.pdb.ereader import EreaderError
 from ebook_convert.ebooks.pdb.formatreader import FormatReader
-from ebook_convert.utils import directory
+
+if TYPE_CHECKING:
+    from optparse import Values
+
+    from ebook_convert.ebooks.metadata.toc import TOC
+    from ebook_convert.ebooks.pdb.header import PdbHeaderReader
+    from ebook_convert.utils.logging import Log
+from ebook_convert.utils.localization import _
 
 
-class HeaderRecord(object):
-    '''
+class HeaderRecord:
+    """
     The first record in the file is always the header record. It holds
     information related to the location of text, images, and so on
     in the file. This is used in conjunction with the sections
     defined in the file header.
-    '''
+    """
 
-    def __init__(self, raw):
-        self.compression, = struct.unpack('>H', raw[0:2])
-        self.non_text_offset, = struct.unpack('>H', raw[12:14])
-        self.chapter_count, = struct.unpack('>H', raw[14:16])
-        self.image_count, = struct.unpack('>H', raw[20:22])
-        self.link_count, = struct.unpack('>H', raw[22:24])
-        self.has_metadata, = struct.unpack('>H', raw[24:26])
-        self.footnote_count, = struct.unpack('>H', raw[28:30])
-        self.sidebar_count, = struct.unpack('>H', raw[30:32])
-        self.chapter_offset, = struct.unpack('>H', raw[32:34])
-        self.small_font_page_offset, = struct.unpack('>H', raw[36:38])
-        self.large_font_page_offset, = struct.unpack('>H', raw[38:40])
-        self.image_data_offset, = struct.unpack('>H', raw[40:42])
-        self.link_offset, = struct.unpack('>H', raw[42:44])
-        self.metadata_offset, = struct.unpack('>H', raw[44:46])
-        self.footnote_offset, = struct.unpack('>H', raw[48:50])
-        self.sidebar_offset, = struct.unpack('>H', raw[50:52])
-        self.last_data_offset, = struct.unpack('>H', raw[52:54])
+    def __init__(self, raw: bytes) -> None:
+        (self.compression,) = struct.unpack('>H', raw[0:2])
+        (self.non_text_offset,) = struct.unpack('>H', raw[12:14])
+        (self.chapter_count,) = struct.unpack('>H', raw[14:16])
+        (self.image_count,) = struct.unpack('>H', raw[20:22])
+        (self.link_count,) = struct.unpack('>H', raw[22:24])
+        (self.has_metadata,) = struct.unpack('>H', raw[24:26])
+        (self.footnote_count,) = struct.unpack('>H', raw[28:30])
+        (self.sidebar_count,) = struct.unpack('>H', raw[30:32])
+        (self.chapter_offset,) = struct.unpack('>H', raw[32:34])
+        (self.small_font_page_offset,) = struct.unpack('>H', raw[36:38])
+        (self.large_font_page_offset,) = struct.unpack('>H', raw[38:40])
+        (self.image_data_offset,) = struct.unpack('>H', raw[40:42])
+        (self.link_offset,) = struct.unpack('>H', raw[42:44])
+        (self.metadata_offset,) = struct.unpack('>H', raw[44:46])
+        (self.footnote_offset,) = struct.unpack('>H', raw[48:50])
+        (self.sidebar_offset,) = struct.unpack('>H', raw[50:52])
+        (self.last_data_offset,) = struct.unpack('>H', raw[52:54])
 
         self.num_text_pages = self.non_text_offset - 1
         self.num_image_pages = self.metadata_offset - self.image_data_offset
 
 
 class Reader132(FormatReader):
-
-    def __init__(self, header, stream, log, options):
+    def __init__(self, header: PdbHeaderReader, stream: IO[bytes], log: Log, options: Values) -> None:
         self.log = log
         self.encoding = options.input_encoding
 
@@ -62,54 +74,55 @@ class Reader132(FormatReader):
             if self.header_record.compression in (260, 272):
                 raise DRMError('eReader DRM is not supported.')
             else:
-                raise EreaderError('Unknown book compression %i.' % self.header_record.compression)
+                raise EreaderError(f'Unknown book compression {self.header_record.compression}.')
 
         from ebook_convert.ebooks.metadata.pdb import get_metadata
+
         self.mi = get_metadata(stream, False)
 
-    def section_data(self, number):
+    def section_data(self, number: int) -> bytes:
         return self.sections[number]
 
-    def decompress_text(self, number):
+    def decompress_text(self, number: int) -> str:
         if self.header_record.compression == 2:
             from ebook_convert.ebooks.compression.palmdoc import decompress_doc
+
             return decompress_doc(self.section_data(number)).decode('cp1252' if self.encoding is None else self.encoding, 'replace')
         if self.header_record.compression == 10:
             return zlib.decompress(self.section_data(number)).decode('cp1252' if self.encoding is None else self.encoding, 'replace')
+        # Unreachable: __init__ rejects any other compression value
+        raise EreaderError(f'Unknown book compression {self.header_record.compression}.')
 
-    def get_image(self, number):
+    def get_image(self, number: int) -> tuple[str, bytes]:
         if number < self.header_record.image_data_offset or number > self.header_record.image_data_offset + self.header_record.num_image_pages - 1:
             return 'empty', b''
         data = self.section_data(number)
-        name = data[4:4 + 32].strip(b'\x00').decode(self.encoding or 'cp1252')
+        name = data[4 : 4 + 32].strip(b'\x00').decode(self.encoding or 'cp1252')
         img = data[62:]
         return name, img
 
-    def image_dest(self, name, base):
-        # Calibre b6da1c3878: image names come from the file, keep them
-        # inside the images directory
-        base = os.path.abspath(base)
+    def image_dest(self, name: str, cwd: str) -> str:
+        base = os.path.abspath(cwd)
         if not base.endswith(os.sep):
             base += os.sep
         ans = os.path.abspath(os.path.join(base, name))
-        if os.path.commonprefix([ans, base]) != base:
+        if not ans.startswith(base):
             ans = ''
         return ans
 
-    def get_text_page(self, number):
-        '''
+    def get_text_page(self, number: int) -> str:
+        """
         Only palmdoc and zlib compressed are supported. The text is
         assumed to be encoded as Windows-1252. The encoding is part of
         the eReader file spec and should always be this encoding.
-        '''
+        """
         if not (1 <= number <= self.header_record.num_text_pages):
             return ''
 
         return self.decompress_text(number)
 
-    def extract_content(self, output_dir):
-        from ebook_convert.ebooks.pml.pmlconverter import footnote_to_html, sidebar_to_html
-        from ebook_convert.ebooks.pml.pmlconverter import PML_HTMLizer
+    def extract_content(self, output_dir: str) -> str:
+        from ebook_convert.ebooks.pml.pmlconverter import PML_HTMLizer, footnote_to_html, sidebar_to_html
 
         output_dir = os.path.abspath(output_dir)
 
@@ -119,22 +132,29 @@ class Reader132(FormatReader):
         title = self.mi.title
         if not isinstance(title, str):
             title = title.decode('utf-8', 'replace')
-        html = '<html><head><title>%s</title></head><body>' % title
+        html = f'<html><head><title>{title}</title></head><body>'
 
         pml = ''
         for i in range(1, self.header_record.num_text_pages + 1):
-            self.log.debug('Extracting text page %i', i)
+            self.log.debug(f'Extracting text page {i}')
             pml += self.get_text_page(i)
         hizer = PML_HTMLizer()
         html += hizer.parse_pml(pml, 'index.html')
         toc = hizer.get_toc()
 
         if self.header_record.footnote_count > 0:
-            html += '<br /><h1>%s</h1>' % 'Footnotes'
+            html += '<br /><h1>{}</h1>'.format(_('Footnotes'))
             footnoteids = re.findall(
-                '\\w+(?=\x00)', self.section_data(self.header_record.footnote_offset).decode('cp1252' if self.encoding is None else self.encoding))
-            for fid, i in enumerate(range(self.header_record.footnote_offset + 1, self.header_record.footnote_offset + self.header_record.footnote_count)):
-                self.log.debug('Extracting footnote page %i', i)
+                r'\w+(?=\x00)',
+                self.section_data(self.header_record.footnote_offset).decode('cp1252' if self.encoding is None else self.encoding),
+            )
+            for fid, i in enumerate(
+                range(
+                    self.header_record.footnote_offset + 1,
+                    self.header_record.footnote_offset + self.header_record.footnote_count,
+                )
+            ):
+                self.log.debug(f'Extracting footnote page {i}')
                 if fid < len(footnoteids):
                     fid = footnoteids[fid]
                 else:
@@ -142,11 +162,18 @@ class Reader132(FormatReader):
                 html += footnote_to_html(fid, self.decompress_text(i))
 
         if self.header_record.sidebar_count > 0:
-            html += '<br /><h1>%s</h1>' % 'Sidebar'
+            html += '<br /><h1>{}</h1>'.format(_('Sidebar'))
             sidebarids = re.findall(
-                '\\w+(?=\x00)', self.section_data(self.header_record.sidebar_offset).decode('cp1252' if self.encoding is None else self.encoding))
-            for sid, i in enumerate(range(self.header_record.sidebar_offset + 1, self.header_record.sidebar_offset + self.header_record.sidebar_count)):
-                self.log.debug('Extracting sidebar page %i', i)
+                r'\w+(?=\x00)',
+                self.section_data(self.header_record.sidebar_offset).decode('cp1252' if self.encoding is None else self.encoding),
+            )
+            for sid, i in enumerate(
+                range(
+                    self.header_record.sidebar_offset + 1,
+                    self.header_record.sidebar_offset + self.header_record.sidebar_count,
+                )
+            ):
+                self.log.debug(f'Extracting sidebar page {i}')
                 if sid < len(sidebarids):
                     sid = sidebarids[sid]
                 else:
@@ -155,7 +182,7 @@ class Reader132(FormatReader):
 
         html += '</body></html>'
 
-        with directory.CurrentDir(output_dir):
+        with CurrentDir(output_dir):
             with open('index.html', 'wb') as index:
                 self.log.debug('Writing text to index.html')
                 index.write(html.encode('utf-8'))
@@ -163,23 +190,22 @@ class Reader132(FormatReader):
         if not os.path.exists(os.path.join(output_dir, 'images/')):
             os.makedirs(os.path.join(output_dir, 'images/'))
         images = []
-        images_dir = os.path.join(output_dir, 'images')
-        with directory.CurrentDir(images_dir):
-            for i in range(0, self.header_record.num_image_pages):
+        images_dir = os.path.abspath(os.path.join(output_dir, 'images/'))
+        with CurrentDir(images_dir):
+            for i in range(self.header_record.num_image_pages):
                 name, img = self.get_image(self.header_record.image_data_offset + i)
-                dest = self.image_dest(name, images_dir)
-                if dest:
+                if dest := self.image_dest(name, images_dir):
                     images.append(name)
                     with open(dest, 'wb') as imgf:
-                        self.log.debug('Writing image %s to images/', name)
+                        self.log.debug(f'Writing image {name} to images/')
                         imgf.write(img)
 
         opf_path = self.create_opf(output_dir, images, toc)
 
         return opf_path
 
-    def create_opf(self, output_dir, images, toc):
-        with directory.CurrentDir(output_dir):
+    def create_opf(self, output_dir: str, images: list[str], toc: TOC) -> str:
+        with CurrentDir(output_dir):
             if 'cover.png' in images:
                 self.mi.cover = os.path.join('images', 'cover.png')
 
@@ -199,11 +225,11 @@ class Reader132(FormatReader):
 
         return os.path.join(output_dir, 'metadata.opf')
 
-    def dump_pml(self):
-        '''
+    def dump_pml(self) -> str:
+        """
         This is primarily used for debugging and 3rd party tools to
         get the plm markup that comprises the text in the file.
-        '''
+        """
         pml = ''
 
         for i in range(1, self.header_record.num_text_pages + 1):
@@ -211,18 +237,18 @@ class Reader132(FormatReader):
 
         return pml
 
-    def dump_images(self, output_dir):
-        '''
+    def dump_images(self, output_dir: str) -> None:
+        """
         This is primarily used for debugging and 3rd party tools to
         get the images in the file.
-        '''
+        """
         if not os.path.exists(output_dir):
             os.makedirs(output_dir)
 
-        with directory.CurrentDir(output_dir):
-            for i in range(0, self.header_record.num_image_pages):
+        output_dir = os.path.abspath(output_dir)
+        with CurrentDir(output_dir):
+            for i in range(self.header_record.num_image_pages):
                 name, img = self.get_image(self.header_record.image_data_offset + i)
-                dest = self.image_dest(name, output_dir)
-                if dest:
+                if dest := self.image_dest(name, output_dir):
                     with open(dest, 'wb') as imgf:
                         imgf.write(img)

@@ -1,3 +1,4 @@
+# coding: utf8
 """
     tinycss.decoding
     ----------------
@@ -8,11 +9,13 @@
     :copyright: (c) 2012 by Simon Sapin.
     :license: BSD, see LICENSE for more details.
 """
+
+
+from __future__ import annotations
 import operator
 import re
 
-from ebook_convert import polyglot
-
+from ebook_convert.polyglot.binary import from_hex_bytes
 
 __all__ = ['decode']  # Everything else is implementation detail
 
@@ -94,11 +97,10 @@ def try_encoding(css_bytes, encoding, fallback=True):
 
 
 def hex2re(hex_data):
-    return re.escape(polyglot.from_hex_bytes(hex_data.replace(' ', '')
-                                             .encode('ascii')))
+    return re.escape(from_hex_bytes(hex_data.replace(' ', '').encode('ascii')))
 
 
-class Slicer(object):
+class Slicer:
     """Slice()[start:stop:end] == slice(start, stop, end)"""
     def __getitem__(self, slice_):
         return operator.itemgetter(slice_)

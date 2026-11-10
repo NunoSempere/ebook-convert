@@ -1,13 +1,23 @@
+#!/usr/bin/env python
+# License: GPLv3 Copyright: 2013, Kovid Goyal <kovid at kovidgoyal.net>
+
+from __future__ import annotations
 import os
+from typing import TYPE_CHECKING, cast
 
+if TYPE_CHECKING:
+    from collections.abc import Iterable
 
-__license__ = 'GPL v3'
-__copyright__ = '2013, Kovid Goyal <kovid at kovidgoyal.net>'
+    from lxml.html import HtmlElement
+
+    from ebook_convert.ebooks.docx.names import XPathFunc
+    from ebook_convert.ebooks.docx.styles import Styles
+    from ebook_convert.utils.logging import Log
 
 NBSP = '\xa0'
 
 
-def mergeable(previous, current):
+def mergeable(previous: HtmlElement, current: HtmlElement) -> bool:
     if previous.tail or current.tail:
         return False
     if previous.get('class', None) != current.get('class', None):
@@ -23,44 +33,47 @@ def mergeable(previous, current):
         return False
 
 
-def append_text(parent, text):
+def append_text(parent: HtmlElement, text: str) -> None:
     if len(parent) > 0:
         parent[-1].tail = (parent[-1].tail or '') + text
     else:
         parent.text = (parent.text or '') + text
 
 
-def merge(parent, span):
+def merge(parent: HtmlElement, span: HtmlElement) -> None:
     if span.text:
         append_text(parent, span.text)
     for child in span:
         parent.append(child)
     if span.tail:
         append_text(parent, span.tail)
-    span.getparent().remove(span)
+    span_parent = span.getparent()
+    assert span_parent is not None  # spans are always inside the body
+    span_parent.remove(span)
 
 
-def merge_run(run):
+def merge_run(run: list[HtmlElement]) -> None:
     parent = run[0]
     for span in run[1:]:
         merge(parent, span)
 
 
-def liftable(css):
+def liftable(css: Iterable[str]) -> bool:
     # A <span> is liftable if all its styling would work just as well if it is
     # specified on the parent element.
     prefixes = {x.partition('-')[0] for x in css}
     return not (prefixes - {'text', 'font', 'letter', 'color', 'background'})
 
 
-def add_text(elem, attr, text):
+def add_text(elem: HtmlElement, attr: str, text: str) -> None:
     old = getattr(elem, attr) or ''
     setattr(elem, attr, old + text)
 
 
-def lift(span):
+def lift(span: HtmlElement) -> None:
     # Replace an element by its content (text, children and tail)
     parent = span.getparent()
+    assert parent is not None  # spans are always inside the body
     idx = parent.index(span)
     try:
         last_child = span[-1]
@@ -87,20 +100,18 @@ def lift(span):
             add_text(last_child, 'tail', span.tail)
 
 
-def before_count(root, tag, limit=10):
+def before_count(root: HtmlElement, tag: HtmlElement, limit: int = 10) -> int | None:
     body = root.xpath('//body[1]')
     if not body:
         return limit
-    ans = 0
-    for elem in body[0].iterdescendants():
+    for ans, elem in enumerate(body[0].iterdescendants()):
         if elem is tag:
             return ans
-        ans += 1
-        if ans > limit:
+        if ans >= limit:
             return limit
 
 
-def wrap_contents(tag_name, elem):
+def wrap_contents(tag_name: str, elem: HtmlElement) -> None:
     wrapper = elem.makeelement(tag_name)
     wrapper.text, elem.text = elem.text, ''
     for child in elem:
@@ -109,25 +120,21 @@ def wrap_contents(tag_name, elem):
     elem.append(wrapper)
 
 
-def cleanup_markup(log, root, styles, dest_dir, detect_cover, XPath, uuid):
+def cleanup_markup(log: Log, root: HtmlElement, styles: Styles, dest_dir: str, detect_cover: bool, XPath: XPathFunc, uuid: str) -> str | None:
     # Apply vertical-align
     for span in root.xpath('//span[@data-docx-vert]'):
         wrap_contents(span.attrib.pop('data-docx-vert'), span)
 
-    # Keep adjacent footnote references apart with a non-breaking space
-    for span in root.xpath('//*[@data-noteref-container="%s"]' % uuid):
+    for span in root.xpath(f'//*[@data-noteref-container="{uuid}"]'):
         span.attrib.pop('data-noteref-container')
         parent = span.getparent()
         idx = parent.index(span)
-        if idx + 1 < len(parent):
-            ns = parent[idx + 1]
-            if (len(ns) and hasattr(ns, 'get') and
-                    ns.get('data-noteref-container')):
-                if len(span) and not span[-1].tail:
-                    span[-1].tail = NBSP
+        if idx + 1 < len(parent) and len(ns := parent[idx + 1]) and hasattr(ns, 'get') and ns.get('data-noteref-container'):
+            if len(span) and not span[-1].tail:
+                span[-1].tail = '\xa0'
 
     # Move <hr>s outside paragraphs, if possible.
-    pancestor = XPath('|'.join('ancestor::%s[1]' % x for x in ('p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6')))
+    pancestor = XPath('|'.join(f'ancestor::{x}[1]' for x in ('p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6')))
     for hr in root.xpath('//span/hr'):
         p = pancestor(hr)
         if p:
@@ -136,11 +143,11 @@ def cleanup_markup(log, root, styles, dest_dir, detect_cover, XPath, uuid):
             if descendants[-1] is hr:
                 parent = p.getparent()
                 idx = parent.index(p)
-                parent.insert(idx+1, hr)
+                parent.insert(idx + 1, hr)
                 hr.tail = '\n\t'
 
     # Merge consecutive spans that have the same styling
-    current_run = []
+    current_run: list[HtmlElement] = []
     for span in root.xpath('//span'):
         if not current_run:
             current_run.append(span)
@@ -155,8 +162,8 @@ def cleanup_markup(log, root, styles, dest_dir, detect_cover, XPath, uuid):
 
     # Process dir attributes
     class_map = dict(styles.classes.values())
-    parents = ('p', 'div') + tuple('h%d' % i for i in range(1, 7))
-    for parent in root.xpath('//*[(%s)]' % ' or '.join('name()="%s"' % t for t in parents)):
+    parents = ('p', 'div') + tuple(f'h{i}' for i in range(1, 7))
+    for parent in root.xpath('//*[({})]'.format(' or '.join(f'name()="{t}"' for t in parents))):
         # Ensure that children of rtl parents that are not rtl have an
         # explicit dir set. Also, remove dir from children if it is the same as
         # that of the parent.
@@ -172,7 +179,7 @@ def cleanup_markup(log, root, styles, dest_dir, detect_cover, XPath, uuid):
 
     # Remove unnecessary span tags that are the only child of a parent block
     # element
-    for parent in root.xpath('//*[(%s) and count(span)=1]' % ' or '.join('name()="%s"' % t for t in parents)):
+    for parent in root.xpath('//*[({}) and count(span)=1]'.format(' or '.join(f'name()="{t}"' for t in parents))):
         if len(parent) == 1 and not parent.text and not parent[0].tail and not parent[0].get('id', None):
             # We have a block whose contents are entirely enclosed in a <span>
             span = parent[0]
@@ -197,10 +204,10 @@ def cleanup_markup(log, root, styles, dest_dir, detect_cover, XPath, uuid):
     for span in root.xpath('//span[@class and not(@style)]'):
         css = class_map.get(span.get('class', None), {})
         if len(css) == 1:
-            if css == {'font-style':'italic'}:
+            if css == {'font-style': 'italic'}:
                 span.tag = 'i'
                 del span.attrib['class']
-            elif css == {'font-weight':'bold'}:
+            elif css == {'font-weight': 'bold'}:
                 span.tag = 'b'
                 del span.attrib['class']
 
@@ -225,16 +232,18 @@ def cleanup_markup(log, root, styles, dest_dir, detect_cover, XPath, uuid):
         if img:
             img = img[0]
             path = os.path.join(dest_dir, img.get('src'))
-            if os.path.exists(path) and before_count(root, img, limit=10) < 5:
+            # img is inside body so before_count() returns an int
+            if os.path.exists(path) and cast('int', before_count(root, img, limit=10)) < 5:
                 from ebook_convert.utils.imghdr import identify
+
                 try:
                     with open(path, 'rb') as imf:
                         fmt, width, height = identify(imf)
-                except:
-                    width, height, fmt = 0, 0, None  # noqa
+                except Exception:
+                    width, height, fmt = 0, 0, None
                 del fmt
                 try:
-                    is_cover = 0.8 <= height/width <= 1.8 and height*width >= 160000
+                    is_cover = 0.8 <= height / width <= 1.8 and height * width >= 160000
                 except ZeroDivisionError:
                     is_cover = False
                 if is_cover:

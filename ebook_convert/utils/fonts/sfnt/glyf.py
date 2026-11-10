@@ -1,49 +1,50 @@
-from struct import unpack_from
+#!/usr/bin/env python
+# License: GPLv3 Copyright: 2012, Kovid Goyal <kovid at kovidgoyal.net>
+
+from __future__ import annotations
 from collections import OrderedDict
+from struct import unpack_from
+from typing import TYPE_CHECKING, Literal, overload
 
 from ebook_convert.utils.fonts.sfnt import UnknownTable
 
+if TYPE_CHECKING:
+    from collections.abc import Callable, Mapping
 
-__license__ = 'GPL v3'
-__copyright__ = '2012, Kovid Goyal <kovid at kovidgoyal.net>'
-__docformat__ = 'restructuredtext en'
-
-ARG_1_AND_2_ARE_WORDS      = 0x0001  # if set args are words otherwise they are bytes
-ARGS_ARE_XY_VALUES         = 0x0002  # if set args are xy values, otherwise they are points
-ROUND_XY_TO_GRID           = 0x0004  # for the xy values if above is true
-WE_HAVE_A_SCALE            = 0x0008  # Sx = Sy, otherwise scale == 1.0
-NON_OVERLAPPING            = 0x0010  # set to same value for all components (obsolete!)
-MORE_COMPONENTS            = 0x0020  # indicates at least one more glyph after this one
-WE_HAVE_AN_X_AND_Y_SCALE   = 0x0040  # Sx, Sy
-WE_HAVE_A_TWO_BY_TWO       = 0x0080  # t00, t01, t10, t11
-WE_HAVE_INSTRUCTIONS       = 0x0100  # instructions follow
-USE_MY_METRICS             = 0x0200  # apply these metrics to parent glyph
-OVERLAP_COMPOUND           = 0x0400  # used by Apple in GX fonts
-SCALED_COMPONENT_OFFSET    = 0x0800  # composite designed to have the component offset scaled (designed for Apple)
-UNSCALED_COMPONENT_OFFSET  = 0x1000  # composite designed not to have the component offset scaled (designed for MS)
+ARG_1_AND_2_ARE_WORDS = 0x0001  # if set args are words otherwise they are bytes
+ARGS_ARE_XY_VALUES = 0x0002  # if set args are xy values, otherwise they are points
+ROUND_XY_TO_GRID = 0x0004  # for the xy values if above is true
+WE_HAVE_A_SCALE = 0x0008  # Sx = Sy, otherwise scale == 1.0
+NON_OVERLAPPING = 0x0010  # set to same value for all components (obsolete!)
+MORE_COMPONENTS = 0x0020  # indicates at least one more glyph after this one
+WE_HAVE_AN_X_AND_Y_SCALE = 0x0040  # Sx, Sy
+WE_HAVE_A_TWO_BY_TWO = 0x0080  # t00, t01, t10, t11
+WE_HAVE_INSTRUCTIONS = 0x0100  # instructions follow
+USE_MY_METRICS = 0x0200  # apply these metrics to parent glyph
+OVERLAP_COMPOUND = 0x0400  # used by Apple in GX fonts
+SCALED_COMPONENT_OFFSET = 0x0800  # composite designed to have the component offset scaled (designed for Apple)
+UNSCALED_COMPONENT_OFFSET = 0x1000  # composite designed not to have the component offset scaled (designed for MS)
 
 
-class SimpleGlyph(object):
-
-    def __init__(self, num_of_countours, raw):
+class SimpleGlyph:
+    def __init__(self, num_of_countours: int, raw: bytes) -> None:
         self.num_of_countours = num_of_countours
         self.raw = raw
         # The list of glyph indices referred to by this glyph, will always be
         # empty for a simple glyph and not empty for a composite glyph
-        self.glyph_indices = []
+        self.glyph_indices: list[int] = []
         self.is_composite = False
 
-    def __len__(self):
+    def __len__(self) -> int:
         return len(self.raw)
 
-    def __call__(self):
+    def __call__(self) -> bytes:
         return self.raw
 
 
 class CompositeGlyph(SimpleGlyph):
-
-    def __init__(self, num_of_countours, raw):
-        super(CompositeGlyph, self).__init__(num_of_countours, raw)
+    def __init__(self, num_of_countours: int, raw: bytes) -> None:
+        super().__init__(num_of_countours, raw)
         self.is_composite = True
 
         flags = MORE_COMPONENTS
@@ -65,9 +66,14 @@ class CompositeGlyph(SimpleGlyph):
 
 
 class GlyfTable(UnknownTable):
-
-    def glyph_data(self, offset, length, as_raw=False):
-        raw = self.raw[offset:offset+length]
+    @overload
+    def glyph_data(self, offset: int, length: int, as_raw: Literal[False] = False) -> SimpleGlyph: ...
+    @overload
+    def glyph_data(self, offset: int, length: int, as_raw: Literal[True]) -> bytes: ...
+    @overload
+    def glyph_data(self, offset: int, length: int, as_raw: bool) -> SimpleGlyph | bytes: ...
+    def glyph_data(self, offset: int, length: int, as_raw: bool = False) -> SimpleGlyph | bytes:
+        raw = self.raw[offset : offset + length]
         if as_raw:
             return raw
         num_of_countours = unpack_from(b'>h', raw)[0] if raw else 0
@@ -75,7 +81,7 @@ class GlyfTable(UnknownTable):
             return SimpleGlyph(num_of_countours, raw)
         return CompositeGlyph(num_of_countours, raw)
 
-    def update(self, sorted_glyph_map):
+    def update(self, sorted_glyph_map: Mapping[int, Callable[[], bytes]]) -> OrderedDict[int, tuple[int, int]]:
         ans = OrderedDict()
         offset = 0
         block = []

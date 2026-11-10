@@ -1,50 +1,84 @@
+#!/usr/bin/env python
+# License: GPLv3 Copyright: 2012, Kovid Goyal <kovid at kovidgoyal.net>
+
 """
 Try to read invalid zip files with missing or damaged central directories.
 These are apparently produced in large numbers by the fruitcakes over at B&N.
 
 Tries to only use the local headers to extract data from the damaged zip file.
 """
-import os, sys, zlib, shutil
-from struct import calcsize, unpack, pack
-from collections import namedtuple, OrderedDict
-from tempfile import SpooledTemporaryFile
 
+from __future__ import annotations
+import os
+import shutil
+import sys
+from collections import OrderedDict
+import zlib
+from struct import calcsize, pack, unpack
+from typing import IO, NamedTuple
 
-HEADER_SIG = 0x04034b50
+from ebook_convert.ptempfile import SpooledTemporaryFile
+from ebook_convert.utils import StreamOrPath
+
+HEADER_SIG = 0x04034B50
 HEADER_BYTE_SIG = pack(b'<L', HEADER_SIG)
 local_header_fmt = b'<L5HL2L2H'
 local_header_sz = calcsize(local_header_fmt)
 ZIP_STORED, ZIP_DEFLATED = 0, 8
-DATA_DESCRIPTOR_SIG = pack(b'<L', 0x08074b50)
-
-LocalHeader = namedtuple('LocalHeader',
-        'signature min_version flags compression_method mod_time mod_date '
-        'crc32 compressed_size uncompressed_size filename_length extra_length '
-        'filename extra')
+DATA_DESCRIPTOR_SIG = pack(b'<L', 0x08074B50)
 
 
-def is_reserved_filename(x):
-    return False
+class NoSuchFile(KeyError, ValueError):
+    # Subclass KeyError for compatibility with ZipFile and ValueError for
+    # backwards compatibility with existing code
+    def __str__(self) -> str:
+        return str(self.args[0]) if self.args else ''
 
 
-def decode_arcname(name):
+class LocalHeader(NamedTuple):
+    signature: int
+    min_version: int
+    flags: int
+    compression_method: int
+    mod_time: int
+    mod_date: int
+    crc32: int
+    compressed_size: int
+    uncompressed_size: int
+    filename_length: int
+    extra_length: int
+    filename: str | None
+    extra: bytes | None
+
+
+if hasattr(sys, 'getwindowsversion'):
+    from ebook_convert.utils.filenames import is_windows_reserved_filename as is_reserved_filename
+
+else:
+
+    def is_reserved_filename(x: str) -> bool:
+        return False
+
+
+def decode_arcname(name: str | bytes) -> str:
     if isinstance(name, bytes):
         from ebook_convert.ebooks.chardet import detect
+
         try:
             name = name.decode('utf-8')
-        except:
+        except Exception:
             res = detect(name)
             encoding = res['encoding']
             try:
                 name = name.decode(encoding)
-            except:
+            except Exception:
                 name = name.decode('utf-8', 'replace')
     return name
 
 
-def find_local_header(f):
+def find_local_header(f: IO[bytes]) -> LocalHeader | None:
     pos = f.tell()
-    raw = f.read(50*1024)
+    raw = f.read(50 * 1024)
     try:
         f.seek(pos + raw.index(HEADER_BYTE_SIG))
     except ValueError:
@@ -54,41 +88,44 @@ def find_local_header(f):
     if len(raw) != local_header_sz:
         f.seek(pos)
         return
-    header = LocalHeader(*(unpack(local_header_fmt, raw) + (None, None)))
+    header = LocalHeader(*(unpack(local_header_fmt, raw)), filename=None, extra=None)
     if header.signature == HEADER_SIG:
         return header
     f.seek(pos)
 
 
-def find_data_descriptor(f):
+class DataDescriptor(NamedTuple):
+    crc32: int
+    compressed_size: int
+    uncompressed_size: int
+
+
+def find_data_descriptor(f: IO[bytes]) -> DataDescriptor:
     pos = f.tell()
-    DD = namedtuple('DataDescriptor', 'crc32 compressed_size uncompressed_size')
-    raw = b'a'*16
+    raw = b'a' * 16
     try:
         while len(raw) >= 16:
-            raw = f.read(50*1024)
+            raw = f.read(50 * 1024)
             idx = raw.find(DATA_DESCRIPTOR_SIG)
             if idx != -1:
                 f.seek(f.tell() - len(raw) + idx + len(DATA_DESCRIPTOR_SIG))
-                return DD(*unpack(b'<LLL', f.read(12)))
+                return DataDescriptor(*unpack(b'<LLL', f.read(12)))
             # Rewind to handle the case of the signature being cut off
             # by the 50K boundary
-            f.seek(f.tell()-len(DATA_DESCRIPTOR_SIG))
+            f.seek(f.tell() - len(DATA_DESCRIPTOR_SIG))
 
-        raise ValueError('Failed to find data descriptor signature. '
-                         'Data descriptors without signatures are not '
-                         'supported.')
+        raise ValueError('Failed to find data descriptor signature. Data descriptors without signatures are not supported.')
     finally:
         f.seek(pos)
 
 
-def read_local_file_header(f):
+def read_local_file_header(f: IO[bytes]) -> LocalHeader | None:
     pos = f.tell()
     raw = f.read(local_header_sz)
     if len(raw) != local_header_sz:
         f.seek(pos)
         return
-    header = LocalHeader(*(unpack(local_header_fmt, raw) + (None, None)))
+    header = LocalHeader(*(unpack(local_header_fmt, raw)), filename=None, extra=None)
     if header.signature != HEADER_SIG:
         f.seek(pos)
         header = find_local_header(f)
@@ -124,51 +161,46 @@ def read_local_file_header(f):
             return
     if has_data_descriptors:
         desc = find_data_descriptor(f)
-        header = header._replace(crc32=desc.crc32,
-                                 compressed_size=desc.compressed_size,
-                                 uncompressed_size=desc.uncompressed_size)
-    return LocalHeader(*(
-        header[:-2] + (fname, extra)
-        ))
+        header = header._replace(crc32=desc.crc32, compressed_size=desc.compressed_size, uncompressed_size=desc.uncompressed_size)
+    return LocalHeader(*(header[:-2] + (fname, extra)))
 
 
-def read_compressed_data(f, header):
+def read_compressed_data(f: IO[bytes], header: LocalHeader) -> bytes:
     cdata = f.read(header.compressed_size)
     return cdata
 
 
-def copy_stored_file(src, size, dest):
+def copy_stored_file(src: IO[bytes], size: int, dest: IO[bytes]) -> None:
     read = 0
-    amt = min(size, 20*1024)
+    amt = min(size, 20 * 1024)
     while read < size:
-        raw = src.read(min(size-read, amt))
+        raw = src.read(min(size - read, amt))
         if not raw:
             raise ValueError('Premature end of file')
         dest.write(raw)
         read += len(raw)
 
 
-def copy_compressed_file(src, size, dest):
+def copy_compressed_file(src: IO[bytes], size: int, dest: IO[bytes]) -> None:
     d = zlib.decompressobj(-15)
     read = 0
-    amt = min(size, 20*1024)
+    amt = min(size, 20 * 1024)
     while read < size:
-        raw = src.read(min(size-read, amt))
+        raw = src.read(min(size - read, amt))
         if not raw and read < size:
             raise ValueError('Invalid ZIP file, local header is damaged')
         read += len(raw)
-        dest.write(d.decompress(raw, 200*1024))
+        dest.write(d.decompress(raw, 200 * 1024))
         count = 0
         while d.unconsumed_tail:
             count += 1
-            dest.write(d.decompress(d.unconsumed_tail, 200*1024))
+            dest.write(d.decompress(d.unconsumed_tail, 200 * 1024))
 
             if count > 100:
-                raise ValueError('This ZIP file contains a ZIP bomb in %s'%
-                        os.path.basename(dest.name))
+                raise ValueError(f'This ZIP file contains a ZIP bomb in {os.path.basename(dest.name)}')
 
 
-def _extractall(f, path=None, file_info=None):
+def _extractall(f: IO[bytes], path: str | None = None, file_info: dict[str | None, tuple[int, LocalHeader]] | None = None) -> None:
     found = False
     while True:
         header = read_local_file_header(f)
@@ -179,14 +211,16 @@ def _extractall(f, path=None, file_info=None):
         found = True
         # Sanitize path changing absolute to relative paths and removing .. and
         # .
-        fname = header.filename.replace(os.sep, '/')
+        fname = (header.filename or '').replace(os.sep, '/')
         fname = os.path.splitdrive(fname)[1]
-        parts = [x for x in fname.split('/') if x not in {'', os.path.pardir, os.path.curdir}]
+        parts = tuple(x for x in fname.split('/') if x not in {'', os.path.pardir, os.path.curdir})
         if not parts:
+            # Skip over the data for this entry
+            f.seek(f.tell() + seekval)
             continue
         if header.uncompressed_size == 0:
             # Directory
-            f.seek(f.tell()+seekval)
+            f.seek(f.tell() + seekval)
             if path is not None:
                 bdir = os.path.join(path, *parts)
                 if not os.path.exists(bdir):
@@ -202,11 +236,10 @@ def _extractall(f, path=None, file_info=None):
                 os.makedirs(bdir)
             dest = os.path.join(path, *parts)
             try:
-                df = open(dest, 'wb')
-            except EnvironmentError:
+                df = open(dest, 'wb')  # ruff: ignore[open-file-with-context-handler]
+            except OSError:
                 if is_reserved_filename(os.path.basename(dest)):
-                    raise ValueError('This ZIP file contains a file with a reserved filename'
-                            ' that cannot be processed on Windows: {}'.format(os.path.basename(dest)))
+                    raise ValueError(f'This ZIP file contains a file with a reserved filename that cannot be processed on Windows: {os.path.basename(dest)}')
                 raise
             with df:
                 if header.compression_method == ZIP_STORED:
@@ -214,43 +247,36 @@ def _extractall(f, path=None, file_info=None):
                 else:
                     copy_compressed_file(f, header.compressed_size, df)
         else:
-            f.seek(f.tell()+seekval)
+            f.seek(f.tell() + seekval)
 
     if not found:
         raise ValueError('Not a ZIP file')
 
 
-def extractall(path_or_stream, path=None):
-    f = path_or_stream
-    close_at_end = False
-    if not hasattr(f, 'read'):
-        f = open(f, 'rb')
-        close_at_end = True
-    if path is None:
-        path = os.getcwd()
-    pos = f.tell()
-    try:
-        _extractall(f, path)
-    finally:
-        f.seek(pos)
-        if close_at_end:
-            f.close()
+def extractall(path_or_stream: str | bytes | IO[bytes], path: str | None = None) -> None:
+    with StreamOrPath(path_or_stream, 'rb') as f:
+        if path is None:
+            path = os.getcwd()
+        pos = f.tell()
+        try:
+            _extractall(f, path)
+        finally:
+            f.seek(pos)
 
 
-class LocalZipFile(object):
-
-    def __init__(self, stream):
-        self.file_info = OrderedDict()
+class LocalZipFile:
+    def __init__(self, stream: IO[bytes]) -> None:
+        self.file_info: OrderedDict[str | None, tuple[int, LocalHeader]] = OrderedDict()
         _extractall(stream, file_info=self.file_info)
         self.stream = stream
 
-    def _get_file_info(self, name):
+    def _get_file_info(self, name: str | None) -> tuple[int, LocalHeader]:
         fi = self.file_info.get(name)
         if fi is None:
-            raise ValueError('This ZIP container has no file named: %s'%name)
+            raise NoSuchFile(f'This ZIP container has no file named: {name}')
         return fi
 
-    def open(self, name, spool_size=5*1024*1024):
+    def open(self, name: str | LocalHeader | None, spool_size: int = 5 * 1024 * 1024) -> SpooledTemporaryFile:
         if isinstance(name, LocalHeader):
             name = name.filename
         offset, header = self._get_file_info(name)
@@ -264,36 +290,40 @@ class LocalZipFile(object):
         dest.seek(0)
         return dest
 
-    def getinfo(self, name):
+    def getinfo(self, name: str) -> LocalHeader:
         offset, header = self._get_file_info(name)
         return header
 
-    def read(self, name, spool_size=5*1024*1024):
+    def read(self, name: str | LocalHeader | None, spool_size: int = 5 * 1024 * 1024) -> bytes:
         with self.open(name, spool_size=spool_size) as f:
             return f.read()
 
-    def extractall(self, path=None):
+    def extractall(self, path: str | None = None) -> None:
         self.stream.seek(0)
         _extractall(self.stream, path=(path or os.getcwd()))
 
-    def close(self):
+    def close(self) -> None:
         pass
 
-    def safe_replace(self, name, datastream, extra_replacements={},
-        add_missing=False):
+    def safe_replace(
+        self, name: str, datastream: bytes | IO[bytes], extra_replacements: dict[str, bytes | IO[bytes]] | None = None, add_missing: bool = False
+    ) -> None:
         from ebook_convert.utils.zipfile import ZipFile, ZipInfo
-        replacements = {name:datastream}
+
+        if extra_replacements is None:
+            extra_replacements = {}
+        replacements = {name: datastream}
         replacements.update(extra_replacements)
         names = frozenset(list(replacements.keys()))
         found = set()
 
-        def rbytes(name):
+        def rbytes(name: str) -> bytes:
             r = replacements[name]
             if not isinstance(r, bytes):
                 r = r.read()
             return r
 
-        with SpooledTemporaryFile(max_size=100*1024*1024) as temp:
+        with SpooledTemporaryFile(max_size=100 * 1024 * 1024) as temp:
             ztemp = ZipFile(temp, 'w')
             for offset, header in self.file_info.values():
                 if header.filename in names:
@@ -302,8 +332,7 @@ class LocalZipFile(object):
                     ztemp.writestr(zi, rbytes(header.filename))
                     found.add(header.filename)
                 else:
-                    ztemp.writestr(header.filename, self.read(header.filename,
-                        spool_size=0))
+                    ztemp.writestr(header.filename, self.read(header.filename, spool_size=0))  # ty: ignore[invalid-argument-type]
             if add_missing:
                 for name in names - found:
                     ztemp.writestr(name, rbytes(name))

@@ -1,35 +1,51 @@
-from ebook_convert.customize.conversion import (OutputFormatPlugin,
-        OptionRecommendation)
+#!/usr/bin/env python
+# License: GPLv3 Copyright: 2009, Kovid Goyal <kovid@kovidgoyal.net>
+
+from __future__ import annotations
+from typing import TYPE_CHECKING
+
+from ebook_convert.customize.conversion import InputFormatPlugin, OptionRecommendation, OutputFormatPlugin
+from ebook_convert.utils.localization import _
+
+if TYPE_CHECKING:
+    from optparse import Values
+
+    from ebook_convert.ebooks.mobi.writer2.resources import Resources
+    from ebook_convert.ebooks.mobi.writer8.mobi import KF8Book
+    from ebook_convert.ebooks.oeb.base import Manifest, OEBBook
+    from ebook_convert.ebooks.oeb.stylizer import Stylizer
+    from ebook_convert.utils.logging import Log
 
 
-def remove_html_cover(oeb, log):
+def remove_html_cover(oeb: OEBBook, log: Log) -> None:
     from ebook_convert.ebooks.oeb.base import OEB_DOCS
 
-    if not oeb.metadata.cover \
-        or 'cover' not in oeb.guide:
+    if not oeb.metadata.cover or 'cover' not in oeb.guide:
         return
     href = oeb.guide['cover'].href
     del oeb.guide['cover']
     item = oeb.manifest.hrefs[href]
     if item.spine_position is not None:
-        log.warning('Found an HTML cover: %s', 'removing it. If you find some '
-                    'content missing from the output MOBI, it is because you '
-                    'misidentified the HTML cover in the input document',
-                    item.href)
+        log.warn(
+            'Found an HTML cover: ',
+            item.href,
+            'removing it.',
+            'If you find some content missing from the output MOBI, it is because you misidentified the HTML cover in the input document',
+        )
         oeb.spine.remove(item)
         if item.media_type in OEB_DOCS:
             oeb.manifest.remove(item)
 
 
-def extract_mobi(output_path, opts):
+def extract_mobi(output_path: str, opts: Values) -> None:
     if opts.extract_to is not None:
         from ebook_convert.ebooks.mobi.debug.main import inspect_mobi
+
         ddir = opts.extract_to
         inspect_mobi(output_path, ddir=ddir)
 
 
 class MOBIOutput(OutputFormatPlugin):
-
     name = 'MOBI Output'
     author = 'Kovid Goyal'
     file_type = 'mobi'
@@ -37,70 +53,95 @@ class MOBIOutput(OutputFormatPlugin):
     ui_data = {'file_types': ['old', 'both', 'new']}
 
     options = {
-        OptionRecommendation(name='prefer_author_sort',
-            recommended_value=False, level=OptionRecommendation.LOW,
-            help='When present, use author sort field as author.'
-        ),
-        OptionRecommendation(name='no_inline_toc',
-            recommended_value=False, level=OptionRecommendation.LOW,
-            help='Don\'t add Table of Contents to the book. Useful if '
-                'the book has its own table of contents.'),
-        OptionRecommendation(name='toc_title', recommended_value=None,
-            help='Title for any generated in-line table of contents.'
-        ),
-        OptionRecommendation(name='dont_compress',
-            recommended_value=False, level=OptionRecommendation.LOW,
-            help='Disable compression of the file contents.'
-        ),
-        OptionRecommendation(name='personal_doc', recommended_value='[PDOC]',
-            help='Tag for MOBI files to be marked as personal documents.'
-                   ' This option has no effect on the conversion. It is used'
-                   ' only when sending MOBI files to a device. If the file'
-                   ' being sent has the specified tag, it will be marked as'
-                   ' a personal document when sent to the Kindle.'
-        ),
-        OptionRecommendation(name='mobi_ignore_margins',
+        OptionRecommendation(
+            name='prefer_author_sort',
             recommended_value=False,
-            help='Ignore margins in the input document. If False, then '
+            level=OptionRecommendation.LOW,
+            help=_('When present, use author sort field as author.'),
+        ),
+        OptionRecommendation(
+            name='no_inline_toc',
+            recommended_value=False,
+            level=OptionRecommendation.LOW,
+            help=_("Don't add Table of Contents to the book. Useful if the book has its own table of contents."),
+        ),
+        OptionRecommendation(name='toc_title', recommended_value=None, help=_('Title for any generated inline table of contents.')),
+        OptionRecommendation(
+            name='dont_compress',
+            recommended_value=False,
+            level=OptionRecommendation.LOW,
+            help=_('Disable compression of the file contents.'),
+        ),
+        OptionRecommendation(
+            name='personal_doc',
+            recommended_value='[PDOC]',
+            help=_(
+                'Tag for MOBI files to be marked as personal documents.'
+                ' This option has no effect on the conversion. It is used'
+                ' only when sending MOBI files to a device. If the file'
+                ' being sent has the specified tag, it will be marked as'
+                ' a personal document when sent to the Kindle. Use the value *'
+                ' to match all books.'
+            ),
+        ),
+        OptionRecommendation(
+            name='mobi_ignore_margins',
+            recommended_value=False,
+            help=_(
+                'Ignore margins in the input document. If False, then '
                 'the MOBI output plugin will try to convert margins specified'
                 ' in the input document, otherwise it will ignore them.'
+            ),
         ),
-        OptionRecommendation(name='mobi_toc_at_start',
+        OptionRecommendation(
+            name='mobi_toc_at_start',
             recommended_value=False,
-            help='When adding the Table of Contents to the book, add it at the start of the '
-                'book instead of the end. Not recommended.'
+            help=_('When adding the Table of Contents to the book, add it at the start of the book instead of the end. Not recommended.'),
         ),
-        OptionRecommendation(name='extract_to',
-            help='Extract the contents of the generated %s file to the '
-                'specified directory. The contents of the directory are first '
-                'deleted, so be careful.' % 'MOBI'
+        OptionRecommendation(
+            name='extract_to',
+            help=_('Extract the contents of the generated %s file to the specified folder. The contents of the folder are first deleted, so be careful.')
+            % 'MOBI',
         ),
-        OptionRecommendation(name='share_not_sync', recommended_value=False,
-            help='Enable sharing of book content via Facebook etc. '
+        OptionRecommendation(
+            name='share_not_sync',
+            recommended_value=False,
+            help=_(
+                'Enable sharing of book content via Facebook etc. '
                 ' on the Kindle. WARNING: Using this feature means that '
                 ' the book will not auto sync its last read position '
                 ' on multiple devices. Complain to Amazon.'
+            ),
         ),
-        OptionRecommendation(name='mobi_keep_original_images',
+        OptionRecommendation(
+            name='mobi_keep_original_images',
             recommended_value=False,
-            help='By default calibre converts all images to JPEG format '
+            help=_(
+                'By default calibre converts all images to JPEG format '
                 'in the output MOBI file. This is for maximum compatibility '
                 'as some older MOBI viewers have problems with other image '
                 'formats. This option tells calibre not to do this. '
                 'Useful if your document contains lots of GIF/PNG images that '
-                'become very large when converted to JPEG.'),
-        OptionRecommendation(name='mobi_file_type', choices=ui_data['file_types'], recommended_value='old',
-            help='By default calibre generates MOBI files that contain the '
+                'become very large when converted to JPEG.'
+            ),
+        ),
+        OptionRecommendation(
+            name='mobi_file_type',
+            choices=ui_data['file_types'],
+            recommended_value='old',
+            help=_(
+                'By default calibre generates MOBI files that contain the '
                 'old MOBI 6 format. This format is compatible with all '
                 'devices. However, by changing this setting, you can tell '
                 'calibre to generate MOBI files that contain both MOBI 6 and '
                 'the new KF8 format, or only the new KF8 format. KF8 has '
                 'more features than MOBI 6, but only works with newer Kindles. '
-                'Allowed values: {}'.format('old, both, new'))
-
+                'Allowed values: {}'
+            ).format('old, both, new'),
+        ),
     }
 
-    def check_for_periodical(self):
+    def check_for_periodical(self) -> None:
         if self.is_periodical:
             self.periodicalize_toc()
             self.check_for_masthead()
@@ -108,12 +149,12 @@ class MOBIOutput(OutputFormatPlugin):
         else:
             self.opts.mobi_periodical = False
 
-    def check_for_masthead(self):
+    def check_for_masthead(self) -> None:
         found = 'masthead' in self.oeb.guide
         if not found:
             from ebook_convert.ebooks import generate_masthead
-            self.oeb.log.debug('No masthead found in manifest, generating '
-                               'default mastheadImage...')
+
+            self.oeb.log.debug('No masthead found in manifest, generating default mastheadImage...')
             raw = generate_masthead(str(self.oeb.metadata['title'][0]))
             id, href = self.oeb.manifest.generate('masthead', 'masthead')
             self.oeb.manifest.add(id, href, 'image/gif', data=raw)
@@ -121,33 +162,33 @@ class MOBIOutput(OutputFormatPlugin):
         else:
             self.oeb.log.debug('Using mastheadImage supplied in manifest...')
 
-    def periodicalize_toc(self):
+    def periodicalize_toc(self) -> None:
         from ebook_convert.ebooks.oeb.base import TOC
+
         toc = self.oeb.toc
         if not toc or len(self.oeb.spine) < 3:
             return
         if toc and toc[0].klass != 'periodical':
             one, two = self.oeb.spine[0], self.oeb.spine[1]
-            self.log.info('Converting TOC for MOBI periodical indexing...')
+            self.log('Converting TOC for MOBI periodical indexing...')
 
             articles = {}
             if toc.depth() < 3:
                 # single section periodical
                 self.oeb.manifest.remove(one)
                 self.oeb.manifest.remove(two)
-                sections = [TOC(klass='section', title='All articles',
-                    href=self.oeb.spine[0].href)]
+                sections = [TOC(klass='section', title=_('All articles'), href=self.oeb.spine[0].href)]
                 for x in toc:
                     sections[0].nodes.append(x)
             else:
                 # multi-section periodical
                 self.oeb.manifest.remove(one)
                 sections = list(toc)
-                for i,x in enumerate(sections):
+                for i, x in enumerate(sections):
                     x.klass = 'section'
                     articles_ = list(x)
                     if articles_:
-                        self.oeb.manifest.remove(self.oeb.manifest.hrefs[x.href])
+                        self.oeb.manifest.remove(self.oeb.manifest.hrefs[x.href])  # ty: ignore[invalid-argument-type] periodical sections always have an href
                         x.href = articles_[0].href
 
             for sec in sections:
@@ -157,8 +198,7 @@ class MOBIOutput(OutputFormatPlugin):
                     articles[id(sec)].append(a)
                     sec.nodes.remove(a)
 
-            root = TOC(klass='periodical', href=self.oeb.spine[0].href,
-                    title=str(self.oeb.metadata.title[0]))
+            root = TOC(klass='periodical', href=self.oeb.spine[0].href, title=str(self.oeb.metadata.title[0]))
 
             for s in sections:
                 if articles[id(s)]:
@@ -174,8 +214,11 @@ class MOBIOutput(OutputFormatPlugin):
             # Fix up the periodical href to point to first section href
             toc.nodes[0].href = toc.nodes[0].nodes[0].href
 
-    def convert(self, oeb, output_path, input_plugin, opts, log):
+    def convert(self, oeb_book: OEBBook, output: str, input_plugin: InputFormatPlugin, opts: Values, log: Log) -> None:
+        oeb = oeb_book
+        output_path = output
         from ebook_convert.ebooks.mobi.writer2.resources import Resources
+
         self.log, self.opts, self.oeb = log, opts, oeb
 
         mobi_type = opts.mobi_file_type
@@ -185,43 +228,43 @@ class MOBIOutput(OutputFormatPlugin):
 
         self.oeb.set_page_progression_direction_if_needed()
         remove_html_cover(self.oeb, self.log)
-        resources = Resources(oeb, opts, self.is_periodical,
-                add_fonts=create_kf8)
+        resources = Resources(oeb, opts, self.is_periodical, add_fonts=create_kf8)
         self.check_for_periodical()
 
         if create_kf8:
             from ebook_convert.ebooks.mobi.writer8.cleanup import remove_duplicate_anchors
+
             remove_duplicate_anchors(self.oeb)
             # Split on pagebreaks so that the resulting KF8 is faster to load
             from ebook_convert.ebooks.oeb.transforms.split import Split
+
             Split()(self.oeb, self.opts)
 
-        kf8 = self.create_kf8(resources, for_joint=mobi_type=='both'
-                ) if create_kf8 else None
+        kf8 = self.create_kf8(resources, for_joint=mobi_type == 'both') if create_kf8 else None
         if mobi_type == 'new':
+            assert kf8 is not None
             kf8.write(output_path)
             extract_mobi(output_path, opts)
             return
 
-        self.log.info('Creating MOBI 6 output')
+        self.log('Creating MOBI 6 output')
         self.write_mobi(input_plugin, output_path, kf8, resources)
 
-    def create_kf8(self, resources, for_joint=False):
+    def create_kf8(self, resources: Resources, for_joint: bool = False) -> KF8Book:
         from ebook_convert.ebooks.mobi.writer8.main import create_kf8_book
-        return create_kf8_book(self.oeb, self.opts, resources,
-                for_joint=for_joint)
 
-    def write_mobi(self, input_plugin, output_path, kf8, resources):
+        return create_kf8_book(self.oeb, self.opts, resources, for_joint=for_joint)
+
+    def write_mobi(self, input_plugin: InputFormatPlugin, output_path: str, kf8: KF8Book | None, resources: Resources) -> None:
+        from ebook_convert.customize.ui import plugin_for_input_format
         from ebook_convert.ebooks.mobi.mobiml import MobiMLizer
+        from ebook_convert.ebooks.oeb.transforms.htmltoc import HTMLTOCAdder
         from ebook_convert.ebooks.oeb.transforms.manglecase import CaseMangler
         from ebook_convert.ebooks.oeb.transforms.rasterize import SVGRasterizer, Unavailable
-        from ebook_convert.ebooks.oeb.transforms.htmltoc import HTMLTOCAdder
-        from ebook_convert.customize.ui import plugin_for_input_format
 
         opts, oeb = self.opts, self.oeb
         if not opts.no_inline_toc:
-            tocadder = HTMLTOCAdder(title=opts.toc_title, position='start' if
-                    opts.mobi_toc_at_start else 'end')
+            tocadder = HTMLTOCAdder(title=opts.toc_title, position='start' if opts.mobi_toc_at_start else 'end')
             tocadder(oeb, opts)
         mangler = CaseMangler()
         mangler(oeb, opts)
@@ -229,8 +272,7 @@ class MOBIOutput(OutputFormatPlugin):
             rasterizer = SVGRasterizer()
             rasterizer(oeb, opts)
         except Unavailable:
-            self.log.warning('SVG rasterizer unavailable, SVG will not be '
-                             'converted')
+            self.log.warn('SVG rasterizer unavailable, SVG will not be converted')
         else:
             # Add rasterized SVG images
             resources.add_extra_images()
@@ -240,20 +282,26 @@ class MOBIOutput(OutputFormatPlugin):
         mobimlizer(oeb, opts)
         write_page_breaks_after_item = input_plugin is not plugin_for_input_format('cbz')
         from ebook_convert.ebooks.mobi.writer2.main import MobiWriter
-        writer = MobiWriter(opts, resources, kf8,
-                        write_page_breaks_after_item=write_page_breaks_after_item)
+
+        writer = MobiWriter(opts, resources, kf8, write_page_breaks_after_item=write_page_breaks_after_item)
         writer(oeb, output_path)
         extract_mobi(output_path, opts)
 
-    def specialize_css_for_output(self, log, opts, item, stylizer):
+    def specialize_css_for_output(self, log: Log, opts: Values, item: Manifest.Item, stylizer: Stylizer) -> None:
         from ebook_convert.ebooks.mobi.writer8.cleanup import CSSCleanup
+
         CSSCleanup(log, opts)(item, stylizer)
 
-    def workaround_fire_bugs(self, jacket):
+    def workaround_fire_bugs(self, jacket: Manifest.Item) -> None:
         # The idiotic Fire crashes when trying to render the table used to
         # layout the jacket
+        from lxml import etree
+
         from ebook_convert.ebooks.oeb.base import XHTML
-        for table in jacket.data.xpath('//*[local-name()="table"]'):
+
+        root = jacket.data
+        assert isinstance(root, etree._Element)
+        for table in root.xpath('//*[local-name()="table"]'):
             table.tag = XHTML('div')
             for tr in table.xpath('descendant::*[local-name()="tr"]'):
                 cols = tr.xpath('descendant::*[local-name()="td"]')
@@ -263,49 +311,59 @@ class MOBIOutput(OutputFormatPlugin):
 
 
 class AZW3Output(OutputFormatPlugin):
-
     name = 'AZW3 Output'
     author = 'Kovid Goyal'
     file_type = 'azw3'
     commit_name = 'azw3_output'
 
     options = {
-        OptionRecommendation(name='prefer_author_sort',
-            recommended_value=False, level=OptionRecommendation.LOW,
-            help='When present, use author sort field as author.'
-        ),
-        OptionRecommendation(name='no_inline_toc',
-            recommended_value=False, level=OptionRecommendation.LOW,
-            help='Don\'t add Table of Contents to the book. Useful if '
-                'the book has its own table of contents.'),
-        OptionRecommendation(name='toc_title', recommended_value=None,
-            help='Title for any generated in-line table of contents.'
-        ),
-        OptionRecommendation(name='dont_compress',
-            recommended_value=False, level=OptionRecommendation.LOW,
-            help='Disable compression of the file contents.'
-        ),
-        OptionRecommendation(name='mobi_toc_at_start',
+        OptionRecommendation(
+            name='prefer_author_sort',
             recommended_value=False,
-            help='When adding the Table of Contents to the book, add it at the start of the '
-                'book instead of the end. Not recommended.'
+            level=OptionRecommendation.LOW,
+            help=_('When present, use author sort field as author.'),
         ),
-        OptionRecommendation(name='extract_to',
-            help='Extract the contents of the generated %s file to the '
-                'specified directory. The contents of the directory are first '
-                'deleted, so be careful.' % 'AZW3'),
-        OptionRecommendation(name='share_not_sync', recommended_value=False,
-            help='Enable sharing of book content via Facebook etc. '
+        OptionRecommendation(
+            name='no_inline_toc',
+            recommended_value=False,
+            level=OptionRecommendation.LOW,
+            help=_("Don't add Table of Contents to the book. Useful if the book has its own table of contents."),
+        ),
+        OptionRecommendation(name='toc_title', recommended_value=None, help=_('Title for any generated inline table of contents.')),
+        OptionRecommendation(
+            name='dont_compress',
+            recommended_value=False,
+            level=OptionRecommendation.LOW,
+            help=_('Disable compression of the file contents.'),
+        ),
+        OptionRecommendation(
+            name='mobi_toc_at_start',
+            recommended_value=False,
+            help=_('When adding the Table of Contents to the book, add it at the start of the book instead of the end. Not recommended.'),
+        ),
+        OptionRecommendation(
+            name='extract_to',
+            help=_('Extract the contents of the generated %s file to the specified folder. The contents of the folder are first deleted, so be careful.')
+            % 'AZW3',
+        ),
+        OptionRecommendation(
+            name='share_not_sync',
+            recommended_value=False,
+            help=_(
+                'Enable sharing of book content via Facebook etc. '
                 ' on the Kindle. WARNING: Using this feature means that '
                 ' the book will not auto sync its last read position '
                 ' on multiple devices. Complain to Amazon.'
-        )
+            ),
+        ),
     }
 
-    def convert(self, oeb, output_path, input_plugin, opts, log):
+    def convert(self, oeb_book: OEBBook, output: str, input_plugin: InputFormatPlugin, opts: Values, log: Log) -> None:
+        oeb = oeb_book
+        output_path = output
         from ebook_convert.ebooks.mobi.writer2.resources import Resources
-        from ebook_convert.ebooks.mobi.writer8.main import create_kf8_book
         from ebook_convert.ebooks.mobi.writer8.cleanup import remove_duplicate_anchors
+        from ebook_convert.ebooks.mobi.writer8.main import create_kf8_book
 
         self.oeb, self.opts, self.log = oeb, opts, log
         opts.mobi_periodical = self.is_periodical
@@ -313,13 +371,13 @@ class AZW3Output(OutputFormatPlugin):
         self.oeb.set_page_progression_direction_if_needed()
         remove_duplicate_anchors(oeb)
 
-        resources = Resources(self.oeb, self.opts, self.is_periodical,
-                add_fonts=True, process_images=False)
+        resources = Resources(self.oeb, self.opts, self.is_periodical, add_fonts=True, process_images=False)
         if not passthrough:
             remove_html_cover(self.oeb, self.log)
 
             # Split on pagebreaks so that the resulting KF8 is faster to load
             from ebook_convert.ebooks.oeb.transforms.split import Split
+
             Split()(self.oeb, self.opts)
 
         kf8 = create_kf8_book(self.oeb, self.opts, resources, for_joint=False)
@@ -327,6 +385,7 @@ class AZW3Output(OutputFormatPlugin):
         kf8.write(output_path)
         extract_mobi(output_path, opts)
 
-    def specialize_css_for_output(self, log, opts, item, stylizer):
+    def specialize_css_for_output(self, log: Log, opts: Values, item: Manifest.Item, stylizer: Stylizer) -> None:
         from ebook_convert.ebooks.mobi.writer8.cleanup import CSSCleanup
+
         CSSCleanup(log, opts)(item, stylizer)

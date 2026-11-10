@@ -1,94 +1,278 @@
-import collections
+# License: GPLv3 Copyright: 2008, Kovid Goyal <kovid at kovidgoyal.net>
+
+from __future__ import annotations
 import functools
-import itertools
 import os
 import shutil
 import sys
 import traceback
+from collections import defaultdict
+from itertools import chain, repeat
+from typing import IO, TYPE_CHECKING, cast
 
-from ebook_convert import customize
-from ebook_convert.customize import conversion
-from ebook_convert.customize import profiles
-from ebook_convert.customize import builtins
-from ebook_convert.ebooks import metadata
-from ebook_convert.utils import config as cfg
-from ebook_convert.utils import config_base
+from ebook_convert.constants import DEBUG, ismacos, numeric_version, system_plugins_loc
+from ebook_convert.customize import (
+    AIProviderPlugin,
+    CatalogPlugin,
+    ContentServerPlugin,
+    EditBookToolPlugin,
+    FileTypePlugin,
+    InterfaceActionBase,
+    InvalidPlugin,
+    LibraryClosedPlugin,
+    MetadataReaderPlugin,
+    MetadataWriterPlugin,
+    Plugin,
+    PluginInstallationType,
+    PluginNotFound,
+    PreferencesPlugin,
+    StoreBase,
+    platform,
+)
+from ebook_convert.customize import InterfaceActionBase as InterfaceAction
+from ebook_convert.customize import StoreBase as Store
+from ebook_convert.customize.builtins import plugins as builtin_plugins
+from ebook_convert.customize.conversion import InputFormatPlugin, OutputFormatPlugin
+from ebook_convert.customize.profiles import InputProfile, OutputProfile
+from ebook_convert.customize.zipplugin import loader
+from ebook_convert.ebooks.metadata import MetaInformation
+from ebook_convert.utils.config import Config, ConfigProxy, OptionParser, make_config_dir, plugin_dir
+from ebook_convert.utils.localization import _
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Iterable, Iterator
+
+    from ebook_convert.customize import FileTypePluginDB
+    from ebook_convert.devices.usbms.driver import USBMS
+    from ebook_convert.ebooks.metadata.book.base import Metadata
 
 
-builtin_names = frozenset(p.name for p in builtins.plugins)
-BLACKLISTED_PLUGINS = frozenset({'Marvin XD', 'iOS reader applications'})
+
+class DevicePlugin:  # ebook-convert: device drivers are not included
+    pass
+
+
+class Source:  # ebook-convert: metadata download sources are not included
+    pass
+
+
+#: A plugin instance or class, or the name of a plugin
+type PluginOrName = Plugin | type[Plugin] | str
+
+builtin_names = frozenset(p.name for p in builtin_plugins)
+BLACKLISTED_PLUGINS = frozenset({
+    'Marvin XD',
+    'iOS reader applications',
+    # Subsumed by builtin functionality
+    'KoboTouchExtended',
+    'KePub Input',
+    'KePub Output',
+    'KePub Metadata Reader',
+    'KePub Metadata Writer',
+})
+
+
+def zip_value[T, V](iterable: Iterable[T], value: V) -> zip[tuple[T, V]]:
+    return zip(iterable, repeat(value))
 
 
 class NameConflict(ValueError):
     pass
 
 
-def _config():
-    c = config_base.Config('customize')
-    c.add_opt('plugins', default={}, help='Installed plugins')
-    c.add_opt('filetype_mapping', default={},
-              help='Mapping for filetype plugins')
-    c.add_opt('plugin_customization', default={},
-              help='Local plugin customization')
-    c.add_opt('disabled_plugins', default=set(), help='Disabled plugins')
-    c.add_opt('enabled_plugins', default=set(), help='Enabled plugins')
+def _config() -> ConfigProxy:
+    c = Config('customize')
+    c.add_opt('plugins', default={}, help=_('Installed plugins'))
+    c.add_opt('filetype_mapping', default={}, help=_('Mapping for filetype plugins'))
+    c.add_opt('plugin_customization', default={}, help=_('Local plugin customization'))
+    c.add_opt('disabled_plugins', default=set(), help=_('Disabled plugins'))
+    c.add_opt('enabled_plugins', default=set(), help=_('Enabled plugins'))
 
-    return config_base.ConfigProxy(c)
+    return ConfigProxy(c)
 
 
 config = _config()
 
 
-# File type plugins
-_on_import = {}
-_on_postimport = {}
-_on_preprocess = {}
-_on_postprocess = {}
-_on_postadd = []
+def _plugin_name(plugin_or_name: PluginOrName) -> str:
+    return plugin_or_name if isinstance(plugin_or_name, str) else cast('str', getattr(plugin_or_name, 'name', plugin_or_name))
 
 
-def reread_filetype_plugins():
-    global _on_import, _on_postimport, _on_preprocess, _on_postprocess
-    global _on_postadd
-    _on_import = collections.defaultdict(list)
-    _on_postimport = collections.defaultdict(list)
-    _on_preprocess = collections.defaultdict(list)
-    _on_postprocess = collections.defaultdict(list)
+def find_plugin(name: str) -> Plugin | None:
+    for plugin in _initialized_plugins:
+        if plugin.name == name:
+            return plugin
+
+
+def load_plugin(path_to_zip_file: str) -> type[Plugin]:  # {{{
+    """
+    Load plugin from ZIP file or raise InvalidPlugin error
+
+    :return: A :class:`Plugin` instance.
+    """
+    return loader.load(path_to_zip_file)
+
+
+# }}}
+
+# Enable/disable plugins {{{
+
+
+def disable_plugin_by_name(name: str) -> None:
+    dp = config['disabled_plugins']
+    dp.add(name)
+    config['disabled_plugins'] = dp
+    ep = config['enabled_plugins']
+    if name in ep:
+        ep.remove(name)
+        config['enabled_plugins'] = ep
+
+
+def disable_plugin(plugin_or_name: PluginOrName) -> None:
+    x = _plugin_name(plugin_or_name)
+    plugin = find_plugin(x)
+    if plugin is None:
+        raise ValueError(f'No plugin named: {x} found')
+    if not can_be_disabled(plugin):
+        raise ValueError(f'Plugin {x} cannot be disabled')
+    disable_plugin_by_name(x)
+
+
+def enable_plugin(plugin_or_name: PluginOrName) -> None:
+    x = _plugin_name(plugin_or_name)
+    dp = config['disabled_plugins']
+    if x in dp:
+        dp.remove(x)
+    config['disabled_plugins'] = dp
+    ep = config['enabled_plugins']
+    ep.add(x)
+    config['enabled_plugins'] = ep
+
+
+def is_internal_plugin(plugin_or_name: PluginOrName) -> bool:
+    x = _plugin_name(plugin_or_name)
+    plugin = find_plugin(x)
+    return (
+        plugin is not None
+        and plugin.installation_type is PluginInstallationType.BUILTIN
+        and isinstance(
+            plugin,
+            (
+                InterfaceActionBase,
+                PreferencesPlugin,
+                InputFormatPlugin,
+                OutputFormatPlugin,
+                InputProfile,
+                OutputProfile,
+            ),
+        )
+    )
+
+
+def can_be_disabled(plugin_or_name: PluginOrName) -> bool:
+    x = _plugin_name(plugin_or_name)
+    plugin = find_plugin(x)
+    return plugin is not None and not is_internal_plugin(x) and plugin.can_be_disabled
+
+
+def restore_plugin_state_to_default(plugin_or_name: PluginOrName) -> None:
+    x = _plugin_name(plugin_or_name)
+    dp = config['disabled_plugins']
+    if x in dp:
+        dp.remove(x)
+    config['disabled_plugins'] = dp
+    ep = config['enabled_plugins']
+    if x in ep:
+        ep.remove(x)
+    config['enabled_plugins'] = ep
+
+
+default_disabled_plugins = {
+    'Overdrive',
+    'Douban Books',
+    'OZON.ru',
+    'Edelweiss',
+    'Google Images',
+    'Big Book Search',
+}
+
+
+def is_disabled(plugin_or_name: PluginOrName) -> bool:
+    name = _plugin_name(plugin_or_name)
+    if name in config['enabled_plugins']:
+        return False
+    return name in config['disabled_plugins'] or name in default_disabled_plugins
+
+
+# }}}
+
+# File type plugins {{{
+
+_on_import: dict[str, list[FileTypePlugin]] = {}
+_on_postimport: dict[str, list[FileTypePlugin]] = {}
+_on_postconvert: dict[str, list[FileTypePlugin]] = {}
+_on_postdelete: dict[str, list[FileTypePlugin]] = {}
+_on_preprocess: dict[str, list[FileTypePlugin]] = {}
+_on_postprocess: dict[str, list[FileTypePlugin]] = {}
+_on_postadd: list[FileTypePlugin] = []
+
+
+def reread_filetype_plugins() -> None:
+    global _on_import, _on_postimport, _on_postconvert, _on_postdelete, _on_preprocess, _on_postprocess, _on_postadd
+    _on_import = defaultdict(list)
+    _on_postimport = defaultdict(list)
+    _on_postconvert = defaultdict(list)
+    _on_postdelete = defaultdict(list)
+    _on_preprocess = defaultdict(list)
+    _on_postprocess = defaultdict(list)
     _on_postadd = []
 
     for plugin in _initialized_plugins:
-        if isinstance(plugin, customize.FileTypePlugin):
+        if isinstance(plugin, FileTypePlugin):
+            if ismacos and plugin.name == 'DeDRM' and plugin.version < (10, 0, 3):
+                print(f'Blacklisting the {plugin.name} plugin as it is too old and causes crashes', file=sys.stderr)
+                continue
             for ft in plugin.file_types:
                 if plugin.on_import:
                     _on_import[ft].append(plugin)
                 if plugin.on_postimport:
                     _on_postimport[ft].append(plugin)
                     _on_postadd.append(plugin)
+                if plugin.on_postconvert:
+                    _on_postconvert[ft].append(plugin)
+                if plugin.on_postdelete:
+                    _on_postdelete[ft].append(plugin)
                 if plugin.on_preprocess:
                     _on_preprocess[ft].append(plugin)
                 if plugin.on_postprocess:
                     _on_postprocess[ft].append(plugin)
 
 
-def plugins_for_ft(ft, occasion):
-    op = {'import': _on_import,
-          'preprocess': _on_preprocess,
-          'postprocess': _on_postprocess,
-          'postimport': _on_postimport}[occasion]
-    for p in itertools.chain(op.get(ft, ()), op.get('*', ())):
-        yield p
+def plugins_for_ft(ft: str, occasion: str) -> Iterator[FileTypePlugin]:
+    op = {
+        'import': _on_import,
+        'preprocess': _on_preprocess,
+        'postprocess': _on_postprocess,
+        'postimport': _on_postimport,
+        'postconvert': _on_postconvert,
+        'postdelete': _on_postdelete,
+    }[occasion]
+    for p in chain(op.get(ft, ()), op.get('*', ())):
+        if not is_disabled(p):
+            yield p
 
 
-def _run_filetype_plugins(path_to_file, ft=None, occasion='preprocess'):
+def _run_filetype_plugins(path_to_file: str, ft: str | None = None, occasion: str = 'preprocess') -> str:
     customization = config['plugin_customization']
     if ft is None:
         ft = os.path.splitext(path_to_file)[-1].lower().replace('.', '')
     nfp = path_to_file
     for plugin in plugins_for_ft(ft, occasion):
         plugin.site_customization = customization.get(plugin.name, '')
-        # Some file type plugins out there override the output streams with
-        # buggy implementations
-        oo, oe = sys.stdout, sys.stderr
+        oo, oe = (
+            sys.stdout,
+            sys.stderr,
+        )  # Some file type plugins out there override the output streams with buggy implementations
         with plugin:
             try:
                 plugin.original_path_to_file = path_to_file
@@ -97,29 +281,25 @@ def _run_filetype_plugins(path_to_file, ft=None, occasion='preprocess'):
             try:
                 nfp = plugin.run(nfp) or nfp
             except Exception:
-                print('Running file type plugin %s failed with traceback:' %
-                      plugin.name, file=oe)
+                print(f'Running file type plugin {plugin.name} failed with traceback:', file=oe)
                 traceback.print_exc(file=oe)
         sys.stdout, sys.stderr = oo, oe
 
-    def norm(string):
-        return os.path.normpath(os.path.normcase(string))
+    def x(j: str) -> str:
+        return os.path.normpath(os.path.normcase(j))
 
-    if occasion == 'postprocess' and norm(nfp) != norm(path_to_file):
+    if occasion == 'postprocess' and x(nfp) != x(path_to_file):
         shutil.copyfile(nfp, path_to_file)
         nfp = path_to_file
     return nfp
 
 
-run_plugins_on_import = functools.partial(_run_filetype_plugins,
-                                          occasion='import')
-run_plugins_on_preprocess = functools.partial(_run_filetype_plugins,
-                                              occasion='preprocess')
-run_plugins_on_postprocess = functools.partial(_run_filetype_plugins,
-                                               occasion='postprocess')
+run_plugins_on_import = functools.partial(_run_filetype_plugins, occasion='import')
+run_plugins_on_preprocess = functools.partial(_run_filetype_plugins, occasion='preprocess')
+run_plugins_on_postprocess = functools.partial(_run_filetype_plugins, occasion='postprocess')
 
 
-def run_plugins_on_postimport(db, book_id, fmt):
+def run_plugins_on_postimport(db: FileTypePluginDB, book_id: int, fmt: str) -> None:
     customization = config['plugin_customization']
     fmt = fmt.lower()
     for plugin in plugins_for_ft(fmt, 'postimport'):
@@ -128,130 +308,204 @@ def run_plugins_on_postimport(db, book_id, fmt):
             try:
                 plugin.postimport(book_id, fmt, db)
             except Exception:
-                print('Running file type plugin %s failed with traceback:' %
-                      plugin.name)
+                print(f'Running file type plugin {plugin.name} failed with traceback:', file=sys.stderr)
                 traceback.print_exc()
 
 
-def run_plugins_on_postadd(db, book_id, fmt_map):
+def run_plugins_on_postconvert(db: FileTypePluginDB, book_id: int, fmt: str) -> None:
+    customization = config['plugin_customization']
+    fmt = fmt.lower()
+    for plugin in plugins_for_ft(fmt, 'postconvert'):
+        plugin.site_customization = customization.get(plugin.name, '')
+        with plugin:
+            try:
+                plugin.postconvert(book_id, fmt, db)
+            except Exception:
+                print(f'Running file type plugin {plugin.name} failed with traceback:', file=sys.stderr)
+                traceback.print_exc()
+
+
+def run_plugins_on_postdelete(db: FileTypePluginDB, book_id: int, fmt: str) -> None:
+    customization = config['plugin_customization']
+    fmt = fmt.lower()
+    for plugin in plugins_for_ft(fmt, 'postdelete'):
+        plugin.site_customization = customization.get(plugin.name, '')
+        with plugin:
+            try:
+                plugin.postdelete(book_id, fmt, db)
+            except Exception:
+                print(f'Running file type plugin {plugin.name} failed with traceback:', file=sys.stderr)
+                traceback.print_exc()
+
+
+def run_plugins_on_postadd(db: FileTypePluginDB, book_id: int, fmt_map: dict[str, str]) -> None:
     customization = config['plugin_customization']
     for plugin in _on_postadd:
+        if is_disabled(plugin):
+            continue
         plugin.site_customization = customization.get(plugin.name, '')
         with plugin:
             try:
                 plugin.postadd(book_id, fmt_map, db)
             except Exception:
-                print('Running file type plugin %s failed with traceback:' %
-                      plugin.name)
+                print(f'Running file type plugin {plugin.name} failed with traceback:', file=sys.stderr)
                 traceback.print_exc()
 
 
-# Plugin customization
-def customize_plugin(plugin, custom):
+# }}}
+
+# Plugin customization {{{
+
+
+def customize_plugin(plugin: Plugin, custom: str) -> None:
     d = config['plugin_customization']
     d[plugin.name] = custom.strip()
     config['plugin_customization'] = d
 
 
-def plugin_customization(plugin):
+def plugin_customization(plugin: Plugin) -> str:
     return config['plugin_customization'].get(plugin.name, '')
 
 
-# Input/Output profiles
-def input_profiles():
+# }}}
+
+# Input/Output profiles {{{
+
+
+def input_profiles() -> Iterator[InputProfile]:
     for plugin in _initialized_plugins:
-        if isinstance(plugin, profiles.InputProfile):
+        if isinstance(plugin, InputProfile):
             yield plugin
 
 
-def output_profiles():
+def output_profiles() -> Iterator[OutputProfile]:
     for plugin in _initialized_plugins:
-        if isinstance(plugin, profiles.OutputProfile):
+        if isinstance(plugin, OutputProfile):
             yield plugin
 
 
-# Interface Actions #
-def interface_actions():
-    for plugin in _initialized_plugins:
-        if isinstance(plugin, customize.InterfaceActionBase):
-            yield plugin
+# }}}
+
+# Interface Actions # {{{
 
 
-# Preferences Plugins
-def preferences_plugins():
+def interface_actions() -> Iterator[InterfaceActionBase]:
     customization = config['plugin_customization']
     for plugin in _initialized_plugins:
-        if isinstance(plugin, customize.PreferencesPlugin):
-            plugin.site_customization = customization.get(plugin.name, '')
-            yield plugin
+        if isinstance(plugin, InterfaceAction):
+            if not is_disabled(plugin):
+                plugin.site_customization = customization.get(plugin.name, '')
+                yield plugin
 
 
-# Library Closed Plugins
-def available_library_closed_plugins():
+# }}}
+
+# Preferences Plugins # {{{
+
+
+def preferences_plugins() -> Iterator[PreferencesPlugin]:
     customization = config['plugin_customization']
     for plugin in _initialized_plugins:
-        if isinstance(plugin, customize.LibraryClosedPlugin):
-            plugin.site_customization = customization.get(plugin.name, '')
-            yield plugin
+        if isinstance(plugin, PreferencesPlugin):
+            if not is_disabled(plugin):
+                plugin.site_customization = customization.get(plugin.name, '')
+                yield plugin
 
 
-def has_library_closed_plugins():
+# }}}
+
+# Library Closed Plugins # {{{
+
+
+def available_library_closed_plugins() -> Iterator[LibraryClosedPlugin]:
+    customization = config['plugin_customization']
     for plugin in _initialized_plugins:
-        if isinstance(plugin, customize.LibraryClosedPlugin):
-            return True
+        if isinstance(plugin, LibraryClosedPlugin):
+            if not is_disabled(plugin):
+                plugin.site_customization = customization.get(plugin.name, '')
+                yield plugin
+
+
+def has_library_closed_plugins() -> bool:
+    for plugin in _initialized_plugins:
+        if isinstance(plugin, LibraryClosedPlugin):
+            if not is_disabled(plugin):
+                return True
     return False
 
 
-# Store Plugins
-def store_plugins():
+# }}}
+
+
+# AI Provider Plugins {{{
+def available_ai_provider_plugins() -> Iterator[AIProviderPlugin]:
     customization = config['plugin_customization']
     for plugin in _initialized_plugins:
-        if isinstance(plugin, customize.StoreBase):
+        if isinstance(plugin, AIProviderPlugin):
+            if not is_disabled(plugin):
+                plugin.site_customization = customization.get(plugin.name, '')
+                yield plugin
+
+
+# }}}
+
+# Store Plugins # {{{
+
+
+def store_plugins() -> Iterator[StoreBase]:
+    customization = config['plugin_customization']
+    for plugin in _initialized_plugins:
+        if isinstance(plugin, Store):
             plugin.site_customization = customization.get(plugin.name, '')
             yield plugin
 
 
-def available_store_plugins():
+def available_store_plugins() -> Iterator[StoreBase]:
     for plugin in store_plugins():
-        yield plugin
+        if not is_disabled(plugin):
+            yield plugin
 
 
-def stores():
-    stores = set()
+def stores() -> set[str]:
+    stores: set[str] = set()
     for plugin in store_plugins():
         stores.add(plugin.name)
     return stores
 
 
-def available_stores():
-    stores = set()
+def available_stores() -> set[str]:
+    stores: set[str] = set()
     for plugin in available_store_plugins():
         stores.add(plugin.name)
     return stores
 
 
-# Metadata read/write
-_metadata_readers = {}
-_metadata_writers = {}
+# }}}
+
+# Metadata read/write {{{
+
+_metadata_readers: dict[str, list[MetadataReaderPlugin]] = {}
+_metadata_writers: dict[str, list[MetadataWriterPlugin]] = {}
 
 
-def reread_metadata_plugins():
+def reread_metadata_plugins() -> None:
     global _metadata_readers
     global _metadata_writers
-    _metadata_readers = collections.defaultdict(list)
-    _metadata_writers = collections.defaultdict(list)
+    _metadata_readers = defaultdict(list)
+    _metadata_writers = defaultdict(list)
     for plugin in _initialized_plugins:
-        if isinstance(plugin, customize.MetadataReaderPlugin):
+        if isinstance(plugin, MetadataReaderPlugin):
             for ft in plugin.file_types:
                 _metadata_readers[ft].append(plugin)
-        elif isinstance(plugin, customize.MetadataWriterPlugin):
+        elif isinstance(plugin, MetadataWriterPlugin):
             for ft in plugin.file_types:
                 _metadata_writers[ft].append(plugin)
 
-    # Ensure custom metadata plugins are used in preference to builtin
-    # ones for a given filetype
-    def key(plugin):
-        return (1 if plugin.plugin_path is None else 0), plugin.name
+    # Ensure the following metadata plugin preference is used:
+    # external > system > builtin
+    def key(plugin: MetadataReaderPlugin | MetadataWriterPlugin) -> tuple[int, str]:
+        order = sys.maxsize if plugin.installation_type is None else plugin.installation_type
+        return order, plugin.name
 
     for group in (_metadata_readers, _metadata_writers):
         for plugins in group.values():
@@ -259,121 +513,176 @@ def reread_metadata_plugins():
                 plugins.sort(key=key)
 
 
-def metadata_readers():
-    ans = set()
+def metadata_readers() -> set[MetadataReaderPlugin]:
+    ans: set[MetadataReaderPlugin] = set()
     for plugins in _metadata_readers.values():
         for plugin in plugins:
             ans.add(plugin)
     return ans
 
 
-def metadata_writers():
-    ans = set()
+def metadata_writers() -> set[MetadataWriterPlugin]:
+    ans: set[MetadataWriterPlugin] = set()
     for plugins in _metadata_writers.values():
         for plugin in plugins:
             ans.add(plugin)
     return ans
 
 
-class QuickMetadata(object):
-
-    def __init__(self):
+class QuickMetadata:
+    def __init__(self) -> None:
         self.quick = False
 
-    def __enter__(self):
+    def __enter__(self) -> None:
         self.quick = True
 
-    def __exit__(self, *args):
+    def __exit__(self, *args: object) -> None:
         self.quick = False
 
 
 quick_metadata = QuickMetadata()
 
 
-class ApplyNullMetadata(object):
-
-    def __init__(self):
+class ApplyNullMetadata:
+    def __init__(self) -> None:
         self.apply_null = False
 
-    def __enter__(self):
+    def __enter__(self) -> None:
         self.apply_null = True
 
-    def __exit__(self, *args):
+    def __exit__(self, *args: object) -> None:
         self.apply_null = False
 
 
 apply_null_metadata = ApplyNullMetadata()
 
 
-class ForceIdentifiers(object):
+class ForceIdentifiers:
+    force_identifiers: bool = False
 
-    def __init__(self):
-        self.force_identifiers = False
-
-    def __enter__(self):
+    def __enter__(self) -> None:
         self.force_identifiers = True
 
-    def __exit__(self, *args):
+    def __exit__(self, *args: object) -> None:
         self.force_identifiers = False
 
 
-def get_file_type_metadata(stream, ftype):
-    mi = metadata.MetaInformation(None, None)
+force_identifiers = ForceIdentifiers()
+
+
+def get_file_type_metadata(stream: IO[bytes], ftype: str) -> Metadata:
+    mi = MetaInformation(None, None)
 
     ftype = ftype.lower().strip()
     if ftype in _metadata_readers:
         for plugin in _metadata_readers[ftype]:
-            with plugin:
-                try:
-                    plugin.quick = quick_metadata.quick
-                    if hasattr(stream, 'seek'):
-                        stream.seek(0)
-                    mi = plugin.get_metadata(stream, ftype.lower().strip())
-                    break
-                except Exception:
-                    traceback.print_exc()
-                    continue
+            if not is_disabled(plugin):
+                with plugin:
+                    try:
+                        plugin.quick = quick_metadata.quick
+                        if hasattr(stream, 'seek'):
+                            stream.seek(0)
+                        ans = plugin.get_metadata(stream, ftype.lower().strip())
+                        if ans is not None:
+                            mi = ans
+                        break
+                    except Exception:
+                        traceback.print_exc()
+                        continue
     return mi
 
 
-def set_file_type_metadata(stream, mi, ftype, report_error=None):
-    fi = ForceIdentifiers()
+def set_file_type_metadata(stream: IO[bytes], mi: Metadata, ftype: str, report_error: Callable[[Metadata, str, str], object] | None = None) -> None:
     ftype = ftype.lower().strip()
     if ftype in _metadata_writers:
         customization = config['plugin_customization']
         for plugin in _metadata_writers[ftype]:
-            with plugin:
-                try:
-                    plugin.apply_null = apply_null_metadata.apply_null
-                    plugin.force_identifiers = fi.force_identifiers
-                    plugin.site_customization = customization.get(
-                        plugin.name, '')
-                    plugin.set_metadata(stream, mi, ftype.lower().strip())
-                    break
-                except Exception:
-                    if report_error is None:
-                        print('Failed to set metadata for the', ftype.upper(),
-                              'format of:', getattr(mi, 'title', ''))
-                        traceback.print_exc()
-                    else:
-                        report_error(mi, ftype, traceback.format_exc())
+            if not is_disabled(plugin):
+                with plugin:
+                    try:
+                        plugin.apply_null = apply_null_metadata.apply_null
+                        plugin.force_identifiers = force_identifiers.force_identifiers
+                        plugin.site_customization = customization.get(plugin.name, '')
+                        plugin.set_metadata(stream, mi, ftype.lower().strip())
+                        break
+                    except Exception:
+                        if report_error is None:
+                            from ebook_convert import prints
+
+                            prints(
+                                'Failed to set metadata for the',
+                                ftype.upper(),
+                                'format of:',
+                                getattr(mi, 'title', ''),
+                                file=sys.stderr,
+                            )
+                            traceback.print_exc()
+                        else:
+                            report_error(mi, ftype, traceback.format_exc())
 
 
-def can_set_metadata(ftype):
+def can_set_metadata(ftype: str) -> bool:
     ftype = ftype.lower().strip()
-    for plugin in _metadata_writers.get(ftype, ()):
-        return True
-    return False
+    return any(not is_disabled(plugin) for plugin in _metadata_writers.get(ftype, ()))
 
 
-# Input/Output format plugins
-def input_format_plugins():
+# }}}
+
+# Add/remove plugins {{{
+
+
+def add_plugin(path_to_zip_file: str) -> Plugin:
+    make_config_dir()
+    plugin = load_plugin(path_to_zip_file)
+    if plugin.name in builtin_names:
+        raise NameConflict(f'A builtin plugin with the name {plugin.name!r} already exists')
+    if plugin.name in get_system_plugins():
+        raise NameConflict(f'A system plugin with the name {plugin.name!r} already exists')
+    plugin = initialize_plugin(plugin, path_to_zip_file, PluginInstallationType.EXTERNAL)
+    plugins = config['plugins']
+    zfp = os.path.join(plugin_dir, plugin.name + '.zip')
+    if os.path.exists(zfp):
+        os.remove(zfp)
+    shutil.copyfile(path_to_zip_file, zfp)
+    plugins[plugin.name] = zfp
+    config['plugins'] = plugins
+    initialize_plugins()
+    return plugin
+
+
+def remove_plugin(plugin_or_name: PluginOrName) -> bool:
+    name = _plugin_name(plugin_or_name)
+    plugins = config['plugins']
+    removed = False
+    if name in plugins:
+        removed = True
+        try:
+            zfp = os.path.join(plugin_dir, name + '.zip')
+            if os.path.exists(zfp):
+                os.remove(zfp)
+            zfp = plugins[name]
+            if os.path.exists(zfp):
+                os.remove(zfp)
+        except Exception:
+            pass
+        plugins.pop(name)
+    config['plugins'] = plugins
+    initialize_plugins()
+    return removed
+
+
+# }}}
+
+# Input/Output format plugins {{{
+
+
+def input_format_plugins() -> Iterator[InputFormatPlugin]:
     for plugin in _initialized_plugins:
-        if isinstance(plugin, conversion.InputFormatPlugin):
+        if isinstance(plugin, InputFormatPlugin):
             yield plugin
 
 
-def plugin_for_input_format(fmt):
+def plugin_for_input_format(fmt: str) -> InputFormatPlugin | None:
     customization = config['plugin_customization']
     for plugin in input_format_plugins():
         if fmt.lower() in plugin.file_types:
@@ -381,31 +690,31 @@ def plugin_for_input_format(fmt):
             return plugin
 
 
-def all_input_formats():
-    formats = set()
+def all_input_formats() -> set[str]:
+    formats: set[str] = set()
     for plugin in input_format_plugins():
         for format in plugin.file_types:
             formats.add(format)
     return formats
 
 
-def available_input_formats():
-    formats = set()
+def available_input_formats() -> set[str]:
+    formats: set[str] = set()
     for plugin in input_format_plugins():
-        for format in plugin.file_types:
-            formats.add(format)
-    formats.add('zip')
-    formats.add('rar')
+        if not is_disabled(plugin):
+            for format in plugin.file_types:
+                formats.add(format)
+    formats.add('zip'), formats.add('rar')
     return formats
 
 
-def output_format_plugins():
+def output_format_plugins() -> Iterator[OutputFormatPlugin]:
     for plugin in _initialized_plugins:
-        if isinstance(plugin, conversion.OutputFormatPlugin):
+        if isinstance(plugin, OutputFormatPlugin):
             yield plugin
 
 
-def plugin_for_output_format(fmt):
+def plugin_for_output_format(fmt: str) -> OutputFormatPlugin | None:
     customization = config['plugin_customization']
     for plugin in output_format_plugins():
         if fmt.lower() == plugin.file_type:
@@ -413,77 +722,240 @@ def plugin_for_output_format(fmt):
             return plugin
 
 
-def available_output_formats():
-    formats = set()
+def available_output_formats() -> set[str]:
+    formats: set[str] = set()
     for plugin in output_format_plugins():
-        formats.add(plugin.file_type)
+        if plugin.file_type is not None and not is_disabled(plugin):
+            formats.add(plugin.file_type)
     return formats
 
 
-# Catalog plugins
-def catalog_plugins():
+# }}}
+
+# Catalog plugins {{{
+
+
+def catalog_plugins() -> Iterator[CatalogPlugin]:
     for plugin in _initialized_plugins:
-        if isinstance(plugin, customize.CatalogPlugin):
+        if isinstance(plugin, CatalogPlugin):
             yield plugin
 
 
-def available_catalog_formats():
-    formats = set()
+def available_catalog_formats() -> set[str]:
+    formats: set[str] = set()
     for plugin in catalog_plugins():
-        for format in plugin.file_types:
-            formats.add(format)
+        if not is_disabled(plugin):
+            for format in plugin.file_types:
+                formats.add(format)
     return formats
 
 
-def plugin_for_catalog_format(fmt):
+def plugin_for_catalog_format(fmt: str) -> CatalogPlugin | None:
     for plugin in catalog_plugins():
         if fmt.lower() in plugin.file_types:
             return plugin
 
 
-# Editor plugins
-def all_edit_book_tool_plugins():
+# }}}
+
+# Device plugins {{{
+
+
+def device_plugins(include_disabled: bool = False) -> Iterator[DevicePlugin]:
     for plugin in _initialized_plugins:
-        if isinstance(plugin, customize.EditBookToolPlugin):
+        if isinstance(plugin, DevicePlugin):
+            if include_disabled or not is_disabled(plugin):
+                if platform in plugin.supported_platforms:
+                    if (
+                        getattr(plugin, 'plugin_needs_delayed_initialization', False)
+                        and (delayed_init := getattr(plugin, 'do_delayed_plugin_initialization', None)) is not None
+                    ):
+                        delayed_init()
+                    yield plugin
+
+
+def usbms_plugins(include_disabled: bool = True) -> Iterator[USBMS]:
+    from ebook_convert.devices.usbms.driver import USBMS
+
+    for plugin in device_plugins(include_disabled):
+        if isinstance(plugin, USBMS) and plugin.name not in ('Folder Device Interface', 'User Defined USB driver'):
             yield plugin
 
 
-# Initialize plugins
-_initialized_plugins = []
+def disabled_device_plugins() -> Iterator[DevicePlugin]:
+    for plugin in _initialized_plugins:
+        if isinstance(plugin, DevicePlugin):
+            if is_disabled(plugin):
+                if platform in plugin.supported_platforms:
+                    yield plugin
 
 
-def initialize_plugin(plugin, path_to_zip_file):
+# }}}
+
+# Metadata sources2 {{{
+
+
+def metadata_plugins(capabilities: Iterable[str]) -> Iterator[Source]:
+    caps = frozenset(capabilities)
+    for plugin in all_metadata_plugins():
+        if plugin.capabilities.intersection(caps) and not is_disabled(plugin):
+            yield plugin
+
+
+def all_metadata_plugins() -> Iterator[Source]:
+    for plugin in _initialized_plugins:
+        if isinstance(plugin, Source):
+            yield plugin
+
+
+def patch_metadata_plugins(possibly_updated_plugins: dict[str, type[Source]]) -> None:
+    patches: dict[int, Source] = {}
+    for i, plugin in enumerate(_initialized_plugins):
+        if isinstance(plugin, Source) and plugin.name in builtin_names:
+            pup = possibly_updated_plugins.get(plugin.name)
+            if pup is not None:
+                if pup.version > plugin.version and pup.minimum_calibre_version <= numeric_version:
+                    patches[i] = pup(None)
+                    # Metadata source plugins don't use initialize() but that
+                    # might change in the future, so be safe.
+                    patches[i].initialize()
+    for i, pup in patches.items():
+        _initialized_plugins[i] = pup
+
+
+# }}}
+
+# Editor plugins {{{
+
+
+def all_edit_book_tool_plugins() -> Iterator[EditBookToolPlugin]:
+    for plugin in _initialized_plugins:
+        if isinstance(plugin, EditBookToolPlugin):
+            yield plugin
+
+
+# }}}
+
+# Content server plugins {{{
+
+
+def content_server_plugins() -> Iterator[ContentServerPlugin]:
+    for plugin in _initialized_plugins:
+        if isinstance(plugin, ContentServerPlugin):
+            if not is_disabled(plugin):
+                yield plugin
+
+
+# }}}
+
+# Initialize plugins {{{
+
+_initialized_plugins: list[Plugin] = []
+
+
+def initialize_plugin[P: Plugin](
+    plugin: type[P], path_to_zip_file: str | None = None, installation_type: PluginInstallationType = PluginInstallationType.BUILTIN
+) -> P:
     try:
         p = plugin(path_to_zip_file)
+        p.installation_type = installation_type
         p.initialize()
         return p
     except Exception:
         print('Failed to initialize plugin:', plugin.name, plugin.version)
         tb = traceback.format_exc()
-        raise customize.InvalidPlugin(('Initialization of plugin %s failed '
-                                       'with traceback:' % tb) + '\n'+tb)
+        raise InvalidPlugin((_('Initialization of plugin %s failed with traceback:') % tb) + '\n' + tb)
 
 
-def has_external_plugins():
-    'True if there are updateable (ZIP file based) plugins'
+def has_external_plugins() -> bool:
+    "True if there are updateable (ZIP file based) plugins"
     return bool(config['plugins'])
 
 
-def initialize_plugins():
+@functools.lru_cache(maxsize=2)
+def get_system_plugins() -> dict[str, str]:
+    if not system_plugins_loc:
+        return {}
+
+    try:
+        plugin_file_names = os.listdir(system_plugins_loc)
+    except OSError:
+        return {}
+
+    ans = []
+    for plugin_file_name in plugin_file_names:
+        plugin_path = os.path.join(system_plugins_loc, plugin_file_name)
+        if os.path.isfile(plugin_path) and plugin_file_name.endswith('.zip'):
+            ans.append((os.path.splitext(plugin_file_name)[0], plugin_path))
+    return dict(ans)
+
+
+def initialize_plugins(perf: bool = False) -> None:
     global _initialized_plugins
     _initialized_plugins = []
+    system_plugins = get_system_plugins().copy()
+    conflicts = {name for name in config['plugins'] if name in builtin_names or name in system_plugins}
+    for p in conflicts:
+        remove_plugin(p)
+    system_conflicts = [name for name in system_plugins if name in builtin_names]
+    for p in system_conflicts:
+        system_plugins.pop(p, None)
     external_plugins = config['plugins'].copy()
+
+    if 'KoboTouchExtended' in external_plugins and is_disabled('KoboTouch') and not is_disabled('KoboTouchExtended'):
+        # We disable KoboTouchExtended and re-enable KoboTouch so that the Kobo
+        # device keeps working even though KoboTouchExtended is blacklisted.
+        try:
+            disable_plugin_by_name('KoboTouchExtended')
+            enable_plugin('KoboTouch')
+        except Exception:
+            traceback.print_exc()
     for name in BLACKLISTED_PLUGINS:
         external_plugins.pop(name, None)
+        system_plugins.pop(name, None)
     ostdout, ostderr = sys.stdout, sys.stderr
+    if perf:
+        import time
+        from collections import defaultdict
 
-    for zfp in list(external_plugins) + builtins.plugins:
+        times: defaultdict[str, int | float] = defaultdict(int)
+
+    for zfp, installation_type in chain(
+        zip_value(external_plugins.items(), PluginInstallationType.EXTERNAL),
+        zip_value(system_plugins.items(), PluginInstallationType.SYSTEM),
+        zip_value(builtin_plugins, PluginInstallationType.BUILTIN),
+    ):
         try:
-            plugin = initialize_plugin(zfp, None)
+            if not isinstance(zfp, type):
+                # We have a plugin name
+                pname, path = zfp
+                zfp = os.path.join(plugin_dir, pname + '.zip')
+                if not os.path.exists(zfp):
+                    zfp = path
+            try:
+                plugin = load_plugin(zfp) if not isinstance(zfp, type) else zfp
+            except PluginNotFound:
+                continue
+            if perf:
+                st = time.time()
+            plugin = initialize_plugin(
+                plugin,
+                None if isinstance(zfp, type) else zfp,
+                installation_type,
+            )
+            if perf:
+                times[plugin.name] = time.time() - st
             _initialized_plugins.append(plugin)
         except Exception:
-            print('Failed to initialize plugin:', repr(zfp))
+            print('Failed to initialize plugin:', repr(zfp), file=sys.stderr)
+            if True or DEBUG:  # ruff: ignore[expr-or-true]
+                traceback.print_exc()
+    # Prevent a custom plugin from overriding stdout/stderr as this breaks
+    # ipython
     sys.stdout, sys.stderr = ostdout, ostderr
+    if perf:
+        for x in sorted(times, key=lambda x: times[x]):
+            print(f'{x:50}: {times[x]:.3f}')
     _initialized_plugins.sort(key=lambda x: x.priority, reverse=True)
     reread_filetype_plugins()
     reread_metadata_plugins()
@@ -492,37 +964,123 @@ def initialize_plugins():
 initialize_plugins()
 
 
-def initialized_plugins():
-    for plugin in _initialized_plugins:
-        yield plugin
+def initialized_plugins() -> Iterator[Plugin]:
+    yield from _initialized_plugins
 
 
-# CLI
+# }}}
 
-def option_parser():
-    parser = cfg.OptionParser(usage='''\
+# CLI {{{
+
+
+def build_plugin(path: str | os.PathLike[str]) -> None:
+    from ebook_convert import prints
+    from ebook_convert.ptempfile import PersistentTemporaryFile
+    from ebook_convert.utils.zipfile import ZIP_STORED, ZipFile
+
+    path = str(path)
+    names = frozenset(os.listdir(path))
+    if '__init__.py' not in names:
+        prints(path, ' is not a valid plugin')
+        raise SystemExit(1)
+    t = PersistentTemporaryFile('.zip')
+    with ZipFile(t, 'w', ZIP_STORED) as zf:
+        zf.add_dir(path, simple_filter=lambda x: x in {'.git', '.bzr', '.svn', '.hg'})
+    t.close()
+    plugin = add_plugin(t.name)
+    os.remove(t.name)
+    prints('Plugin updated:', plugin.name, plugin.version)
+
+
+def option_parser() -> OptionParser:
+    parser = OptionParser(
+        usage=_('''\
     %prog options
 
     Customize calibre by loading external plugins.
     ''')
-    parser.add_option('-a', '--add-plugin', default=None,
-                      help='Add a plugin by specifying the path to the ZIP '
-                      'file containing it.')
-    parser.add_option('-b', '--build-plugin', default=None,
-                      help='For plugin developers: Path to the directory '
-                      'where you are developing the plugin. This command will '
-                      'automatically zip up the plugin and update it in '
-                      'calibre.')
-    parser.add_option('-r', '--remove-plugin', default=None,
-                      help='Remove a custom plugin by name. Has no effect on '
-                      'builtin plugins')
-    parser.add_option('--customize-plugin', default=None,
-                      help='Customize plugin. Specify name of plugin and '
-                      'customization string separated by a comma.')
-    parser.add_option('-l', '--list-plugins', default=False,
-                      action='store_true', help='List all installed plugins')
-    parser.add_option('--enable-plugin', default=None,
-                      help='Enable the named plugin')
-    parser.add_option('--disable-plugin', default=None,
-                      help='Disable the named plugin')
+    )
+    parser.add_option('-a', '--add-plugin', default=None, help=_('Add a plugin by specifying the path to the ZIP file containing it.'))
+    parser.add_option(
+        '-b',
+        '--build-plugin',
+        default=None,
+        help=_(
+            'For plugin developers: Path to the folder where you are'
+            ' developing the plugin. This command will automatically zip '
+            'up the plugin and update it in calibre.'
+        ),
+    )
+    parser.add_option(
+        '-r',
+        '--remove-plugin',
+        default=None,
+        help=_('Remove a custom plugin by name. Has no effect on builtin plugins'),
+    )
+    parser.add_option(
+        '--customize-plugin',
+        default=None,
+        help=_(
+            'Customize plugin. Specify name of plugin and customization string separated by a comma.'
+            ' The customization string is the same as you would enter when customizing the plugin in the main calibre GUI.'
+        ),
+    )
+    parser.add_option('-l', '--list-plugins', default=False, action='store_true', help=_('List all installed plugins'))
+    parser.add_option('--enable-plugin', default=None, help=_('Enable the named plugin'))
+    parser.add_option('--disable-plugin', default=None, help=_('Disable the named plugin'))
     return parser
+
+
+def main(args: list[str] = sys.argv) -> int:
+    parser = option_parser()
+    if len(args) < 2:
+        parser.print_help()
+        return 1
+    opts, args = parser.parse_args(args)
+    if opts.add_plugin is not None:
+        plugin = add_plugin(opts.add_plugin)
+        print('Plugin added:', plugin.name, plugin.version)
+    if opts.build_plugin is not None:
+        build_plugin(opts.build_plugin)
+    if opts.remove_plugin is not None:
+        if remove_plugin(opts.remove_plugin):
+            print('Plugin removed')
+        else:
+            print('No custom plugin named', opts.remove_plugin)
+    if opts.customize_plugin is not None:
+        try:
+            name, custom = opts.customize_plugin.split(',')
+        except ValueError:
+            name, custom = opts.customize_plugin, ''
+        plugin = find_plugin(name.strip())
+        if plugin is None:
+            print(f'No plugin with the name {name} exists')
+            return 1
+        customize_plugin(plugin, custom)
+    if opts.enable_plugin is not None:
+        enable_plugin(opts.enable_plugin.strip())
+    if opts.disable_plugin is not None:
+        disable_plugin(opts.disable_plugin.strip())
+    if opts.list_plugins:
+        type_len = name_len = 0
+        for plugin in initialized_plugins():
+            type_len, name_len = max(type_len, len(plugin.type)), max(name_len, len(plugin.name))
+        fmt = f'%-{type_len + 1}s%-{name_len + 1}s%-15s%-15s%s'
+        print(fmt % tuple('Type|Name|Version|Disabled|Site Customization'.split('|')))
+        print()
+        for plugin in initialized_plugins():
+            print(fmt % (plugin.type, plugin.name, plugin.version, is_disabled(plugin), plugin_customization(plugin)))
+            print('\t', plugin.description)
+            if plugin.is_customizable():
+                try:
+                    print('\t', plugin.customization_help())
+                except NotImplementedError:
+                    pass
+            print()
+
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())
+# }}}

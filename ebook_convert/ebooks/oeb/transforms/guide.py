@@ -1,3 +1,17 @@
+#!/usr/bin/env python
+# License: GPLv3 Copyright: 2009, Kovid Goyal <kovid@kovidgoyal.net>
+
+from __future__ import annotations
+from typing import TYPE_CHECKING
+
+from lxml import etree
+
+if TYPE_CHECKING:
+    from optparse import Values
+
+    from ebook_convert.ebooks.conversion.plumber import OptionValues
+    from ebook_convert.ebooks.oeb.base import OEBBook
+
 # Guide types that are kept by Clean
 KNOWN_GUIDE_TYPES = frozenset((
     'cover',
@@ -25,18 +39,24 @@ KNOWN_GUIDE_TYPES = frozenset((
 CUSTOM_GUIDE_TYPE_PREFIX = 'other.calibre-epub-type-'
 
 
-class Clean(object):
-    '''Clean up guide, leaving only known values '''
+class Clean:
+    """Clean up guide, leaving only known values"""
 
-    def __call__(self, oeb, opts):
+    def __call__(self, oeb: OEBBook, opts: Values | OptionValues) -> None:
         self.oeb, self.log, self.opts = oeb, oeb.log, opts
 
         if 'cover' not in self.oeb.guide:
             covers = []
-            for x in ('other.ms-coverimage-standard', 'coverimagestandard',
-                    'other.ms-titleimage-standard', 'other.ms-titleimage',
-                    'other.ms-coverimage', 'other.ms-thumbimage-standard',
-                    'other.ms-thumbimage', 'thumbimagestandard'):
+            for x in (
+                'other.ms-coverimage-standard',
+                'coverimagestandard',
+                'other.ms-titleimage-standard',
+                'other.ms-titleimage',
+                'other.ms-coverimage',
+                'other.ms-thumbimage-standard',
+                'other.ms-thumbimage',
+                'thumbimagestandard',
+            ):
                 if x in self.oeb.guide:
                     href = self.oeb.guide[x].href
                     try:
@@ -44,26 +64,27 @@ class Clean(object):
                     except KeyError:
                         continue
                     else:
-                        covers.append([self.oeb.guide[x], len(item.data)])
+                        data = item.data
+                        # len() raised TypeError for stylesheets and missing data
+                        assert isinstance(data, (etree._Element, str, bytes))
+                        covers.append((self.oeb.guide[x], len(data)))
 
             covers.sort(key=lambda x: x[1], reverse=True)
             if covers:
                 ref = covers[0][0]
                 if len(covers) > 1:
-                    self.log.info('Choosing %s:%s as the cover', ref.type,
-                                  ref.href)
+                    self.log(f'Choosing {ref.type}:{ref.href} as the cover')
                 ref.type = 'cover'
                 self.oeb.guide.refs['cover'] = ref
 
-        if ('start' in self.oeb.guide and 'text' not in self.oeb.guide):
+        if 'start' in self.oeb.guide and 'text' not in self.oeb.guide:
             # Prefer text to start as per the OPF 2.0 spec
             x = self.oeb.guide['start']
             self.oeb.guide.add('text', x.title, x.href)
             self.oeb.guide.remove('start')
 
         for x in list(self.oeb.guide):
-            if (x.lower() not in KNOWN_GUIDE_TYPES and
-                    not x.lower().startswith(CUSTOM_GUIDE_TYPE_PREFIX)):
+            if x.lower() not in KNOWN_GUIDE_TYPES and not x.lower().startswith(CUSTOM_GUIDE_TYPE_PREFIX):
                 item = self.oeb.guide[x]
                 if item.title and item.title.lower() == 'start':
                     continue

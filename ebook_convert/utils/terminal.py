@@ -1,45 +1,65 @@
-import fcntl
+#!/usr/bin/env python
+# License: GPLv3 Copyright: 2012, Kovid Goyal <kovid at kovidgoyal.net>
+
+from __future__ import annotations
 import os
 import re
-import struct
 import sys
-import termios
+from typing import IO, TYPE_CHECKING, Self, overload
+
+from ebook_convert.constants import iswindows
+from ebook_convert.prints import is_binary
+
+if TYPE_CHECKING:
+    from ctypes import Structure
+
+if iswindows:
+    import ctypes.wintypes
+
+    class CONSOLE_SCREEN_BUFFER_INFO(ctypes.Structure):
+        _fields_ = [
+            ('dwSize', ctypes.wintypes._COORD),
+            ('dwCursorPosition', ctypes.wintypes._COORD),
+            ('wAttributes', ctypes.wintypes.WORD),
+            ('srWindow', ctypes.wintypes._SMALL_RECT),
+            ('dwMaximumWindowSize', ctypes.wintypes._COORD),
+        ]
 
 
-def fmt(code):
-    return '\033[%dm' % code
+def fmt(code: int) -> str:
+    return f'\x1b[{code}m'
 
 
-RATTRIBUTES = dict(
-        zip(range(1, 9), (
-            'bold',
-            'dark',
-            '',
-            'underline',
-            'blink',
-            '',
-            'reverse',
-            'concealed'
-            )
-        ))
-ATTRIBUTES = {v:fmt(k) for k, v in RATTRIBUTES.items()}
+def polyglot_write(stream: IO, is_binary: bool, encoding: str, text: str | bytes) -> int:
+    binary = isinstance(text, bytes)
+    if binary:
+        if is_binary:
+            return stream.write(text)
+        buffer = getattr(stream, 'buffer', None)
+        if buffer is None:
+            return stream.write(text.decode('utf-8', 'replace'))
+        return buffer.write(text)
+    if is_binary:
+        text = text.encode(encoding, 'replace')
+    return stream.write(text)
+
+
+RATTRIBUTES = dict(zip(range(1, 9), ('bold', 'dark', '', 'underline', 'blink', '', 'reverse', 'concealed')))
+ATTRIBUTES = {v: fmt(k) for k, v in RATTRIBUTES.items()}
 del ATTRIBUTES['']
 
 RBACKGROUNDS = dict(
-        zip(range(41, 48), (
-            'red',
-            'green',
-            'yellow',
-            'blue',
-            'magenta',
-            'cyan',
-            'white'
-            ),
-    ))
-BACKGROUNDS = {v:fmt(k) for k, v in RBACKGROUNDS.items()}
+    zip(
+        range(41, 48),
+        ('red', 'green', 'yellow', 'blue', 'magenta', 'cyan', 'white'),
+    )
+)
+BACKGROUNDS = {v: fmt(k) for k, v in RBACKGROUNDS.items()}
 
 RCOLORS = dict(
-        zip(range(31, 38), (
+    zip(
+        range(31, 38),
+        (
             'red',
             'green',
             'yellow',
@@ -47,14 +67,19 @@ RCOLORS = dict(
             'magenta',
             'cyan',
             'white',
-            ),
-        ))
-COLORS = {v:fmt(k) for k, v in RCOLORS.items()}
+        ),
+    )
+)
+COLORS = {v: fmt(k) for k, v in RCOLORS.items()}
 
 RESET = fmt(0)
 
 
-def colored(text, fg=None, bg=None, bold=False):
+@overload
+def colored(text: str, fg: str | None = None, bg: str | None = None, bold: bool = False) -> str: ...
+@overload
+def colored(text: bytes, fg: str | None = None, bg: str | None = None, bold: bool = False) -> bytes: ...
+def colored(text: str | bytes, fg: str | None = None, bg: str | None = None, bold: bool = False) -> str | bytes:
     prefix = []
     if fg is not None:
         prefix.append(COLORS[fg])
@@ -62,40 +87,37 @@ def colored(text, fg=None, bg=None, bold=False):
         prefix.append(BACKGROUNDS[bg])
     if bold:
         prefix.append(ATTRIBUTES['bold'])
-    prefix = ''.join(prefix)
-    suffix = RESET
+    sprefix = ''.join(prefix)
     if isinstance(text, bytes):
-        prefix = prefix.encode('ascii')
-        suffix = suffix.encode('ascii')
-    return prefix + text + suffix
+        return sprefix.encode('ascii') + text + RESET.encode('ascii')
+    return sprefix + text + RESET
 
 
-class Detect(object):
-
-    def __init__(self, stream):
-        self.stream = stream or sys.stdout
-        self.isatty = getattr(self.stream, 'isatty', lambda : False)()
-        force_ansi = False
+class Detect:
+    def __init__(self, stream: IO | None) -> None:
+        self.stream: IO = stream or sys.stdout
+        self.is_binary = is_binary(self.stream)
+        self.isatty = getattr(self.stream, 'isatty', lambda: False)()
+        force_ansi = 'CALIBRE_FORCE_ANSI' in os.environ
         if not self.isatty and force_ansi:
             self.isatty = True
-        self.isansi = force_ansi or not False
-        self.set_console = self.write_console = None
-        self.is_console = False
+        self.isansi = force_ansi or not iswindows or (iswindows and sys.getwindowsversion().major >= 10)
 
 
 class ColoredStream(Detect):
-
-    def __init__(self, stream=None, fg=None, bg=None, bold=False):
-        stream = getattr(stream, 'buffer', stream)
+    def __init__(self, stream: IO | None = None, fg: str | None = None, bg: str | None = None, bold: bool = False) -> None:
         Detect.__init__(self, stream)
         self.fg, self.bg, self.bold = fg, bg, bold
 
-    def cwrite(self, what):
-        if not isinstance(what, bytes):
-            what = what.encode('ascii')
+    def cwrite(self, what: str | bytes) -> None:
+        if self.is_binary:
+            if not isinstance(what, bytes):
+                what = what.encode('utf-8')
+        elif isinstance(what, bytes):
+            what = what.decode('utf-8', 'replace')
         self.stream.write(what)
 
-    def __enter__(self):
+    def __enter__(self) -> Self:
         if not self.isatty:
             return self
         if self.isansi:
@@ -105,12 +127,9 @@ class ColoredStream(Detect):
                 self.cwrite(BACKGROUNDS[self.bg])
             if self.fg is not None:
                 self.cwrite(COLORS[self.fg])
-        elif self.set_console is not None:
-            if self.wval != 0:
-                self.set_console(self.file_handle, self.wval)
         return self
 
-    def __exit__(self, *args, **kwargs):
+    def __exit__(self, *args: object, **kwargs: object) -> None:
         if not self.isatty:
             return
         if not self.fg and not self.bg and not self.bold:
@@ -118,22 +137,17 @@ class ColoredStream(Detect):
         if self.isansi:
             self.cwrite(RESET)
             self.stream.flush()
-        elif self.set_console is not None:
-            self.set_console(self.file_handle, self.default_console_text_attributes)
 
 
 class ANSIStream(Detect):
-
     ANSI_RE = r'\033\[((?:\d|;)*)([a-zA-Z])'
 
-    def __init__(self, stream=None):
-        super(ANSIStream, self).__init__(stream)
-        self.encoding = getattr(self.stream, 'encoding', 'utf-8') or 'utf-8'
-        self.stream_takes_unicode = hasattr(self.stream, 'buffer')
-        self.last_state = (None, None, False)
+    def __init__(self, stream: IO | None = None) -> None:
+        super().__init__(stream)
+        self.encoding = getattr(self.stream, 'encoding', None) or 'utf-8'
         self._ansi_re_bin = self._ansi_re_unicode = None
 
-    def ansi_re(self, binary=False):
+    def ansi_re(self, binary: bool = False) -> re.Pattern:
         attr = '_ansi_re_bin' if binary else '_ansi_re_unicode'
         ans = getattr(self, attr)
         if ans is None:
@@ -144,97 +158,78 @@ class ANSIStream(Detect):
             setattr(self, attr, ans)
         return ans
 
-    def write(self, text):
+    def write(self, text: str | bytes) -> int:
         if not self.isatty:
             return self.strip_and_write(text)
 
         if self.isansi:
-            return self.stream.write(text)
+            return self.polyglot_write(text)
 
-        if not self.isansi and self.set_console is None:
-            return self.strip_and_write(text)
+        return self.strip_and_write(text)
 
-        self.write_and_convert(text)
+    def polyglot_write(self, text: str | bytes) -> int:
+        return polyglot_write(self.stream, self.is_binary, self.encoding, text)
 
-    def polyglot_write(self, text):
-        binary = isinstance(text, bytes)
-        stream = self.stream
-        if self.stream_takes_unicode:
-            if binary:
-                stream = self.stream.buffer
-        else:
-            if not binary:
-                text = text.encode(self.encoding, 'replace')
-        stream.write(text)
-
-    def strip_and_write(self, text):
+    def strip_and_write(self, text: str | bytes) -> int:
         binary = isinstance(text, bytes)
         pat = self.ansi_re(binary)
         repl = b'' if binary else ''
-        self.polyglot_write(pat.sub(repl, text))
-
-    def write_and_convert(self, text):
-        '''
-        Write the given text to our wrapped stream, stripping any ANSI
-        sequences from the text, and optionally converting them into win32
-        calls.
-        '''
-        cursor = 0
-        binary = isinstance(text, bytes)
-        for match in self.ansi_re(binary).finditer(text):
-            start, end = match.span()
-            self.write_plain_text(text, cursor, start)
-            self.convert_ansi(*match.groups())
-            cursor = end
-        self.write_plain_text(text, cursor, len(text))
-        self.set_console(self.file_handle, self.default_console_text_attributes)
-        self.stream.flush()
-
-    def write_plain_text(self, text, start, end):
-        if start < end:
-            text = text[start:end]
-            self.polyglot_write(text)
-
-    def convert_ansi(self, paramstring, command):
-        if isinstance(paramstring, bytes):
-            paramstring = paramstring.decode('ascii', 'replace')
-        if isinstance(command, bytes):
-            command = command.decode('ascii', 'replace')
-        params = self.extract_params(paramstring)
-        self.call_win32(command, params)
-
-    def extract_params(self, paramstring):
-        def split(paramstring):
-            for p in paramstring.split(';'):
-                if p:
-                    yield int(p)
-        return tuple(split(paramstring))
-
-    def call_win32(self, command, params):
-        if command != 'm':
-            return
-        fg, bg, bold = self.last_state
-
-        for param in params:
-            if param in RCOLORS:
-                fg = RCOLORS[param]
-            elif param in RBACKGROUNDS:
-                bg = RBACKGROUNDS[param]
-            elif param == 1:
-                bold = True
-            elif param == 0:
-                fg, bg, bold = None, None, False
-
-        self.last_state = (fg, bg, bold)
-
-        self.set_console(self.file_handle, self.default_console_text_attributes)
+        return self.polyglot_write(pat.sub(repl, text))
 
 
-def get_term_geometry():
+def windows_terminfo() -> Structure:
+    from ctypes import Structure, byref
+    from ctypes.wintypes import SHORT, WORD
 
-    def ioctl_GWINSZ(fd):
+    class COORD(Structure):
+        """struct in wincon.h"""
+
+        _fields_ = [
+            ('X', SHORT),
+            ('Y', SHORT),
+        ]
+
+    class SMALL_RECT(Structure):
+        """struct in wincon.h."""
+
+        _fields_ = [
+            ('Left', SHORT),
+            ('Top', SHORT),
+            ('Right', SHORT),
+            ('Bottom', SHORT),
+        ]
+
+    class CONSOLE_SCREEN_BUFFER_INFO(Structure):
+        """struct in wincon.h."""
+
+        _fields_ = [
+            ('dwSize', COORD),
+            ('dwCursorPosition', COORD),
+            ('wAttributes', WORD),
+            ('srWindow', SMALL_RECT),
+            ('dwMaximumWindowSize', COORD),
+        ]
+
+    csbi = CONSOLE_SCREEN_BUFFER_INFO()
+    import msvcrt
+
+    file_handle = msvcrt.get_osfhandle(sys.stdout.fileno())
+    from ctypes import windll
+
+    success = windll.kernel32.GetConsoleScreenBufferInfo(file_handle, byref(csbi))
+    if not success:
+        raise Exception('stdout is not a console?')
+    return csbi
+
+
+def get_term_geometry() -> tuple[int | None, int | None]:
+    import fcntl
+    import struct
+    import termios
+
+    def ioctl_GWINSZ(fd: int) -> tuple[int | None, int | None]:
         try:
-            return struct.unpack(b'HHHH', fcntl.ioctl(fd, termios.TIOCGWINSZ, b'\0'*8))[:2]
+            return struct.unpack(b'HHHH', fcntl.ioctl(fd, termios.TIOCGWINSZ, b'\0' * 8))[:2]
         except Exception:
             return None, None
 
@@ -255,11 +250,40 @@ def get_term_geometry():
     return None, None
 
 
-def geometry():
-    try:
-        lines, cols = get_term_geometry()
-        if lines is not None:
-            return cols, lines
-    except Exception:
-        pass
-    return 80, 25
+def geometry() -> tuple[int, int]:
+    if iswindows:
+        try:
+            ti = windows_terminfo()
+            return (ti.dwSize.X or 80, ti.dwSize.Y or 25)
+        except Exception:
+            return 80, 25
+    else:
+        try:
+            lines, cols = get_term_geometry()
+            if lines is not None and cols is not None:
+                return cols, lines
+        except Exception:
+            pass
+        return 80, 25
+
+
+def test() -> None:
+    s = ANSIStream()
+
+    text = [
+        colored(t, fg=t) + '. ' + colored(t, fg=t, bold=True) + '.'
+        for t in (
+            'red',
+            'yellow',
+            'green',
+            'white',
+            'cyan',
+            'magenta',
+            'blue',
+        )
+    ]
+    s.write('\n'.join(text))
+    u = 'Михаил fällen'
+    print()
+    s.write(u)
+    print()

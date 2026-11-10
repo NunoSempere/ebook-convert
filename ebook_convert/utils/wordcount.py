@@ -1,3 +1,5 @@
+#!/usr/bin/env python
+
 """
 Get word, character, and Asian character counts
 
@@ -20,13 +22,27 @@ Sourced from:
 http://ginstrom.com/scribbles/2008/05/17/counting-words-etc-in-an-html-file-with-python/
 http://ginstrom.com/scribbles/2007/10/06/counting-words-characters-and-asian-characters-with-python/
 """
+
+from __future__ import annotations
+from typing import TYPE_CHECKING, Protocol, cast
+
+if TYPE_CHECKING:
+
+    class WordCount(Protocol):
+        characters: int
+        chars_no_spaces: int
+        asian_chars: int
+        non_asian_words: int
+        words: int
+
+
 __version__ = 0.1
-__author__ = "Ryan Ginstrom"
+__author__ = 'Ryan Ginstrom'
 
 IDEOGRAPHIC_SPACE = 0x3000
 
 
-def is_asian(char):
+def is_asian(char: str) -> bool:
     """Is the character Asian?"""
 
     # 0x3000 is ideographic space (i.e. double-byte space)
@@ -34,14 +50,14 @@ def is_asian(char):
     return ord(char) > IDEOGRAPHIC_SPACE
 
 
-def filter_jchars(c):
+def filter_jchars(c: str) -> str:
     """Filters Asian characters to spaces"""
     if is_asian(c):
         return ' '
     return c
 
 
-def nonj_len(word):
+def nonj_len(word: str) -> int:
     """Returns number of non-Asian words in {word}
     - 日本語AアジアンB -> 2
     - hello -> 1
@@ -57,7 +73,7 @@ def nonj_len(word):
     return len(''.join(chars).split())
 
 
-def get_wordcount(text):
+def get_wordcount(text: str) -> dict[str, int]:
     """Get the word/character count for text
 
     @param text: The text of the segment
@@ -65,26 +81,29 @@ def get_wordcount(text):
 
     characters = len(text)
     chars_no_spaces = sum(not x.isspace() for x in text)
-    asian_chars =  sum(is_asian(x) for x in text)
+    asian_chars = sum(is_asian(x) for x in text)
     non_asian_words = nonj_len(text)
     words = non_asian_words + asian_chars
 
-    return dict(characters=characters,
-                chars_no_spaces=chars_no_spaces,
-                asian_chars=asian_chars,
-                non_asian_words=non_asian_words,
-                words=words)
+    return {
+        'characters': characters,
+        'chars_no_spaces': chars_no_spaces,
+        'asian_chars': asian_chars,
+        'non_asian_words': non_asian_words,
+        'words': words,
+    }
 
 
-def dict2obj(dictionary):
+def dict2obj(dictionary: dict[str, int]) -> object:
     """Transform a dictionary into an object"""
-    class Obj(object):
 
-        def __init__(self, dictionary):
+    class Obj:
+        def __init__(self, dictionary: dict[str, int]) -> None:
             self.__dict__.update(dictionary)
+
     return Obj(dictionary)
 
 
-def get_wordcount_obj(text):
+def get_wordcount_obj(text: str) -> WordCount:
     """Get the wordcount as an object rather than a dictionary"""
-    return dict2obj(get_wordcount(text))
+    return cast('WordCount', dict2obj(get_wordcount(text)))

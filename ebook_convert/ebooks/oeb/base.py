@@ -1,45 +1,153 @@
+# License: GPLv3 Copyright: 2008, Marshall T. Vandegrift <llasram@gmail.com>
+
 """
 Basic support for manipulating OEB 1.x/2.0 content and metadata.
 """
-import collections
-import itertools
+
+from __future__ import annotations
 import logging
-import mimetypes
 import numbers
-import operator
 import os
 import re
-import string
 import sys
-import urllib.parse
+from collections import defaultdict
+from functools import lru_cache
+from itertools import count
+from operator import attrgetter
+from typing import TYPE_CHECKING, Literal, Never, Self, cast, overload
+from urllib.parse import urldefrag, urljoin, urlparse, urlunparse
 
-from lxml import etree
-from lxml import html
+from lxml import etree, html
 
-from ebook_convert import constants as const
-from ebook_convert.constants_old import filesystem_encoding, __version__
+from ebook_convert import as_unicode, force_unicode, get_types_map
+from ebook_convert.constants import __version__, filesystem_encoding
 from ebook_convert.ebooks.chardet import xml_to_unicode
 from ebook_convert.ebooks.conversion.preprocess import CSSPreProcessor
-from ebook_convert.ebooks.oeb import parse_utils
+from ebook_convert.ebooks.oeb.parse_utils import XHTML, XHTML_NS, NotHTML, barename, is_element_list, is_str_list, namespace, parse_html
+from ebook_convert.translations.dynamic import translate
 from ebook_convert.utils.cleantext import clean_xml_chars
-from ebook_convert.utils import encoding as uenc
-from ebook_convert.utils.localization import is_rtl_lang
+from ebook_convert.utils.icu import numeric_sort_key
+from ebook_convert.utils.icu import title_case as icu_title
+from ebook_convert.utils.localization import _, __, is_rtl_lang
 from ebook_convert.utils.short_uuid import uuid4
+from ebook_convert.utils.xml_parse import safe_xml_fromstring
+from ebook_convert.polyglot.urllib import unquote as urlunquote
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Collection, Iterator, Mapping
+    from optparse import Values
+    from typing import Protocol
+
+    from css_parser.css import CSSStyleSheet
+
+    from ebook_convert.ebooks.oeb.stylizer import StylizerRules
+    from ebook_convert.ebooks.oeb.transforms.flatcss import EmbedFontsCSSRules
+    from ebook_convert.utils.logging import Log
+
+    class HasCSSText(Protocol):
+        # Any css_parser object (stylesheet, rule, declaration, value, ...)
+        @property
+        def cssText(self) -> str | bytes: ...
+
+    class OEBContainer(Protocol):
+        # NullContainer, DirContainer, calibre.ebooks.lit.reader.LitContainer, ...
+        def read(self, path: str | None, /) -> str | bytes: ...
+        def exists(self, path: str, /) -> bool: ...
+
+    type NSMap = Mapping[str | None, str]
+    # The result of evaluating an XPath expression. List entries are tuples only for the namespace:: axis
+    type XPathResult = bool | float | str | list[etree._Element | str | tuple[str, str]]
+    # The content of a manifest item, see Manifest.Item.data
+    type ItemData = etree._Element | CSSStyleSheet | str | bytes
+    type NSRMap = Mapping[str, str | None]
+
+XML_NS = 'http://www.w3.org/XML/1998/namespace'
+OEB_DOC_NS = 'http://openebook.org/namespaces/oeb-document/1.0/'
+OPF1_NS = 'http://openebook.org/namespaces/oeb-package/1.0/'
+OPF2_NS = 'http://www.idpf.org/2007/opf'
+OPF_NSES = {OPF1_NS, OPF2_NS}
+DC09_NS = 'http://purl.org/metadata/dublin_core'
+DC10_NS = 'http://purl.org/dc/elements/1.0/'
+DC11_NS = 'http://purl.org/dc/elements/1.1/'
+DC_NSES = {DC09_NS, DC10_NS, DC11_NS}
+XSI_NS = 'http://www.w3.org/2001/XMLSchema-instance'
+DCTERMS_NS = 'http://purl.org/dc/terms/'
+NCX_NS = 'http://www.daisy.org/z3986/2005/ncx/'
+SVG_NS = 'http://www.w3.org/2000/svg'
+XLINK_NS = 'http://www.w3.org/1999/xlink'
+CALIBRE_NS = 'http://calibre.kovidgoyal.net/2009/metadata'
+RE_NS = 'http://exslt.org/regular-expressions'
+MBP_NS = 'http://www.mobipocket.com'
+EPUB_NS = 'http://www.idpf.org/2007/ops'
+MATHML_NS = 'http://www.w3.org/1998/Math/MathML'
+SMIL_NS = 'http://www.w3.org/ns/SMIL'
+
+XPNSMAP = {
+    'h': XHTML_NS,
+    'o1': OPF1_NS,
+    'o2': OPF2_NS,
+    'd09': DC09_NS,
+    'd10': DC10_NS,
+    'd11': DC11_NS,
+    'xsi': XSI_NS,
+    'dt': DCTERMS_NS,
+    'ncx': NCX_NS,
+    'svg': SVG_NS,
+    'xl': XLINK_NS,
+    're': RE_NS,
+    'mathml': MATHML_NS,
+    'mbp': MBP_NS,
+    'calibre': CALIBRE_NS,
+    'epub': EPUB_NS,
+    'smil': SMIL_NS,
+}
+
+OPF1_NSMAP = {'dc': DC11_NS, 'oebpackage': OPF1_NS}
+OPF2_NSMAP = {'opf': OPF2_NS, 'dc': DC11_NS, 'dcterms': DCTERMS_NS, 'xsi': XSI_NS, 'calibre': CALIBRE_NS}
 
 
-def tag(tag_ns, name):
-    tag_map = {'calibre': const.CALIBRE_NS,
-               'dc': const.DC11_NS,
-               'dcterms': const.DCTERMS_NS,
-               'epub': const.EPUB_NS,
-               'ncx': const.NCX_NS,
-               'opf': const.OPF2_NS,
-               'svg': const.SVG_NS,
-               'xhtml': const.XHTML_NS,
-               'xlink': const.XLINK_NS,
-               'xml': const.XML_NS,
-               'xsi': const.XSI_NS}
-    return '{%s}%s' % (tag_map[tag_ns], name)
+def XML(name: str) -> str:
+    return f'{{{XML_NS}}}{name}'
+
+
+def OPF(name: str) -> str:
+    return f'{{{OPF2_NS}}}{name}'
+
+
+def DC(name: str) -> str:
+    return f'{{{DC11_NS}}}{name}'
+
+
+def XSI(name: str) -> str:
+    return f'{{{XSI_NS}}}{name}'
+
+
+def DCTERMS(name: str) -> str:
+    return f'{{{DCTERMS_NS}}}{name}'
+
+
+def NCX(name: str) -> str:
+    return f'{{{NCX_NS}}}{name}'
+
+
+def SVG(name: str) -> str:
+    return f'{{{SVG_NS}}}{name}'
+
+
+def XLINK(name: str) -> str:
+    return f'{{{XLINK_NS}}}{name}'
+
+
+def SMIL(name: str) -> str:
+    return f'{{{SMIL_NS}}}{name}'
+
+
+def EPUB(name: str) -> str:
+    return f'{{{EPUB_NS}}}{name}'
+
+
+def CALIBRE(name: str) -> str:
+    return f'{{{CALIBRE_NS}}}{name}'
 
 
 _css_url_re = re.compile(r'url\s*\([\'"]{0,1}(.*?)[\'"]{0,1}\)', re.I)
@@ -47,38 +155,96 @@ _css_import_re = re.compile(r'@import "(.*?)"')
 _archive_re = re.compile(r'[^ ]+')
 
 # Tags that should not be self closed in epub output
-self_closing_bad_tags = {'a', 'abbr', 'address', 'article', 'aside', 'audio',
-                         'b', 'bdo', 'blockquote', 'body', 'button', 'cite',
-                         'code', 'dd', 'del', 'details', 'dfn', 'div', 'dl',
-                         'dt', 'em', 'fieldset', 'figcaption', 'figure',
-                         'footer', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
-                         'header', 'hgroup', 'i', 'iframe', 'ins', 'kbd',
-                         'label', 'legend', 'li', 'map', 'mark', 'meter',
-                         'nav', 'ol', 'output', 'p', 'pre', 'progress', 'q',
-                         'rp', 'rt', 'samp', 'section', 'select', 'small',
-                         'span', 'strong', 'sub', 'summary', 'sup',
-                         'textarea', 'time', 'ul', 'var', 'video', 'title',
-                         'script', 'style'}
+self_closing_bad_tags = {
+    'a',
+    'abbr',
+    'address',
+    'article',
+    'aside',
+    'audio',
+    'b',
+    'bdo',
+    'blockquote',
+    'body',
+    'button',
+    'cite',
+    'code',
+    'dd',
+    'del',
+    'details',
+    'dfn',
+    'div',
+    'dl',
+    'dt',
+    'em',
+    'fieldset',
+    'figcaption',
+    'figure',
+    'footer',
+    'h1',
+    'h2',
+    'h3',
+    'h4',
+    'h5',
+    'h6',
+    'header',
+    'hgroup',
+    'i',
+    'iframe',
+    'ins',
+    'kbd',
+    'label',
+    'legend',
+    'li',
+    'map',
+    'mark',
+    'meter',
+    'nav',
+    'ol',
+    'output',
+    'p',
+    'pre',
+    'progress',
+    'q',
+    'rp',
+    'rt',
+    'samp',
+    'section',
+    'select',
+    'small',
+    'span',
+    'strong',
+    'sub',
+    'summary',
+    'sup',
+    'textarea',
+    'time',
+    'ul',
+    'var',
+    'video',
+    'title',
+    'script',
+    'style',
+}
 
 
-def css_text(x):
+def css_text(x: HasCSSText) -> str:
     ans = x.cssText
     if isinstance(ans, bytes):
         ans = ans.decode('utf-8', 'replace')
     return ans
 
 
-def as_string_type(pat, for_unicode):
+def as_string_type(pat: str | bytes, for_unicode: bool) -> str | bytes:
     if for_unicode:
         if isinstance(pat, bytes):
             pat = pat.decode('utf-8')
-    else:
-        if isinstance(pat, str):
-            pat = pat.encode('utf-8')
+    elif isinstance(pat, str):
+        pat = pat.encode('utf-8')
     return pat
 
 
-def self_closing_pat(for_unicode):
+def self_closing_pat(for_unicode: bool) -> re.Pattern[str] | re.Pattern[bytes]:
     attr = 'unicode_ans' if for_unicode else 'bytes_ans'
     ans = getattr(self_closing_pat, attr, None)
     if ans is None:
@@ -91,39 +257,44 @@ def self_closing_pat(for_unicode):
     return ans
 
 
-def close_self_closing_tags(raw):
+@overload
+def close_self_closing_tags(raw: str) -> str: ...
+@overload
+def close_self_closing_tags(raw: bytes) -> bytes: ...
+def close_self_closing_tags(raw: str | bytes) -> str | bytes:
     for_unicode = isinstance(raw, str)
     repl = as_string_type(r'<\g<tag>\g<arg>></\g<tag>>', for_unicode)
     pat = self_closing_pat(for_unicode)
-    return pat.sub(repl, raw)
+    return pat.sub(repl, raw)  # ty: ignore[no-matching-overload] pat and repl are str or bytes matching raw
 
 
-def uuid_id():
+def uuid_id() -> str:
     return 'u' + uuid4()
 
 
-def itercsslinks(raw):
+def itercsslinks(raw: str) -> Iterator[tuple[str, int]]:
     for match in _css_url_re.finditer(raw):
         yield match.group(1), match.start(1)
     for match in _css_import_re.finditer(raw):
         yield match.group(1), match.start(1)
 
 
-_link_attrs = set(html.defs.link_attrs) | {tag('xlink', 'href'), 'poster',
-                                           'altimg'}
+_link_attrs = set(html.defs.link_attrs) | {XLINK('href'), 'poster', 'altimg'}  # type: ignore
 
 
-def iterlinks(root, find_links_in_css=True):
-    '''
+def iterlinks(root: etree._Element, find_links_in_css: bool = True) -> Iterator[tuple[etree._Element, str | None, str, int]]:
+    """
     Iterate over all links in a OEB Document.
 
     :param root: A valid lxml.etree element.
-    '''
+    """
     assert etree.iselement(root)
 
     for el in root.iter('*'):
         try:
-            tag = parse_utils.barename(el.tag).lower()
+            eltag = el.tag
+            assert isinstance(eltag, str)  # iter('*') yields only elements
+            tag = barename(eltag).lower()
         except Exception:
             continue
         attribs = el.attrib
@@ -133,19 +304,19 @@ def iterlinks(root, find_links_in_css=True):
             # <object> tags have attributes that are relative to
             # codebase
             if 'codebase' in attribs:
-                codebase = el.get('codebase')
+                codebase = attribs['codebase']
                 yield (el, 'codebase', codebase, 0)
             for attrib in 'classid', 'data':
                 if attrib in attribs:
-                    value = el.get(attrib)
+                    value = attribs[attrib]
                     if codebase is not None:
-                        value = urllib.parse.urljoin(codebase, value)
+                        value = urljoin(codebase, value)
                     yield (el, attrib, value, 0)
             if 'archive' in attribs:
-                for match in _archive_re.finditer(el.get('archive')):
+                for match in _archive_re.finditer(attribs['archive']):
                     value = match.group(0)
                     if codebase is not None:
-                        value = urllib.parse.urljoin(codebase, value)
+                        value = urljoin(codebase, value)
                     yield (el, 'archive', value, match.start())
         else:
             for attr in attribs:
@@ -164,25 +335,25 @@ def iterlinks(root, find_links_in_css=True):
                 yield (el, 'style', match.group(1), match.start(1))
 
 
-def make_links_absolute(root, base_url):
-    '''
+def make_links_absolute(root: etree._Element, base_url: str) -> None:
+    """
     Make all links in the document absolute, given the
     ``base_url`` for the document (the full URL where the document
     came from)
-    '''
-    def link_repl(href):
-        return urllib.parse.urljoin(base_url, href)
+    """
+
+    def link_repl(href: str) -> str:
+        return urljoin(base_url, href)
+
     rewrite_links(root, link_repl)
 
 
-def resolve_base_href(root):
+def resolve_base_href(root: etree._Element) -> None:
     base_href = None
-    basetags = root.xpath('//base[@href]|//h:base[@href]',
-                          namespaces=const.XPNSMAP)
+    basetags = root.xpath('//base[@href]|//h:base[@href]', namespaces=XPNSMAP)
     for b in basetags:
         base_href = b.get('href')
-        # lxml.etree elements have no drop_tree(), so remove b, preserving
-        # its tail
+        # lxml.etree elements have no drop_tree(), so remove b, preserving its tail
         parent = b.getparent()
         if parent is not None:
             if b.tail:
@@ -200,8 +371,8 @@ def resolve_base_href(root):
 _resolve_base_href = resolve_base_href  # the resolve_base_href parameter of rewrite_links() shadows this function
 
 
-def rewrite_links(root, link_repl_func, resolve_base_href=False):
-    '''
+def rewrite_links(root: etree._Element, link_repl_func: Callable[[str], str | None], resolve_base_href: bool = False) -> None:
+    """
     Rewrite all the links in the document.  For each link
     ``link_repl_func(link)`` will be called, and the return value
     will replace the old link.
@@ -213,9 +384,10 @@ def rewrite_links(root, link_repl_func, resolve_base_href=False):
 
     If the ``link_repl_func`` returns None, the attribute or
     tag text will be removed completely.
-    '''
-    from css_parser import replaceUrls, log, CSSParser
-    log.setLevel(logging.WARN)
+    """
+    from css_parser import CSSParser, log, replaceUrls
+
+    log.setLevel(logging.WARNING)
     log.raiseExceptions = False
 
     if resolve_base_href:
@@ -232,7 +404,9 @@ def rewrite_links(root, link_repl_func, resolve_base_href=False):
                 del el.attrib[attrib]
             continue
         if attrib is None:
-            new = el.text[:pos] + new_link + el.text[pos+len(link):]
+            # attrib is None only for links in <style> text, which have non-empty text
+            assert el.text is not None
+            new = el.text[:pos] + new_link + el.text[pos + len(link) :]
             el.text = new
         else:
             cur = el.attrib[attrib]
@@ -240,20 +414,17 @@ def rewrite_links(root, link_repl_func, resolve_base_href=False):
                 # Most common case
                 el.attrib[attrib] = new_link
             else:
-                new = cur[:pos] + new_link + cur[pos+len(link):]
+                new = cur[:pos] + new_link + cur[pos + len(link) :]
                 el.attrib[attrib] = new
 
-    parser = CSSParser(raiseExceptions=False, log=_css_logger,
-                       fetcher=lambda x: (None, None))
+    parser = CSSParser(raiseExceptions=False, log=_css_logger, fetcher=lambda x: (None, ''))
     for el in root.iter(etree.Element):
         try:
             tag = el.tag
         except UnicodeDecodeError:
             continue
 
-        if tag == parse_utils.XHTML('style') and el.text and \
-                (_css_url_re.search(el.text) is not None or '@import' in
-                 el.text):
+        if tag in (XHTML('style'), SVG('style')) and el.text and (_css_url_re.search(el.text) is not None or '@import' in el.text):
             stylesheet = parser.parseString(el.text, validate=False)
             replaceUrls(stylesheet, link_repl_func)
             repl = css_text(stylesheet)
@@ -292,7 +463,7 @@ TAG_IDREF_ATTRS = {
 }
 
 
-def iteridrefs(root):
+def iteridrefs(root: etree._Element) -> Iterator[tuple[etree._Element, str, list[str]]]:
     """
     Iterate over all attributes in the document that refer to other elements
     in the same document by id, such as aria-labelledby. Yields tuples of the
@@ -301,9 +472,8 @@ def iteridrefs(root):
     for el in root.iter('*'):
         attribs = el.attrib
         attrs = IDREF_ATTRS.intersection(attribs)
-        etag = el.tag
-        extra = (TAG_IDREF_ATTRS.get(parse_utils.barename(etag).lower())
-                 if isinstance(etag, str) else None)
+        tag = el.tag
+        extra = TAG_IDREF_ATTRS.get(barename(tag).lower()) if isinstance(tag, str) else None
         if extra:
             attrs |= extra.intersection(attribs)
         for attr in sorted(attrs):
@@ -312,7 +482,7 @@ def iteridrefs(root):
                 yield el, attr, ids
 
 
-def rewrite_idrefs(root, id_repl_func):
+def rewrite_idrefs(root: etree._Element, id_repl_func: Callable[[str], str | None]) -> bool:
     """
     Rewrite all ids in attributes that refer to other elements in the same
     document by id, such as aria-labelledby. For each id
@@ -332,35 +502,31 @@ def rewrite_idrefs(root, id_repl_func):
     return changed
 
 
-EPUB_MIME = mimetypes.types_map['.epub']
-XHTML_MIME = mimetypes.types_map['.xhtml']
-CSS_MIME = mimetypes.types_map['.css']
-NCX_MIME = mimetypes.types_map['.ncx']
-OPF_MIME = mimetypes.types_map['.opf']
+types_map = get_types_map()
+EPUB_MIME = types_map['.epub']
+XHTML_MIME = types_map['.xhtml']
+CSS_MIME = types_map['.css']
+NCX_MIME = types_map['.ncx']
+OPF_MIME = types_map['.opf']
 PAGE_MAP_MIME = 'application/oebps-page-map+xml'
 OEB_DOC_MIME = 'text/x-oeb1-document'
 OEB_CSS_MIME = 'text/x-oeb1-css'
-OPENTYPE_MIME = mimetypes.types_map['.otf']
-GIF_MIME = mimetypes.types_map['.gif']
-JPEG_MIME = mimetypes.types_map['.jpeg']
-PNG_MIME = mimetypes.types_map['.png']
-SVG_MIME = mimetypes.types_map['.svg']
-# Not all Python versions know these extensions, so spell the types out
-WEBP_MIME = 'image/webp'
-AVIF_MIME = 'image/avif'
-JXL_MIME = 'image/jxl'
+OPENTYPE_MIME = types_map['.otf']
+GIF_MIME = types_map['.gif']
+JPEG_MIME = types_map['.jpeg']
+PNG_MIME = types_map['.png']
+SVG_MIME = types_map['.svg']
+WEBP_MIME = types_map['.webp']
+AVIF_MIME = types_map['.avif']
+JXL_MIME = types_map['.jxl']
 BINARY_MIME = 'application/octet-stream'
 
-XHTML_NS = const.XHTML_NS
-XHTML = parse_utils.XHTML
-XHTML_CSS_NAMESPACE = '@namespace "%s";\n' % const.XHTML_NS
+XHTML_CSS_NAMESPACE = f'@namespace "{XHTML_NS}";\n'
 
 OEB_STYLES = {CSS_MIME, OEB_CSS_MIME, 'text/x-oeb-css', 'xhtml/css'}
 OEB_DOCS = {XHTML_MIME, 'text/html', OEB_DOC_MIME, 'text/x-oeb-document'}
-# Modern raster formats included since Calibre 2d68fbabb0
-OEB_RASTER_IMAGES = {GIF_MIME, JPEG_MIME, PNG_MIME, WEBP_MIME, AVIF_MIME,
-                     JXL_MIME}
-OEB_IMAGES = {GIF_MIME, JPEG_MIME, PNG_MIME, SVG_MIME} | OEB_RASTER_IMAGES
+OEB_RASTER_IMAGES = {GIF_MIME, JPEG_MIME, PNG_MIME, WEBP_MIME, AVIF_MIME, JXL_MIME}
+OEB_IMAGES = {GIF_MIME, JPEG_MIME, PNG_MIME, SVG_MIME}
 
 MS_COVER_TYPE = 'other.ms-coverimage-standard'
 
@@ -372,78 +538,76 @@ XMLDECL_RE = re.compile(r'^\s*<[?]xml.*?[?]>')
 CSSURL_RE = re.compile(r'''url[(](?P<q>["']?)(?P<url>[^)]+)(?P=q)[)]''')
 
 
-def element(parent, *args, **kwargs):
+def element(parent: etree._Element | None, *args: object, **kwargs: object) -> etree._Element:
     if parent is not None:
-        return etree.SubElement(parent, *args, **kwargs)
-    return etree.Element(*args, **kwargs)
+        return etree.SubElement(parent, *args, **kwargs)  # ty: ignore[no-matching-overload] arguments passed through from caller
+    return etree.Element(*args, **kwargs)  # ty: ignore[invalid-argument-type] arguments passed through from caller
 
 
-def prefixname(name, nsrmap):
+def prefixname(name: str, nsrmap: NSRMap) -> str:
     if not isqname(name):
         return name
-    ns = parse_utils.namespace(name)
+    ns = namespace(name)
     if ns not in nsrmap:
         return name
     prefix = nsrmap[ns]
     if not prefix:
-        return parse_utils.barename(name)
-    return ':'.join((prefix, parse_utils.barename(name)))
+        return barename(name)
+    return ':'.join((prefix, barename(name)))
 
 
-def isprefixname(name):
+def isprefixname(name: str) -> bool | str:
     return name and PREFIXNAME_RE.match(name) is not None
 
 
-def qname(name, nsmap):
+def qname(name: str, nsmap: NSMap) -> str:
     if not isprefixname(name):
         return name
     prefix, local = name.split(':', 1)
     if prefix not in nsmap:
         return name
-    return '{%s}%s' % (nsmap[prefix], local)
+    return f'{{{nsmap[prefix]}}}{local}'
 
 
-def isqname(name):
+def isqname(name: str) -> bool | str:
     return name and QNAME_RE.match(name) is not None
 
 
-def XPath(expr):
-    return etree.XPath(expr, namespaces=const.XPNSMAP)
+@lru_cache(128)
+def XPath(expr: str) -> etree.XPath:
+    return etree.XPath(expr, namespaces=XPNSMAP)
 
 
-def xpath(elem, expr):
-    return elem.xpath(expr, namespaces=const.XPNSMAP)
+def xpath(elem: etree._Element, expr: str) -> XPathResult:
+    return elem.xpath(expr, namespaces=XPNSMAP)
 
 
-def xml2str(root, pretty_print=False, strip_comments=False, with_tail=True):
+def xml2str(root: etree._Element, pretty_print: bool = False, strip_comments: bool = False, with_tail: bool = True) -> bytes:
     if not strip_comments:
         # -- in comments trips up adobe digital editions
         for x in root.iterdescendants(etree.Comment):
             if x.text and '--' in x.text:
                 x.text = x.text.replace('--', '__')
-    ans = etree.tostring(root, encoding='utf-8', xml_declaration=True,
-                         pretty_print=pretty_print, with_tail=with_tail)
+    ans = etree.tostring(root, encoding='utf-8', xml_declaration=True, pretty_print=pretty_print, with_tail=with_tail)
 
     if strip_comments:
-        ans = re.compile(br'<!--.*?-->', re.DOTALL).sub(b'', ans)
+        ans = re.compile(rb'<!--.*?-->', re.DOTALL).sub(b'', ans)
 
     return ans
 
 
-def xml2text(elem, pretty_print=False, method='text'):
-    return etree.tostring(elem, method=method, encoding='unicode',
-                          with_tail=False, pretty_print=pretty_print)
+def xml2text(elem: etree._Element, pretty_print: bool = False, method: Literal['html', 'text', 'xml'] = 'text') -> str:
+    return etree.tostring(elem, method=method, encoding='unicode', with_tail=False, pretty_print=pretty_print)
 
 
-def escape_cdata(root):
+def escape_cdata(root: etree._Element) -> None:
     pat = re.compile(r'[<>&]')
-    for elem in root.iterdescendants('{%s}style' % const.XHTML_NS,
-                                     '{%s}script' % const.XHTML_NS):
+    for elem in root.iterdescendants(f'{{{XHTML_NS}}}style', f'{{{XHTML_NS}}}script'):
         if elem.text and pat.search(elem.text) is not None:
             elem.text = etree.CDATA(elem.text.replace(']]>', r'\]\]\>'))
 
 
-def serialize(data, media_type, pretty_print=False):
+def serialize(data: etree._Element | str | bytes | HasCSSText | None, media_type: str, pretty_print: bool = False) -> bytes:
     if isinstance(data, etree._Element):
         is_oeb_doc = media_type in OEB_DOCS
         if is_oeb_doc:
@@ -458,63 +622,55 @@ def serialize(data, media_type, pretty_print=False):
     if isinstance(data, str):
         return data.encode('utf-8')
     if hasattr(data, 'cssText'):
-        from ebook_convert.ebooks.oeb.polish.utils import \
-            setup_css_parser_serialization
+        from ebook_convert.ebooks.oeb.polish.utils import setup_css_parser_serialization
+
         setup_css_parser_serialization()
-        data = data.cssText
-        if isinstance(data, str):
-            data = data.encode('utf-8')
-        return data + b'\n'
+        css = cast('HasCSSText', data).cssText
+        if isinstance(css, str):
+            css = css.encode('utf-8')
+        return css + b'\n'
     return b'' if data is None else bytes(data)
 
 
 ASCII_CHARS = frozenset(chr(x) for x in range(128))
 UNIBYTE_CHARS = frozenset(x.encode('ascii') for x in ASCII_CHARS)
-USAFE = ('ABCDEFGHIJKLMNOPQRSTUVWXYZ'
-         'abcdefghijklmnopqrstuvwxyz'
-         '0123456789' '_.-/~')
+USAFE = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_.-/~'
 URL_SAFE = frozenset(USAFE)
 URL_SAFE_BYTES = frozenset(USAFE.encode('ascii'))
 URL_UNSAFE = [ASCII_CHARS - URL_SAFE, UNIBYTE_CHARS - URL_SAFE_BYTES]
 del USAFE
 
 
-def urlquote(href):
-    """ Quote URL-unsafe characters, allowing IRI-safe characters.
+def urlquote(href: str) -> str:
+    """Quote URL-unsafe characters, allowing IRI-safe characters.
     That is, this function returns valid IRIs not valid URIs. In particular,
-    IRIs can contain non-ascii characters.  """
-    result = []
-    isbytes = isinstance(href, bytes)
-    unsafe = URL_UNSAFE[int(isbytes)]
-    esc, join = "%%%02x", ''
-    if isbytes:
-        esc, join = esc.encode('ascii'), b''
+    IRIs can contain non-ascii characters."""
+    unsafe = URL_UNSAFE[0]
+    esc = '%%%02x'
+    result: list[str] = []
     for char in href:
-        if char in unsafe:
-            char = esc % ord(char)
-        result.append(char)
-    return join.join(result)
+        result.append(esc % ord(char) if char in unsafe else char)
+    return ''.join(result)
 
 
-def urlnormalize(href):
+def urlnormalize(href: str) -> str:
     """Convert a URL into normalized form, with all and only URL-unsafe
     characters URL quoted.
     """
     try:
-        parts = urllib.parse.urlparse(href)
+        parts = urlparse(href)
     except ValueError as e:
-        raise ValueError('Failed to parse the URL: %r with underlying error: '
-                         '%s' % (href, e))
+        raise ValueError(f'Failed to parse the URL: {href!r} with underlying error: {as_unicode(e)}')
     if not parts.scheme or parts.scheme == 'file':
-        path, frag = urllib.parse.urldefrag(href)
+        path, frag = urldefrag(href)
         parts = ('', '', path, '', '', frag)
     parts = (part.replace('\\', '/') for part in parts)
-    parts = (urllib.parse.unquote(part) for part in parts)
+    parts = (urlunquote(part) for part in parts)
     parts = (urlquote(part) for part in parts)
-    return urllib.parse.urlunparse(parts)
+    return urlunparse(parts)
 
 
-def extract(elem):
+def extract(elem: etree._Element) -> None:
     """
     Removes this element from the tree, including its children and
     text.  The tail text is joined to the previous element or
@@ -532,23 +688,19 @@ def extract(elem):
 
 
 class DummyHandler(logging.Handler):
-
-    def __init__(self):
+    def __init__(self) -> None:
         logging.Handler.__init__(self, logging.WARNING)
         self.setFormatter(logging.Formatter('%(message)s'))
-        self.log = None
+        self.log: Log | None = None
 
-    def emit(self, record):
+    def emit(self, record: logging.LogRecord) -> None:
         if self.log is not None:
             msg = self.format(record)
-            if record.levelno >= logging.ERROR:
-                f = self.log.error
-            else:
-                f = self.log.warning
+            f = self.log.error if record.levelno >= logging.ERROR else self.log.warn
             f(msg)
 
 
-_css_logger = logging.getLogger('calibre.css')
+_css_logger = logging.getLogger('ebook_convert.css')
 _css_logger.setLevel(logging.WARNING)
 _css_log_handler = DummyHandler()
 _css_logger.addHandler(_css_log_handler)
@@ -556,39 +708,40 @@ _css_logger.addHandler(_css_log_handler)
 
 class OEBError(Exception):
     """Generic OEB-processing error."""
+
     pass
 
 
-class NullContainer(object):
+class NullContainer:
     """An empty container.
 
     For use with book formats which do not support container-like access.
     """
 
-    def __init__(self, log):
+    def __init__(self, log: Log) -> None:
         self.log = log
 
-    def read(self, path):
+    def read(self, path: str | None) -> Never:
         raise OEBError('Attempt to read from NullContainer')
 
-    def write(self, path):
+    def write(self, path: str) -> Never:
         raise OEBError('Attempt to write to NullContainer')
 
-    def exists(self, path):
+    def exists(self, path: str) -> bool:
         return False
 
-    def namelist(self):
+    def namelist(self) -> list[str]:
         return []
 
 
-class DirContainer(object):
+class DirContainer:
     """Filesystem directory container."""
 
-    def __init__(self, path, log, ignore_opf=False):
+    def __init__(self, path: str | bytes, log: Log, ignore_opf: bool = False) -> None:
         self.log = log
         if isinstance(path, bytes):
             path = path.decode(filesystem_encoding)
-        self.opfname = None
+        self.opfname: str | None = None
         ext = os.path.splitext(path)[1].lower()
         if ext == '.opf':
             self.opfname = os.path.basename(path)
@@ -603,47 +756,49 @@ class DirContainer(object):
                     return
 
     @property
-    def rootdir(self):
+    def rootdir(self) -> str:
         return self._rootdir
 
     @rootdir.setter
-    def rootdir(self, val):
+    def rootdir(self, val: str) -> None:
         self._rootdir = os.path.abspath(val)
         self._in_root_dir_check = self._rootdir + os.sep
 
-    def _abspath(self, path):
-        # Resolve a (possibly quoted) path relative to the root directory,
-        # refusing paths that escape it (e.g. via ../ or an absolute path)
-        path = os.path.abspath(os.path.join(self.rootdir,
-                                            urllib.parse.unquote(path)))
-        if not path.startswith(self._in_root_dir_check):
-            raise ValueError('Path %r is not inside %r' % (path,
-                                                           self.rootdir))
-        return path
+    def _unquote(self, path: str | bytes | None) -> str:
+        # unquote must run on a bytestring and will return a bytestring
+        # If it runs on a unicode object, it returns a double encoded unicode
+        # string: unquote('%C3%A4') != unquote(b'%C3%A4').decode('utf-8')
+        # and the latter is correct
+        if isinstance(path, str):
+            path = path.encode('utf-8')
+        return urlunquote(path).decode('utf-8')
 
-    def read(self, path):
+    def read(self, path: str | None) -> bytes:
         if path is None:
             path = self.opfname
-        path = self._abspath(path)
+        path = os.path.abspath(os.path.join(self.rootdir, self._unquote(path)))
+        if not path.startswith(self._in_root_dir_check):
+            raise ValueError(f'Path {path!r} is not inside {self.rootdir!r}')
         with open(path, 'rb') as f:
             return f.read()
 
-    def write(self, path, data):
-        path = self._abspath(path)
+    def write(self, path: str, data: bytes) -> int:
+        path = os.path.abspath(os.path.join(self.rootdir, self._unquote(path)))
+        if not path.startswith(self._in_root_dir_check):
+            raise ValueError(f'Path {path!r} is not inside {self.rootdir!r}')
         dir = os.path.dirname(path)
-        if not os.path.isdir(dir):
-            os.makedirs(dir)
+        os.makedirs(dir, exist_ok=True)
         with open(path, 'wb') as f:
             return f.write(data)
 
-    def exists(self, path):
+    def exists(self, path: str | None) -> bool:
         if not path:
             return False
         try:
-            path = self._abspath(path)
-        except ValueError:
-            # Happens if path contains quoted special chars or is outside
-            # the root directory
+            path = os.path.abspath(os.path.join(self.rootdir, self._unquote(path)))
+        except ValueError:  # Happens if path contains quoted special chars
+            return False
+        if not path.startswith(self._in_root_dir_check):
             return False
         try:
             return os.path.isfile(path)
@@ -651,11 +806,12 @@ class DirContainer(object):
             # On linux, if LANG is unset, the os.stat call tries to encode the
             # unicode path using ASCII
             # To replicate try:
-            # LANG=en_US.ASCII python -c "import os; os.stat(u'Espa\xf1a')"
+            # LANG=en_US.ASCII python -c "import os; os.stat('Espa\xf1a')"
             return os.path.isfile(path.encode(filesystem_encoding))
 
-    def namelist(self):
-        names = []
+    def namelist(self) -> list[str]:
+        names: list[str] = []
+
         base = self.rootdir
         for root, dirs, files in os.walk(base):
             for fname in files:
@@ -673,7 +829,7 @@ class DirContainer(object):
         return names
 
 
-class Metadata(object):
+class Metadata:
     """A collection of OEB data model metadata.
 
     Provides access to the list of items associated with a particular metadata
@@ -682,23 +838,37 @@ class Metadata(object):
     metadata items.
     """
 
-    DC_TERMS = {'contributor', 'coverage', 'creator', 'date', 'description',
-                'format', 'identifier', 'language', 'publisher', 'relation',
-                'rights', 'source', 'subject', 'title', 'type'}
-    CALIBRE_TERMS = {'series', 'series_index', 'rating', 'timestamp',
-                     'publication_type', 'title_sort'}
-    OPF_ATTRS = {'role': tag('opf', 'role'), 'file-as': tag('opf', 'file-as'),
-                 'scheme': tag('opf', 'scheme'), 'event': tag('opf', 'event'),
-                 'type': tag('xsi', 'type'), 'lang': tag('xml', 'lang'),
-                 'id': 'id'}
-    OPF1_NSMAP = {'dc': const.DC11_NS, 'oebpackage': const.OPF1_NS}
-    OPF2_NSMAP = {'calibre': const.CALIBRE_NS,
-                  'dc': const.DC11_NS,
-                  'dcterms': const.DCTERMS_NS,
-                  'opf': const.OPF2_NS,
-                  'xsi': const.XSI_NS}
+    DC_TERMS = {
+        'contributor',
+        'coverage',
+        'creator',
+        'date',
+        'description',
+        'format',
+        'identifier',
+        'language',
+        'publisher',
+        'relation',
+        'rights',
+        'source',
+        'subject',
+        'title',
+        'type',
+    }
+    CALIBRE_TERMS = {'series', 'series_index', 'rating', 'timestamp', 'publication_type', 'title_sort'}
+    OPF_ATTRS = {
+        'role': OPF('role'),
+        'file-as': OPF('file-as'),
+        'scheme': OPF('scheme'),
+        'event': OPF('event'),
+        'type': XSI('type'),
+        'lang': XML('lang'),
+        'id': 'id',
+    }
+    OPF1_NSMAP = {'dc': DC11_NS, 'oebpackage': OPF1_NS}
+    OPF2_NSMAP = {'opf': OPF2_NS, 'dc': DC11_NS, 'dcterms': DCTERMS_NS, 'xsi': XSI_NS, 'calibre': CALIBRE_NS}
 
-    class Item(object):
+    class Item:
         """An item of OEB data model metadata.
 
         The metadata term or name may be accessed via the :attr:`term` or
@@ -711,130 +881,131 @@ class Metadata(object):
         their local names using Python attribute syntax.  Only attributes
         allowed by the OPF 2.0 specification are supported.
         """
-        # True for a language that was guessed because the book has none, see
-        # oeb/reader.py; such a language must not be written into the output
-        is_fallback = False
 
-        class Attribute(object):
+        class Attribute:
             """Smart accessor for allowed OEB metadata item attributes."""
 
-            def __init__(self, attr, allowed=None):
+            def __init__(self, attr: str | Callable[[str], str], allowed: Collection[str] | None = None) -> None:
                 if not callable(attr):
                     attr_, attr = attr, lambda term: attr_
-                self.attr = attr
+                self.attr: Callable[[str], str] = attr  # ty: ignore[invalid-assignment] callable() narrowing does not exclude str
                 self.allowed = allowed
 
-            def term_attr(self, obj):
+            def term_attr(self, obj: Metadata.Item) -> str:
                 term = obj.term
-                if parse_utils.namespace(term) != const.DC11_NS:
-                    term = tag('opf', 'meta')
+                if namespace(term) != DC11_NS:
+                    term = OPF('meta')
                 allowed = self.allowed
                 if allowed is not None and term not in allowed:
-                    raise AttributeError(
-                        'attribute %r not valid for metadata term %r' % (
-                            self.attr(term), parse_utils.barename(obj.term)))
+                    raise AttributeError(f'attribute {self.attr(term)!r} not valid for metadata term {barename(obj.term)!r}')
                 return self.attr(term)
 
-            def __get__(self, obj, cls):
+            @overload
+            def __get__(self, obj: None, cls: type) -> None: ...
+            @overload
+            def __get__(self, obj: Metadata.Item, cls: type) -> str: ...
+            def __get__(self, obj: Metadata.Item | None, cls: type) -> str | None:
                 if obj is None:
                     return None
                 return obj.attrib.get(self.term_attr(obj), '')
 
-            def __set__(self, obj, value):
+            def __set__(self, obj: Metadata.Item, value: str) -> None:
                 obj.attrib[self.term_attr(obj)] = value
 
-        def __init__(self, term, value, attrib={}, nsmap={}, **kwargs):
+        def __init__(self, term: str, value: str, attrib: Mapping[str, str] | None = None, nsmap: NSMap | None = None, **kwargs: str) -> None:
+            if nsmap is None:
+                nsmap = {}
+            if attrib is None:
+                attrib = {}
             self.attrib = attrib = dict(attrib)
             self.nsmap = nsmap = dict(nsmap)
             attrib.update(kwargs)
-            if parse_utils.namespace(term) == const.OPF2_NS:
-                term = parse_utils.barename(term)
-            ns = parse_utils.namespace(term)
-            local = parse_utils.barename(term).lower()
-            if local in Metadata.DC_TERMS and (not ns or ns in const.DC_NSES):
+            if namespace(term) == OPF2_NS:
+                term = barename(term)
+            ns = namespace(term)
+            local = barename(term).lower()
+            if local in Metadata.DC_TERMS and (not ns or ns in DC_NSES):
                 # Anything looking like Dublin Core is coerced
-                term = tag('dc', local)
-            elif local in Metadata.CALIBRE_TERMS and ns in (const.CALIBRE_NS,
-                                                            ''):
+                term = DC(local)
+            elif local in Metadata.CALIBRE_TERMS and ns in (CALIBRE_NS, ''):
                 # Ditto for Calibre-specific metadata
-                term = tag('calibre', local)
+                term = CALIBRE(local)
             self.term = term
             self.value = value
             for attr, value in tuple(attrib.items()):
                 if isprefixname(value):
                     attrib[attr] = qname(value, nsmap)
                 nsattr = Metadata.OPF_ATTRS.get(attr, attr)
-                if (nsattr == tag('opf', 'scheme') and
-                        parse_utils.namespace(term) != const.DC11_NS):
+                if nsattr == OPF('scheme') and namespace(term) != DC11_NS:
                     # The opf:meta element takes @scheme, not @opf:scheme
                     nsattr = 'scheme'
                 if attr != nsattr:
                     attrib[nsattr] = attrib.pop(attr)
 
         @property
-        def name(self):
+        def name(self) -> str:
             return self.term
 
         @property
-        def content(self):
+        def content(self) -> str:
             return self.value
 
         @content.setter
-        def content(self, value):
+        def content(self, value: str) -> None:
             self.value = value
 
-        scheme = Attribute(lambda term: 'scheme' if
-                           term == tag('opf', 'meta') else
-                           tag('opf', 'scheme'),
-                           [tag('dc', 'identifier'), tag('opf', 'meta')])
-        file_as = Attribute(tag('opf', 'file-as'), [tag('dc', 'creator'),
-                                                    tag('dc', 'contributor'),
-                                                    tag('dc', 'title')])
-        role = Attribute(tag('opf', 'role'), [tag('dc', 'creator'),
-                                              tag('dc', 'contributor')])
-        event = Attribute(tag('opf', 'event'), [tag('dc', 'date')])
+        scheme = Attribute(lambda term: 'scheme' if term == OPF('meta') else OPF('scheme'), [DC('identifier'), OPF('meta')])
+        file_as = Attribute(OPF('file-as'), [DC('creator'), DC('contributor'), DC('title')])
+        role = Attribute(OPF('role'), [DC('creator'), DC('contributor')])
+        event = Attribute(OPF('event'), [DC('date')])
         id = Attribute('id')
-        type = Attribute(tag('xsi', 'type'), [tag('dc', 'date'),
-                                              tag('dc', 'format'),
-                                              tag('dc', 'type')])
-        lang = Attribute(tag('xml', 'lang'), [tag('dc', 'contributor'),
-                                              tag('dc', 'coverage'),
-                                              tag('dc', 'creator'),
-                                              tag('dc', 'publisher'),
-                                              tag('dc', 'relation'),
-                                              tag('dc', 'rights'),
-                                              tag('dc', 'source'),
-                                              tag('dc', 'subject'),
-                                              tag('opf', 'meta')])
+        type = Attribute(XSI('type'), [DC('date'), DC('format'), DC('type')])
+        lang = Attribute(
+            XML('lang'),
+            [
+                DC('contributor'),
+                DC('coverage'),
+                DC('creator'),
+                DC('publisher'),
+                DC('relation'),
+                DC('rights'),
+                DC('source'),
+                DC('subject'),
+                OPF('meta'),
+            ],
+        )
+        # True for a language that was guessed from the calibre interface
+        # language, rather than specified by the book or the user
+        is_fallback = False
 
-        def __getitem__(self, key):
+        def __getitem__(self, key: str) -> str:
             return self.attrib[key]
 
-        def __setitem__(self, key, value):
+        def __setitem__(self, key: str, value: str) -> None:
             self.attrib[key] = value
 
-        def __contains__(self, key):
+        def __contains__(self, key: object) -> bool:
             return key in self.attrib
 
-        def get(self, key, default=None):
+        def get(self, key: str, default: str | None = None) -> str | None:
             return self.attrib.get(key, default)
 
-        def __repr__(self):
-            return 'Item(term=%r, value=%r, attrib=%r)' \
-                % (parse_utils.barename(self.term), self.value, self.attrib)
+        def __repr__(self) -> str:
+            return f'Item(term={barename(self.term)!r}, value={self.value!r}, attrib={self.attrib!r})'
 
-        def __str__(self):
-            return str(self.value)
+        def __str__(self) -> str:
+            return as_unicode(self.value)
 
-        def to_opf1(self, dcmeta=None, xmeta=None, nsrmap={}):
-            attrib = {}
+        def to_opf1(self, dcmeta: etree._Element | None = None, xmeta: etree._Element | None = None, nsrmap: NSRMap | None = None) -> etree._Element:
+            if nsrmap is None:
+                nsrmap = {}
+            attrib: dict[str, str] = {}
             for key, value in self.attrib.items():
-                if parse_utils.namespace(key) == const.OPF2_NS:
-                    key = parse_utils.barename(key)
+                if namespace(key) == OPF2_NS:
+                    key = barename(key)
                 attrib[key] = prefixname(value, nsrmap)
-            if parse_utils.namespace(self.term) == const.DC11_NS:
-                name = tag('dc',
-                           string.capwords(parse_utils.barename(self.term)))
+            if namespace(self.term) == DC11_NS:
+                name = DC(icu_title(barename(self.term)))
                 elem = element(dcmeta, name, attrib=attrib)
                 elem.text = self.value
             else:
@@ -843,86 +1014,92 @@ class Metadata(object):
                 elem.attrib['content'] = prefixname(self.value, nsrmap)
             return elem
 
-        def to_opf2(self, parent=None, nsrmap={}):
-            attrib = {}
+        def to_opf2(self, parent: etree._Element | None = None, nsrmap: NSRMap | None = None) -> etree._Element:
+            if nsrmap is None:
+                nsrmap = {}
+            attrib: dict[str, str] = {}
             for key, value in self.attrib.items():
                 attrib[key] = prefixname(value, nsrmap)
-            if parse_utils.namespace(self.term) == const.DC11_NS:
+            if namespace(self.term) == DC11_NS:
                 elem = element(parent, self.term, attrib=attrib)
                 try:
                     elem.text = self.value
                 except Exception:
                     elem.text = repr(self.value)
             else:
-                elem = element(parent, tag('opf', 'meta'), attrib=attrib)
+                elem = element(parent, OPF('meta'), attrib=attrib)
                 elem.attrib['name'] = prefixname(self.term, nsrmap)
                 elem.attrib['content'] = prefixname(self.value, nsrmap)
             return elem
 
-    def __init__(self, oeb):
+    def __init__(self, oeb: OEBBook) -> None:
         self.oeb = oeb
-        self.items = collections.defaultdict(list)
-        self.primary_writing_mode = None
+        self.items: defaultdict[str, list[Metadata.Item]] = defaultdict(list)
+        self.primary_writing_mode: str | None = None
 
-    def add(self, term, value, attrib={}, nsmap={}, **kwargs):
+    def add(self, term: str, value: str, attrib: Mapping[str, str] | None = None, nsmap: NSMap | None = None, **kwargs: str) -> Metadata.Item:
         """Add a new metadata item."""
+        if nsmap is None:
+            nsmap = {}
+        if attrib is None:
+            attrib = {}
         item = self.Item(term, value, attrib, nsmap, **kwargs)
-        items = self.items[parse_utils.barename(item.term)]
+        items = self.items[barename(item.term)]
         items.append(item)
         return item
 
-    def iterkeys(self):
-        for key in self.items:
-            yield key
+    def iterkeys(self) -> Iterator[str]:
+        yield from self.items
+
     __iter__ = iterkeys
 
-    def clear(self, key):
-        val = self.items[key]
-        for x in list(val):
-            val.remove(x)
+    def clear(self, key: str) -> None:
+        l = self.items[key]
+        for x in list(l):
+            l.remove(x)
 
-    def filter(self, key, predicate):
-        val = self.items[key]
-        for x in list(val):
+    def filter(self, key: str, predicate: Callable[[Metadata.Item], object]) -> None:
+        l = self.items[key]
+        for x in list(l):
             if predicate(x):
-                val.remove(x)
+                l.remove(x)
 
-    def __getitem__(self, key):
+    def __getitem__(self, key: str) -> list[Metadata.Item]:
         return self.items[key]
 
-    def __contains__(self, key):
+    def __contains__(self, key: object) -> bool:
         return key in self.items
 
-    def __getattr__(self, term):
+    def __getattr__(self, term: str) -> list[Metadata.Item]:
         return self.items[term]
 
     @property
-    def _nsmap(self):
-        nsmap = {}
+    def _nsmap(self) -> dict[str | None, str]:
+        nsmap: dict[str | None, str] = {}
         for term in self.items:
             for item in self.items[term]:
                 nsmap.update(item.nsmap)
         return nsmap
 
     @property
-    def _opf1_nsmap(self):
+    def _opf1_nsmap(self) -> dict[str | None, str]:
         nsmap = self._nsmap
-        for key, value in nsmap.items():
-            if value in const.OPF_NSES or value in const.DC_NSES:
+        for key, value in tuple(nsmap.items()):
+            if value in OPF_NSES or value in DC_NSES:
                 del nsmap[key]
         return nsmap
 
     @property
-    def _opf2_nsmap(self):
+    def _opf2_nsmap(self) -> dict[str | None, str]:
         nsmap = self._nsmap
-        nsmap.update(const.OPF2_NSMAP)
+        nsmap.update(OPF2_NSMAP)
         return nsmap
 
-    def to_opf1(self, parent=None):
+    def to_opf1(self, parent: etree._Element | None = None) -> etree._Element:
         nsmap = self._opf1_nsmap
         nsrmap = {value: key for key, value in nsmap.items()}
         elem = element(parent, 'metadata', nsmap=nsmap)
-        dcmeta = element(elem, 'dc-metadata', nsmap=const.OPF1_NSMAP)
+        dcmeta = element(elem, 'dc-metadata', nsmap=OPF1_NSMAP)
         xmeta = element(elem, 'x-metadata')
         for term in self.items:
             for item in self.items[term]:
@@ -932,23 +1109,20 @@ class Metadata(object):
             chaptertour.to_opf1(dcmeta, xmeta, nsrmap=nsrmap)
         return elem
 
-    def to_opf2(self, parent=None):
+    def to_opf2(self, parent: etree._Element | None = None) -> etree._Element:
         nsmap = self._opf2_nsmap
+
         nsrmap = {value: key for key, value in nsmap.items()}
-        elem = element(parent, tag('opf', 'metadata'), nsmap=nsmap)
+        elem = element(parent, OPF('metadata'), nsmap=nsmap)
         for term in self.items:
             for item in self.items[term]:
                 item.to_opf2(elem, nsrmap=nsrmap)
         if self.primary_writing_mode:
-            elem.append(elem.makeelement(tag('opf', 'meta'),
-                                         attrib={'name':
-                                                 'primary-writing-mode',
-                                                 'content':
-                                                 self.primary_writing_mode}))
+            elem.append(elem.makeelement(OPF('meta'), attrib={'name': 'primary-writing-mode', 'content': self.primary_writing_mode}))
         return elem
 
 
-class Manifest(object):
+class Manifest:
     """Collection of files composing an OEB data model book.
 
     Provides access to the content of the files composing the book and
@@ -964,7 +1138,7 @@ class Manifest(object):
         manifest items and the values are the items themselves.
     """
 
-    class Item(object):
+    class Item:
         """An OEB data model book content file.
 
         Provides the following data members for accessing the file content and
@@ -984,8 +1158,24 @@ class Manifest(object):
             have a :attr:`spine_position` of `None`.
         """
 
-        def __init__(self, oeb, id, href, media_type,
-                     fallback=None, loader=str, data=None):
+        # Ad-hoc attributes set on some items by various plugins
+        html_input_href: str  # HTML Input, read by data_as_bytes_or_none()
+        html_input_dirpath: str  # HTML Input
+        is_section_start: bool  # MOBI Output
+        is_section_end: bool  # MOBI Output
+        is_article_start: bool  # MOBI Output
+        is_article_end: bool  # MOBI Output
+
+        def __init__(
+            self,
+            oeb: OEBBook,
+            id: str,
+            href: str,
+            media_type: str,
+            fallback: str | None = None,
+            loader: Callable[[str], str | bytes] | None = str,
+            data: ItemData | None = None,
+        ) -> None:
             if href:
                 href = str(href)
             self.oeb = oeb
@@ -993,50 +1183,52 @@ class Manifest(object):
             self.href = self.path = urlnormalize(href)
             self.media_type = media_type
             self.fallback = fallback
-            self.override_css_fetch = None
-            self.spine_position = None
-            self.linear = True
+            self.override_css_fetch: Callable[[str], tuple[str | None, str | bytes | None]] | None = None
+            self.resolve_css_imports = True
+            self.spine_position: int | None = None
+            self.linear: bool | str | bytes = True
             if loader is None and data is None:
                 loader = oeb.container.read
             self._loader = loader
-            self._data = data
+            self._data: ItemData | None = data
 
-        def __repr__(self):
-            return 'Item(id=%r, href=%r, media_type=%r)' \
-                % (self.id, self.href, self.media_type)
+        def __repr__(self) -> str:
+            return f'Item(id={self.id!r}, href={self.href!r}, media_type={self.media_type!r})'
 
         # Parsing {{{
-        def _parse_xml(self, data):
+        def _parse_xml(self, data: str | bytes) -> etree._Element | None:
             if not data:
                 return
-            data = xml_to_unicode(data, strip_encoding_pats=True,
-                                  assume_utf8=True, resolve_entities=True)[0]
-            return etree.fromstring(data)
+            data = xml_to_unicode(data, strip_encoding_pats=True, assume_utf8=True, resolve_entities=True)[0]
+            return safe_xml_fromstring(data)
 
-        def _parse_xhtml(self, data):
+        def _parse_xhtml(self, data: str | bytes) -> etree._Element | None:
             orig_data = data
-            fname = urllib.parse.unquote(self.href)
-            self.oeb.log.debug('Parsing %s ...', fname)
-            self.oeb.html_preprocessor.current_href = self.href
+            fname = urlunquote(self.href)
+            self.oeb.log.debug('Parsing', fname, '...')
+            self.oeb.html_preprocessor.current_href = self.href  # ty: ignore[unresolved-attribute] HTMLPreProcessor attribute (or set on the default function)
             try:
-                data = parse_utils.parse_html(data, log=self.oeb.log,
-                                              decoder=self.oeb.decode,
-                                              preprocessor=self.oeb.
-                                              html_preprocessor,
-                                              filename=fname,
-                                              non_html_file_tags={'ncx'})
-            except parse_utils.NotHTML:
+                root = parse_html(
+                    data,
+                    log=self.oeb.log,
+                    decoder=self.oeb.decode,
+                    preprocessor=self.oeb.html_preprocessor,
+                    filename=fname,
+                    non_html_file_tags={'ncx'},
+                )
+            except NotHTML:
                 return self._parse_xml(orig_data)
-            return data
+            return root
 
-        def _parse_txt(self, data):
-            has_html = '<html>'
+        def _parse_txt(self, data: str | bytes) -> etree._Element | None:
             if isinstance(data, bytes):
-                has_html = has_html.encode('ascii')
-            if has_html in data:
+                has_html = b'<html>' in data
+            else:
+                has_html = '<html>' in data
+            if has_html:
                 return self._parse_xhtml(data)
 
-            self.oeb.log.debug('Converting %s ...', self.href)
+            self.oeb.log.debug('Converting', self.href, '...')
 
             from ebook_convert.ebooks.txt.processor import convert_markdown
 
@@ -1044,54 +1236,54 @@ class Manifest(object):
             if title:
                 title = str(title[0])
             else:
-                title = 'Unknown'
+                title = _('Unknown')
 
-            return self._parse_xhtml(convert_markdown(self.oeb.decode(data),
-                                                      title=title))
+            return self._parse_xhtml(convert_markdown(self.oeb.decode(data), title=title))
 
-        #: Set to False to keep @import rules instead of inlining them
-        resolve_css_imports = True
-
-        def _parse_css(self, data):
+        def _parse_css(self, data: str | bytes) -> CSSStyleSheet:
             from css_parser import CSSParser, log, resolveImports
             from css_parser.css import CSSRule
-            log.setLevel(logging.WARN)
+
+            log.setLevel(logging.WARNING)
             log.raiseExceptions = False
-            self.oeb.log.debug('Parsing %s ...', self.href)
+            self.oeb.log.debug('Parsing', self.href, '...')
             data = self.oeb.decode(data)
             data = self.oeb.css_preprocessor(data, add_namespace=False)
-            parser = CSSParser(loglevel=logging.WARNING,
-                               fetcher=self.override_css_fetch or
-                               self._fetch_css,
-                               log=_css_logger)
+            parser = CSSParser(loglevel=logging.WARNING, fetcher=self.override_css_fetch or self._fetch_css, log=_css_logger)
             data = parser.parseString(data, href=self.href, validate=False)
-            if getattr(self, 'resolve_css_imports', True):
-                # Resolve into an explicit target sheet; the default would
-                # re-fetch any @import it could not resolve, possibly over
-                # the network.
-                data = resolveImports(data, target=parser.parseString(
-                    '', href=self.href, validate=False))
+            if self.resolve_css_imports:
+                data = resolveImports(data)
             for rule in tuple(data.cssRules.rulesOfType(CSSRule.PAGE_RULE)):
                 data.cssRules.remove(rule)
             return data
 
-        def _fetch_css(self, path):
+        def _fetch_css(self, path: str) -> tuple[str | None, str | bytes | None]:
             hrefs = self.oeb.manifest.hrefs
             if path not in hrefs:
-                self.oeb.logger.warning('CSS import of missing file %r', path)
-                return (None, None)
+                self.oeb.logger.warn(f'CSS import of missing file {path!r}')
+                return None, None
             item = hrefs[path]
             if item.media_type not in OEB_STYLES:
-                self.oeb.logger.warning('CSS import of non-CSS file %r', path)
-                return (None, None)
-            data = item.data.cssText
+                self.oeb.logger.warn(f'CSS import of non-CSS file {path!r}')
+                return None, None
+            from css_parser.css import CSSStyleSheet
+
+            sheet = item.data
+            assert isinstance(sheet, CSSStyleSheet)  # item.media_type is in OEB_STYLES
+            data = sheet.cssText
             enc = None if isinstance(data, str) else 'utf-8'
-            return (enc, data)
+            return enc, data
 
         # }}}
 
         @property
-        def data(self):
+        def data_as_bytes_or_none(self) -> str | bytes | None:
+            if self._loader is None:
+                return None
+            return self._loader(getattr(self, 'html_input_href', self.href))
+
+        @property
+        def data(self) -> ItemData | None:
             """Provides MIME type sensitive access to the manifest
             entry's associated content.
 
@@ -1099,8 +1291,8 @@ class Manifest(object):
               convert and return as an lxml.etree element in the XHTML
               namespace.
             - XML content is parsed and returned as an lxml.etree element.
-            - CSS and CSS-variant content is parsed and returned as a
-              css_parser CSS DOM stylesheet.
+            - CSS and CSS-variant content is parsed and returned as a css_parser
+              CSS DOM stylesheet.
             - All other content is returned as a :class:`str` or :class:`bytes`
               object with no special parsing.
             """
@@ -1120,108 +1312,97 @@ class Manifest(object):
             elif mt in OEB_STYLES:
                 data = self._parse_css(data)
             elif mt == 'text/plain':
-                self.oeb.log.warning('%s contains data in TXT format. '
-                                     'Converting to HTML', self.href)
+                self.oeb.log.warn(f'{self.href} contains data in TXT format', 'converting to HTML')
                 data = self._parse_txt(data)
                 self.media_type = XHTML_MIME
             self._data = data
             return data
 
         @data.setter
-        def data(self, value):
+        def data(self, value: ItemData | None) -> None:
             self._data = value
 
         @data.deleter
-        def data(self):
+        def data(self) -> None:
             self._data = None
 
-        @property
-        def data_as_bytes_or_none(self):
-            if self._loader is None:
-                return None
-            return self._loader(getattr(self, 'html_input_href', self.href))
-
-        def reparse_css(self):
+        def reparse_css(self) -> None:
             self._data = self._parse_css(str(self))
 
-        def unload_data_from_memory(self, memory=None):
+        def unload_data_from_memory(self, memory: str | None = None) -> None:
             if isinstance(self._data, bytes):
                 if memory is None:
-                    from ebook_convert.ptempfile import \
-                            PersistentTemporaryFile
-                    pt = PersistentTemporaryFile(suffix='_oeb_base_mem_'
-                                                 'unloader.img')
+                    from ebook_convert.ptempfile import PersistentTemporaryFile
+
+                    pt = PersistentTemporaryFile(suffix='_oeb_base_mem_unloader.img')
                     with pt:
                         pt.write(self._data)
                     self.oeb._temp_files.append(pt.name)
 
-                    def loader(*args):
+                    def loader(*args: object) -> bytes:
                         with open(pt.name, 'rb') as f:
                             ans = f.read()
                         os.remove(pt.name)
                         return ans
+
                     self._loader = loader
                 else:
-                    def loader2(*args):
+
+                    def loader2(*args: object) -> bytes:
                         with open(memory, 'rb') as f:
                             ans = f.read()
                         return ans
+
                     self._loader = loader2
                 self._data = None
 
         @property
-        def unicode_representation(self):
+        def unicode_representation(self) -> str:
             data = self.data
             if isinstance(data, etree._Element):
                 return xml2text(data, pretty_print=self.oeb.pretty_print)
             if isinstance(data, str):
                 return data
-            if hasattr(data, 'cssText'):
+            if data is not None and not isinstance(data, bytes) and hasattr(data, 'cssText'):
                 return css_text(data)
             return str(data)
 
         @property
-        def bytes_representation(self):
-            return serialize(self.data, self.media_type,
-                             pretty_print=self.oeb.pretty_print)
+        def bytes_representation(self) -> bytes:
+            return serialize(self.data, self.media_type, pretty_print=self.oeb.pretty_print)
 
-        def __str__(self):
+        def __str__(self) -> str:
             return self.unicode_representation
 
-        def __eq__(self, other):
+        def __eq__(self, other: object) -> bool:
             return self is other
 
-        def __ne__(self, other):
+        def __ne__(self, other: object) -> bool:
             return self is not other
 
-        def __hash__(self):
+        def __hash__(self) -> int:
             return id(self)
 
         @property
-        def sort_key(self):
+        def sort_key(self) -> tuple[int, str, bytes, str]:
             href = self.href
             if isinstance(href, bytes):
-                href = uenc.force_unicode(href)
+                href = force_unicode(href)
+            sp = self.spine_position if isinstance(self.spine_position, numbers.Number) else sys.maxsize
+            return sp, (self.media_type or '').lower(), numeric_sort_key(href), self.id
 
-            if isinstance(self.spine_position, numbers.Number):
-                sp = self.spine_position
-            else:
-                sp = sys.maxsize
-
-            return sp, (self.media_type or '').lower(), href, self.id
-
-        def relhref(self, href):
+        def relhref(self, href: str) -> str:
             """Convert the URL provided in :param:`href` from a book-absolute
             reference to a reference relative to this manifest item.
             """
             return rel_href(self.href, href)
 
-        def abshref(self, href):
+        def abshref(self, href: str) -> str:
             """Convert the URL provided in :param:`href` from a reference
             relative to this manifest item to a book-absolute reference.
             """
             try:
-                purl = urllib.parse.urlparse(href)
+                purl = urlparse(href)
             except ValueError:
                 return href
             scheme = purl.scheme
@@ -1229,11 +1410,11 @@ class Manifest(object):
                 return href
             purl = list(purl)
             purl[0] = ''
-            href = urllib.parse.urlunparse(purl)
-            path, frag = urllib.parse.urldefrag(href)
+            href = urlunparse(purl)
+            path, frag = urldefrag(href)
             if not path:
                 if frag:
-                    return '#'.join((self.href, frag))
+                    return f'{self.href}#{frag}'
                 else:
                     return self.href
             if '/' not in self.href:
@@ -1243,13 +1424,21 @@ class Manifest(object):
             href = os.path.normpath(href).replace('\\', '/')
             return href
 
-    def __init__(self, oeb):
+    def __init__(self, oeb: OEBBook) -> None:
         self.oeb = oeb
-        self.items = set()
-        self.ids = {}
-        self.hrefs = {}
+        self.items: set[Manifest.Item] = set()
+        self.ids: dict[str, Manifest.Item] = {}
+        self.hrefs: dict[str, Manifest.Item] = {}
 
-    def add(self, id, href, media_type, fallback=None, loader=None, data=None):
+    def add(
+        self,
+        id: str,
+        href: str,
+        media_type: str,
+        fallback: str | None = None,
+        loader: Callable[[str], str | bytes] | None = None,
+        data: ItemData | None = None,
+    ) -> Manifest.Item:
         """Add a new item to the book manifest.
 
         The item's :param:`id`, :param:`href`, and :param:`media_type` are all
@@ -1259,17 +1448,16 @@ class Manifest(object):
         function for the data may be provided with :param:`loader`, or the
         item's data may later be set manually via the :attr:`data` attribute.
         """
-        item = self.Item(
-            self.oeb, id, href, media_type, fallback, loader, data)
+        item = self.Item(self.oeb, id, href, media_type, fallback, loader, data)
         self.items.add(item)
         self.ids[item.id] = item
         self.hrefs[item.href] = item
         return item
 
-    def remove(self, item):
+    def remove(self, item: Manifest.Item) -> None:
         """Removes :param:`item` from the manifest."""
         if item in self.ids:
-            item = self.ids[item]
+            item = self.ids[item]  # ty: ignore[invalid-argument-type] legacy branch for when an id is passed
         del self.ids[item.id]
         if item.href in self.hrefs:
             del self.hrefs[item.href]
@@ -1277,13 +1465,17 @@ class Manifest(object):
         if item in self.oeb.spine:
             self.oeb.spine.remove(item)
 
-    def remove_duplicate_item(self, item):
+    def remove_duplicate_item(self, item: Manifest.Item) -> None:
         if item in self.ids:
-            item = self.ids[item]
+            item = self.ids[item]  # ty: ignore[invalid-argument-type] legacy branch for when an id is passed
         del self.ids[item.id]
         self.items.remove(item)
 
-    def generate(self, id=None, href=None):
+    @overload
+    def generate(self, id: str, href: str | None = None) -> tuple[str, str]: ...
+    @overload
+    def generate(self, id: None = None, href: str | None = None) -> tuple[None, str]: ...
+    def generate(self, id: str | None = None, href: str | None = None) -> tuple[str | None, str]:
         """Generate a new unique identifier and/or internal path for use in
         creating a new manifest item, using the provided :param:`id` and/or
         :param:`href` as bases.
@@ -1308,20 +1500,19 @@ class Manifest(object):
                 index += 1
         return id, str(href)
 
-    def __iter__(self):
-        for item in self.items:
-            yield item
+    def __iter__(self) -> Iterator[Manifest.Item]:
+        yield from self.items
 
-    def __len__(self):
+    def __len__(self) -> int:
         return len(self.items)
 
-    def values(self):
+    def values(self) -> list[Manifest.Item]:
         return list(self.items)
 
-    def __contains__(self, item):
+    def __contains__(self, item: object) -> bool:
         return item in self.items
 
-    def to_opf1(self, parent=None):
+    def to_opf1(self, parent: etree._Element | None = None) -> etree._Element:
         elem = element(parent, 'manifest')
         for item in self.items:
             media_type = item.media_type
@@ -1329,30 +1520,28 @@ class Manifest(object):
                 media_type = OEB_DOC_MIME
             elif media_type in OEB_STYLES:
                 media_type = OEB_CSS_MIME
-            attrib = {'id': item.id, 'href': urllib.parse.unquote(item.href),
-                      'media-type': media_type}
+            attrib = {'id': item.id, 'href': urlunquote(item.href), 'media-type': media_type}
             if item.fallback:
                 attrib['fallback'] = item.fallback
             element(elem, 'item', attrib=attrib)
         return elem
 
-    def to_opf2(self, parent=None):
-        elem = element(parent, tag('opf', 'manifest'))
-        for item in sorted(self.items, key=operator.attrgetter('sort_key')):
+    def to_opf2(self, parent: etree._Element | None = None) -> etree._Element:
+        elem = element(parent, OPF('manifest'))
+        for item in sorted(self.items, key=attrgetter('sort_key')):
             media_type = item.media_type
             if media_type in OEB_DOCS:
                 media_type = XHTML_MIME
             elif media_type in OEB_STYLES:
                 media_type = CSS_MIME
-            attrib = {'id': item.id, 'href': urllib.parse.unquote(item.href),
-                      'media-type': media_type}
+            attrib = {'id': item.id, 'href': urlunquote(item.href), 'media-type': media_type}
             if item.fallback:
                 attrib['fallback'] = item.fallback
-            element(elem, tag('opf', 'item'), attrib=attrib)
+            element(elem, OPF('item'), attrib=attrib)
         return elem
 
     @property
-    def main_stylesheet(self):
+    def main_stylesheet(self) -> Manifest.Item | None:
         ans = getattr(self, '_main_stylesheet', None)
         if ans is None:
             for item in self:
@@ -1362,11 +1551,12 @@ class Manifest(object):
         return ans
 
     @main_stylesheet.setter
-    def main_stylesheet(self, item):
+    def main_stylesheet(self, item: Manifest.Item | None) -> None:
+
         self._main_stylesheet = item
 
 
-class Spine(object):
+class Spine:
     """Collection of manifest items composing an OEB data model book's main
     textual content.
 
@@ -1375,12 +1565,12 @@ class Spine(object):
     access as a list-like object.
     """
 
-    def __init__(self, oeb):
+    def __init__(self, oeb: OEBBook) -> None:
         self.oeb = oeb
-        self.items = []
-        self.page_progression_direction = None
+        self.items: list[Manifest.Item] = []
+        self.page_progression_direction: str | None = None
 
-    def _linear(self, linear):
+    def _linear(self, linear: bool | str | bytes | None) -> bool | str | bytes:
         if isinstance(linear, (str, bytes)):
             linear = linear.lower()
         if linear is None or linear in ('yes', 'true'):
@@ -1389,14 +1579,14 @@ class Spine(object):
             linear = False
         return linear
 
-    def add(self, item, linear=None):
+    def add(self, item: Manifest.Item, linear: bool | str | bytes | None = None) -> Manifest.Item:
         """Append :param:`item` to the end of the `Spine`."""
         item.linear = self._linear(linear)
         item.spine_position = len(self.items)
         self.items.append(item)
         return item
 
-    def insert(self, index, item, linear):
+    def insert(self, index: int, item: Manifest.Item, linear: bool | str | bytes | None) -> Manifest.Item:
         """Insert :param:`item` at position :param:`index` in the `Spine`."""
         item.linear = self._linear(linear)
         item.spine_position = index
@@ -1405,51 +1595,55 @@ class Spine(object):
             self.items[i].spine_position = i
         return item
 
-    def remove(self, item):
+    def remove(self, item: Manifest.Item) -> None:
         """Remove :param:`item` from the `Spine`."""
-        index = item.spine_position
+        index = cast('int', item.spine_position)  # items in the spine always have a position
+
         self.items.pop(index)
         for i in range(index, len(self.items)):
             self.items[i].spine_position = i
         item.spine_position = None
 
-    def index(self, item):
+    def index(self, item: Manifest.Item) -> int:
         for i, x in enumerate(self):
             if item == x:
                 return i
         return -1
 
-    def __iter__(self):
-        for item in self.items:
-            yield item
+    def __iter__(self) -> Iterator[Manifest.Item]:
+        yield from self.items
 
-    def __getitem__(self, index):
+    @overload
+    def __getitem__(self, index: int) -> Manifest.Item: ...
+    @overload
+    def __getitem__(self, index: slice) -> list[Manifest.Item]: ...
+    def __getitem__(self, index: int | slice) -> Manifest.Item | list[Manifest.Item]:
         return self.items[index]
 
-    def __len__(self):
+    def __len__(self) -> int:
         return len(self.items)
 
-    def __contains__(self, item):
-        return (item in self.items)
+    def __contains__(self, item: object) -> bool:
+        return item in self.items
 
-    def to_opf1(self, parent=None):
+    def to_opf1(self, parent: etree._Element | None = None) -> etree._Element:
         elem = element(parent, 'spine')
         for item in self.items:
             if item.linear:
                 element(elem, 'itemref', attrib={'idref': item.id})
         return elem
 
-    def to_opf2(self, parent=None):
-        elem = element(parent, tag('opf', 'spine'))
+    def to_opf2(self, parent: etree._Element | None = None) -> etree._Element:
+        elem = element(parent, OPF('spine'))
         for item in self.items:
             attrib = {'idref': item.id}
             if not item.linear:
                 attrib['linear'] = 'no'
-            element(elem, tag('opf', 'itemref'), attrib=attrib)
+            element(elem, OPF('itemref'), attrib=attrib)
         return elem
 
 
-class Guide(object):
+class Guide:
     """Collection of references to standard frequently-occurring sections
     within an OEB data model book.
 
@@ -1457,7 +1651,7 @@ class Guide(object):
     type identifiers and the values are `Reference` objects.
     """
 
-    class Reference(object):
+    class Reference:
         """Reference to a standard book section.
 
         Provides the following instance data members:
@@ -1468,28 +1662,31 @@ class Guide(object):
         :attr:`href`: Book-internal URL of the referenced section.  May include
             a fragment identifier.
         """
-        _TYPES_TITLES = [('cover', 'Cover'),
-                         ('title-page', 'Title page'),
-                         ('toc', 'Table of Contents'),
-                         ('index', 'Index'),
-                         ('glossary', 'Glossary'),
-                         ('acknowledgements', 'Acknowledgements'),
-                         ('bibliography', 'Bibliography'),
-                         ('colophon', 'Colophon'),
-                         ('copyright-page', 'Copyright'),
-                         ('dedication', 'Dedication'),
-                         ('epigraph', 'Epigraph'),
-                         ('foreword', 'Foreword'),
-                         ('loi', 'List of illustrations'),
-                         ('lot', 'List of tables'),
-                         ('notes', 'Notes'),
-                         ('preface', 'Preface'),
-                         ('text', 'Main text')]
+
+        _TYPES_TITLES = [
+            ('cover', __('Cover')),
+            ('title-page', __('Title page')),
+            ('toc', __('Table of Contents')),
+            ('index', __('Index')),
+            ('glossary', __('Glossary')),
+            ('acknowledgements', __('Acknowledgements')),
+            ('bibliography', __('Bibliography')),
+            ('colophon', __('Colophon')),
+            ('copyright-page', __('Copyright')),
+            ('dedication', __('Dedication')),
+            ('epigraph', __('Epigraph')),
+            ('foreword', __('Foreword')),
+            ('loi', __('List of illustrations')),
+            ('lot', __('List of tables')),
+            ('notes', __('Notes')),
+            ('preface', __('Preface')),
+            ('text', __('Main text')),
+        ]
         TITLES = dict(_TYPES_TITLES)
         TYPES = frozenset(TITLES)
         ORDER = {t: i for i, (t, _) in enumerate(_TYPES_TITLES)}
 
-        def __init__(self, oeb, type, title, href):
+        def __init__(self, oeb: OEBBook, type: str, title: str | None, href: str) -> None:
             self.oeb = oeb
             if type.lower() in self.TYPES:
                 type = type.lower()
@@ -1501,22 +1698,21 @@ class Guide(object):
             self.title = title
             self.href = urlnormalize(href)
 
-        def __repr__(self):
-            return 'Reference(type=%r, title=%r, href=%r)' \
-                % (self.type, self.title, self.href)
+        def __repr__(self) -> str:
+            return f'Reference(type={self.type!r}, title={self.title!r}, href={self.href!r})'
 
         @property
-        def item(self):
+        def item(self) -> Manifest.Item | None:
             """The manifest item associated with this reference."""
-            path = urllib.parse.urldefrag(self.href)[0]
+            path = urldefrag(self.href)[0]
             hrefs = self.oeb.manifest.hrefs
             return hrefs.get(path, None)
 
-    def __init__(self, oeb):
+    def __init__(self, oeb: OEBBook) -> None:
         self.oeb = oeb
-        self.refs = {}
+        self.refs: dict[str, Guide.Reference] = {}
 
-    def add(self, type, title, href):
+    def add(self, type: str, title: str | None, href: str) -> Guide.Reference:
         """Add a new reference to the `Guide`."""
         if href:
             href = str(href)
@@ -1524,64 +1720,62 @@ class Guide(object):
         self.refs[type] = ref
         return ref
 
-    def remove(self, type):
+    def remove(self, type: str) -> Guide.Reference | None:
         return self.refs.pop(type, None)
 
-    def remove_by_href(self, href):
+    def remove_by_href(self, href: str) -> None:
         remove = [r for r, i in self.refs.items() if i.href == href]
         for r in remove:
             self.remove(r)
 
-    def iterkeys(self):
-        for type in self.refs:
-            yield type
+    def iterkeys(self) -> Iterator[str]:
+        yield from self.refs
+
     __iter__ = iterkeys
 
-    def values(self):
-        return sorted(self.refs.values(),
-                      key=lambda ref: ref.ORDER.get(ref.type, 10000))
+    def values(self) -> list[Guide.Reference]:
+        return sorted(self.refs.values(), key=lambda ref: ref.ORDER.get(ref.type, 10000))
 
-    def items(self):
-        for type, ref in self.refs.items():
-            yield type, ref
+    def items(self) -> Iterator[tuple[str, Guide.Reference]]:
+        yield from self.refs.items()
 
-    def __getitem__(self, key):
+    def __getitem__(self, key: str) -> Guide.Reference:
         return self.refs[key]
 
-    def get(self, key):
+    def get(self, key: str) -> Guide.Reference | None:
         return self.refs.get(key)
 
-    def __delitem__(self, key):
+    def __delitem__(self, key: str) -> None:
         del self.refs[key]
 
-    def __contains__(self, key):
+    def __contains__(self, key: object) -> bool:
         return key in self.refs
 
-    def __len__(self):
+    def __len__(self) -> int:
         return len(self.refs)
 
-    def to_opf1(self, parent=None):
+    def to_opf1(self, parent: etree._Element | None = None) -> etree._Element:
         elem = element(parent, 'guide')
         for ref in self.refs.values():
-            attrib = {'type': ref.type, 'href': urllib.parse.unquote(ref.href)}
+            attrib = {'type': ref.type, 'href': urlunquote(ref.href)}
             if ref.title:
                 attrib['title'] = ref.title
             element(elem, 'reference', attrib=attrib)
         return elem
 
-    def to_opf2(self, parent=None):
+    def to_opf2(self, parent: etree._Element | None = None) -> etree._Element | None:
         if not len(self):
             return
-        elem = element(parent, tag('opf', 'guide'))
+        elem = element(parent, OPF('guide'))
         for ref in self.refs.values():
-            attrib = {'type': ref.type, 'href': urllib.parse.unquote(ref.href)}
+            attrib = {'type': ref.type, 'href': urlunquote(ref.href)}
             if ref.title:
                 attrib['title'] = ref.title
-            element(elem, tag('opf', 'reference'), attrib=attrib)
+            element(elem, OPF('reference'), attrib=attrib)
         return elem
 
 
-class TOC(object):
+class TOC:
     """Represents a hierarchical table of contents or navigation tree for
     accessing arbitrary semantic sections within an OEB data model book.
 
@@ -1597,14 +1791,27 @@ class TOC(object):
     :attr:`toc_thumbnail`: Optional toc thumbnail image
     """
 
-    def __init__(self, title=None, href=None, klass=None, id=None,
-                 play_order=None, author=None, description=None,
-                 toc_thumbnail=None):
+    # Ad-hoc attributes set on some nodes by various input/output plugins
+    item_that_refers_to_cover: TOC  # EPUB Input, set on the root node
+    ncx_parent: int  # KF8 Output
+    ncx_hlvl: int  # KF8 Output
+
+    def __init__(
+        self,
+        title: str | None = None,
+        href: str | None = None,
+        klass: str | None = None,
+        id: str | None = None,
+        play_order: int | None = None,
+        author: str | None = None,
+        description: str | None = None,
+        toc_thumbnail: str | None = None,
+    ) -> None:
         self.title = title
         self.href = urlnormalize(href) if href else href
         self.klass = klass
         self.id = id
-        self.nodes = []
+        self.nodes: list[TOC] = []
         self.play_order = 0
         if play_order is None:
             play_order = self.next_play_order()
@@ -1613,111 +1820,106 @@ class TOC(object):
         self.description = description
         self.toc_thumbnail = toc_thumbnail
 
-    def add(self, title, href, klass=None, id=None, play_order=0, author=None,
-            description=None, toc_thumbnail=None):
+    def add(
+        self,
+        title: str | None,
+        href: str | None,
+        klass: str | None = None,
+        id: str | None = None,
+        play_order: int | None = 0,
+        author: str | None = None,
+        description: str | None = None,
+        toc_thumbnail: str | None = None,
+    ) -> TOC:
         """Create and return a new sub-node of this node."""
-        node = TOC(title, href, klass, id, play_order, author, description,
-                   toc_thumbnail)
+        node = TOC(title, href, klass, id, play_order, author, description, toc_thumbnail)
         self.nodes.append(node)
         return node
 
-    def remove(self, node):
+    def remove(self, node: TOC) -> bool:
         for child in self.nodes:
             if child is node:
                 self.nodes.remove(child)
                 return True
-            else:
-                if child.remove(node):
-                    return True
+            elif child.remove(node):
+                return True
         return False
 
-    def iter(self):
+    def iter(self) -> Iterator[TOC]:
         """Iterate over this node and all descendants in depth-first order."""
         yield self
         for child in self.nodes:
-            for node in child.iter():
-                yield node
+            yield from child.iter()
 
-    def count(self):
+    def count(self) -> int:
         return len(list(self.iter())) - 1
 
-    def next_play_order(self):
+    def next_play_order(self) -> int:
         entries = [x.play_order for x in self.iter()]
         base = max(entries) if entries else 0
-        return base+1
+        return base + 1
 
-    def has_href(self, href):
-        for x in self.iter():
-            if x.href == href:
-                return True
-        return False
+    def has_href(self, href: str | None) -> bool:
+        return any(x.href == href for x in self.iter())
 
-    def has_text(self, text):
-        for x in self.iter():
-            if x.title and x.title.lower() == text.lower():
-                return True
-        return False
+    def has_text(self, text: str) -> bool:
+        return any(x.title and x.title.lower() == text.lower() for x in self.iter())
 
-    def iterdescendants(self, breadth_first=False):
+    def iterdescendants(self, breadth_first: bool = False) -> Iterator[TOC]:
         """Iterate over all descendant nodes in depth-first order."""
         if breadth_first:
             for child in self.nodes:
                 yield child
             for child in self.nodes:
-                for node in child.iterdescendants(breadth_first=True):
-                    yield node
+                yield from child.iterdescendants(breadth_first=True)
         else:
             for child in self.nodes:
-                for node in child.iter():
-                    yield node
+                yield from child.iter()
 
-    def __iter__(self):
+    def __iter__(self) -> Iterator[TOC]:
         """Iterate over all immediate child nodes."""
-        for node in self.nodes:
-            yield node
+        yield from self.nodes
 
-    def __getitem__(self, index):
+    def __getitem__(self, index: int) -> TOC:
         return self.nodes[index]
 
-    def autolayer(self):
+    def autolayer(self) -> None:
         """Make sequences of children pointing to the same content file into
         children of the first node referencing that file.
         """
         prev = None
         for node in list(self.nodes):
-            if (prev and urllib.parse.urldefrag(prev.href)[0] ==
-                    urllib.parse.urldefrag(node.href)[0]):
+            if prev and urldefrag(prev.href)[0] == urldefrag(node.href)[0]:
                 self.nodes.remove(node)
                 prev.nodes.append(node)
             else:
                 prev = node
 
-    def depth(self):
+    def depth(self) -> int:
         """The maximum depth of the navigation tree rooted at this node."""
         try:
             return max(node.depth() for node in self.nodes) + 1
         except ValueError:
             return 1
 
-    def get_lines(self, lvl=0):
-        ans = [('\t'*lvl) + 'TOC: %s --> %s' % (self.title, self.href)]
+    def get_lines(self, lvl: int = 0) -> list[str]:
+        ans = [('\t' * lvl) + f'TOC: {self.title} --> {self.href}']
         for child in self:
-            ans.extend(child.get_lines(lvl+1))
+            ans.extend(child.get_lines(lvl + 1))
         return ans
 
-    def __str__(self):
+    def __str__(self) -> str:
         return '\n'.join(self.get_lines())
 
-    def to_opf1(self, tour):
+    def to_opf1(self, tour: etree._Element) -> etree._Element:
         for node in self.nodes:
-            element(tour, 'site', attrib={
-                'title': node.title, 'href': urllib.parse.unquote(node.href)})
+            element(tour, 'site', attrib={'title': node.title, 'href': urlunquote(node.href)})
             node.to_opf1(tour)
         return tour
 
-    def to_ncx(self, parent=None):
+    def to_ncx(self, parent: etree._Element | None = None) -> etree._Element:
         if parent is None:
-            parent = etree.Element(tag('ncx', 'navMap'))
+            parent = etree.Element(NCX('navMap'))
         for node in self.nodes:
             id = node.id or uuid_id()
             po = node.play_order
@@ -1726,31 +1928,32 @@ class TOC(object):
             attrib = {'id': id, 'playOrder': str(po)}
             if node.klass:
                 attrib['class'] = node.klass
-            point = element(parent, tag('ncx', 'navPoint'), attrib=attrib)
-            label = etree.SubElement(point, tag('ncx', 'navLabel'))
+            point = element(parent, NCX('navPoint'), attrib=attrib)
+            label = etree.SubElement(point, NCX('navLabel'))
             title = node.title
             if title:
                 title = re.sub(r'\s+', ' ', title)
-            element(label, tag('ncx', 'text')).text = title
+            element(label, NCX('text')).text = title
             # Do not unescape this URL as ADE requires it to be escaped to
             # handle semi colons and other special characters in the file names
-            element(point, tag('ncx', 'content'), src=node.href)
+            element(point, NCX('content'), src=node.href)
             node.to_ncx(point)
         return parent
 
-    def rationalize_play_orders(self):
-        '''
+    def rationalize_play_orders(self) -> None:
+        """
         Ensure that all nodes with the same play_order have the same href and
         with different play_orders have different hrefs.
-        '''
-        def po_node(n):
+        """
+
+        def po_node(n: TOC) -> TOC | None:
             for x in self.iter():
                 if x is n:
                     return
                 if x.play_order == n.play_order:
                     return x
 
-        def href_node(n):
+        def href_node(n: TOC) -> TOC | None:
             for x in self.iter():
                 if x is n:
                     return
@@ -1761,21 +1964,20 @@ class TOC(object):
             y = po_node(x)
             if y is not None:
                 if x.href != y.href:
-                    x.play_order = getattr(href_node(x), 'play_order',
-                                           self.next_play_order())
+                    x.play_order = getattr(href_node(x), 'play_order', self.next_play_order())
             y = href_node(x)
             if y is not None:
                 x.play_order = y.play_order
 
 
-class PageList(object):
-    """Collection of named "pages" to mapped positions within an OEB data model
+class PageList:
+    '''Collection of named "pages" to mapped positions within an OEB data model
     book's textual content.
 
     Provides list-like access to the pages.
-    """
+    '''
 
-    class Page(object):
+    class Page:
         """Represents a mapping between a page name and a position within
         the book content.
 
@@ -1791,44 +1993,43 @@ class PageList(object):
         :attr:`klass`: Optional semantic class of this page.
         :attr:`id`: Optional unique identifier for this page.
         """
+
         TYPES = {'front', 'normal', 'special'}
 
-        def __init__(self, name, href, type='normal', klass=None, id=None):
+        def __init__(self, name: object, href: str, type: str = 'normal', klass: str | None = None, id: str | None = None) -> None:
             self.name = str(name)
             self.href = urlnormalize(href)
             self.type = type if type in self.TYPES else 'normal'
             self.id = id
             self.klass = klass
 
-    def __init__(self):
-        self.pages = []
+    def __init__(self) -> None:
+        self.pages: list[PageList.Page] = []
 
-    def add(self, name, href, type='normal', klass=None, id=None):
+    def add(self, name: object, href: str, type: str = 'normal', klass: str | None = None, id: str | None = None) -> PageList.Page:
         """Create a new page and add it to the `PageList`."""
         page = self.Page(name, href, type, klass, id)
         self.pages.append(page)
         return page
 
-    def __len__(self):
+    def __len__(self) -> int:
         return len(self.pages)
 
-    def __iter__(self):
-        for page in self.pages:
-            yield page
+    def __iter__(self) -> Iterator[PageList.Page]:
+        yield from self.pages
 
-    def __getitem__(self, index):
+    def __getitem__(self, index: int) -> PageList.Page:
         return self.pages[index]
 
-    def pop(self, index=-1):
+    def pop(self, index: int = -1) -> PageList.Page:
         return self.pages.pop(index)
 
-    def remove(self, page):
+    def remove(self, page: PageList.Page) -> None:
         return self.pages.remove(page)
 
-    def to_ncx(self, parent=None):
-        plist = element(parent, tag('ncx', 'pageList'), id=uuid_id())
-        values = {t: itertools.count(1)
-                  for t in ('front', 'normal', 'special')}
+    def to_ncx(self, parent: etree._Element | None = None) -> etree._Element:
+        plist = element(parent, NCX('pageList'), id=uuid_id())
+        values = {t: count(1) for t in ('front', 'normal', 'special')}
         for page in self.pages:
             id = page.id or uuid_id()
             type = page.type
@@ -1836,32 +2037,42 @@ class PageList(object):
             attrib = {'id': id, 'value': value, 'type': type, 'playOrder': '0'}
             if page.klass:
                 attrib['class'] = page.klass
-            ptarget = element(plist, tag('ncx', 'pageTarget'), attrib=attrib)
-            label = element(ptarget, tag('ncx', 'navLabel'))
-            element(label, tag('ncx', 'text')).text = page.name
-            element(ptarget, tag('ncx', 'content'), src=page.href)
+            ptarget = element(plist, NCX('pageTarget'), attrib=attrib)
+            label = element(ptarget, NCX('navLabel'))
+            element(label, NCX('text')).text = page.name
+            element(ptarget, NCX('content'), src=page.href)
         return plist
 
-    def to_page_map(self):
-        pmap = etree.Element(tag('opf', 'page-map'),
-                             nsmap={None: const.OPF2_NS})
+    def to_page_map(self) -> etree._Element:
+        pmap = etree.Element(OPF('page-map'), nsmap={None: OPF2_NS})
         for page in self.pages:
-            element(pmap, tag('opf', 'page'), name=page.name, href=page.href)
+            element(pmap, OPF('page'), name=page.name, href=page.href)
         return pmap
 
 
-class OEBBook(object):
+class OEBBook:
     """Representation of a book in the IDPF OEB data model."""
 
     COVER_SVG_XP = XPath('h:body//svg:svg[position() = 1]')
     COVER_OBJECT_XP = XPath('h:body//h:object[@data][position() = 1]')
+    # Set dynamically by calibre.ebooks.oeb.transforms.jacket when a metadata jacket is inserted
+    inserted_metadata_jacket: Manifest.Item
+    # Set dynamically by calibre.ebooks.conversion.plumber.Plumber
+    plumber_output_format: str
+    # Caches set dynamically by Stylizer and CSSFlattener
+    stylizer_rules: StylizerRules
+    store_embed_font_rules: EmbedFontsCSSRules
 
-    def __init__(self, logger,
-                 html_preprocessor,
-                 css_preprocessor=CSSPreProcessor(),
-                 encoding='utf-8', pretty_print=False,
-                 input_encoding='utf-8'):
-        """Create empty book.  Arguments:
+    def __init__(
+        self,
+        logger: Log,
+        html_preprocessor: Callable[[str], str] = lambda x: x,
+        css_preprocessor: CSSPreProcessor = CSSPreProcessor(),
+        encoding: str = 'utf-8',
+        pretty_print: bool = False,
+        input_encoding: str | None = 'utf-8',
+    ) -> None:
+        '''Create empty book.  Arguments:
 
         :param:`encoding`: Default encoding for textual content read
             from an external container.
@@ -1890,7 +2101,7 @@ class OEBBook(object):
         :attr:`toc`: Hierarchical table of contents.
         :attr:`pages`: List of "pages," such as indexed to a print edition of
             the same text.
-        """
+        '''
         _css_log_handler.log = logger
         self.encoding = encoding
         self.input_encoding = input_encoding
@@ -1899,22 +2110,19 @@ class OEBBook(object):
         self.pretty_print = pretty_print
         self.logger = self.log = logger
         self.version = '2.0'
-        self.container = NullContainer(self.log)
+        self.container: OEBContainer = NullContainer(self.log)
         self.metadata = Metadata(self)
-        self.uid = None
+        self.uid: Metadata.Item | None = None
         self.manifest = Manifest(self)
         self.spine = Spine(self)
         self.guide = Guide(self)
         self.toc = TOC()
         self.pages = PageList()
         self.auto_generated_toc = True
-        self._temp_files = []
+        self._temp_files: list[str] = []
+        self.removed_items_to_ignore: tuple = ()
 
-    def set_page_progression_direction_if_needed(self):
-        '''
-        Books in a right-to-left language without an explicit page
-        progression direction are paged right to left (Calibre 4b00f39ef0).
-        '''
+    def set_page_progression_direction_if_needed(self) -> None:
         if not self.spine.page_progression_direction:
             try:
                 lang = self.metadata.language[0].value
@@ -1923,7 +2131,7 @@ class OEBBook(object):
             except Exception:
                 pass
 
-    def clean_temp_files(self):
+    def clean_temp_files(self) -> None:
         for path in self._temp_files:
             try:
                 os.remove(path)
@@ -1931,30 +2139,34 @@ class OEBBook(object):
                 pass
 
     @classmethod
-    def generate(cls, opts):
+    def generate(cls, opts: Values) -> Self:
         """Generate an OEBBook instance from command-line options."""
         encoding = opts.encoding
         pretty_print = opts.pretty_print
-        return cls(encoding=encoding, pretty_print=pretty_print)
+        from ebook_convert.utils.logging import default_log
 
-    def translate(self, text):
+        return cls(default_log, lambda x: x, encoding=encoding, pretty_print=pretty_print)
+
+    def translate(self, text: str) -> str:
         """Translate :param:`text` into the book's primary language."""
-        return text
+        lang = str(self.metadata.language[0])
+        lang = lang.split('-', 1)[0].lower()
+        return translate(lang, text)
 
-    def decode(self, data):
+    def decode(self, data: str | bytes) -> str:
         """Automatically decode :param:`data` into a `unicode` object."""
-        def fix_data(d):
+
+        def fix_data(d: str) -> str:
             return d.replace('\r\n', '\n').replace('\r', '\n')
+
         if isinstance(data, str):
             return fix_data(data)
         bom_enc = None
         if data[:4] in (b'\0\0\xfe\xff', b'\xff\xfe\0\0'):
-            bom_enc = {b'\0\0\xfe\xff': 'utf-32-be',
-                       b'\xff\xfe\0\0': 'utf-32-le'}[data[:4]]
+            bom_enc = {b'\0\0\xfe\xff': 'utf-32-be', b'\xff\xfe\0\0': 'utf-32-le'}[data[:4]]
             data = data[4:]
         elif data[:2] in (b'\xff\xfe', b'\xfe\xff'):
-            bom_enc = {b'\xff\xfe': 'utf-16-le',
-                       b'\xfe\xff': 'utf-16-be'}[data[:2]]
+            bom_enc = {b'\xff\xfe': 'utf-16-le', b'\xfe\xff': 'utf-16-be'}[data[:2]]
             data = data[2:]
         elif data[:3] == b'\xef\xbb\xbf':
             bom_enc = 'utf-8'
@@ -1976,27 +2188,29 @@ class OEBBook(object):
         data, _ = xml_to_unicode(data)
         return fix_data(data)
 
-    def to_opf1(self):
+    def to_opf1(self) -> dict[str, tuple[str, etree._Element]]:
         """Produce OPF 1.2 representing the book's metadata and structure.
 
         Returns a dictionary in which the keys are MIME types and the values
         are tuples of (default) filenames and lxml.etree element structures.
         """
-        package = etree.Element('package',
-                                attrib={'unique-identifier': self.uid.id})
+        _uid = self.uid
+        assert _uid is not None
+        package = etree.Element('package', attrib={'unique-identifier': _uid.id})
         self.metadata.to_opf1(package)
         self.manifest.to_opf1(package)
         self.spine.to_opf1(package)
         tours = element(package, 'tours')
-        tour = element(tours, 'tour',
-                       attrib={'id': 'chaptertour', 'title': 'Chapter Tour'})
+        tour = element(tours, 'tour', attrib={'id': 'chaptertour', 'title': 'Chapter Tour'})
         self.toc.to_opf1(tour)
         self.guide.to_opf1(package)
         return {OPF_MIME: ('content.opf', package)}
 
-    def _update_playorder(self, ncx):
-        hrefs = set(map(urlnormalize, xpath(ncx, '//ncx:content/@src')))
-        playorder = {}
+    def _update_playorder(self, ncx: etree._Element) -> None:
+        srcs = xpath(ncx, '//ncx:content/@src')
+        assert is_str_list(srcs)
+        hrefs = set(map(urlnormalize, srcs))
+        playorder: dict[str, int] = {}
         next = 1
         selector = XPath('h:body//*[@id or @name]')
         for item in self.spine:
@@ -2004,115 +2218,105 @@ class OEBBook(object):
             if base in hrefs:
                 playorder[base] = next
                 next += 1
-            for elem in selector(item.data):
+            root = item.data
+            assert isinstance(root, etree._Element)  # spine items are always OEB_DOCS
+            for elem in selector(root):
                 added = False
                 for attr in ('id', 'name'):
                     id = elem.get(attr)
                     if not id:
                         continue
-                    href = '#'.join([base, id])
+                    href = f'{base}#{id}'
                     if href in hrefs:
                         playorder[href] = next
                         added = True
                 if added:
                     next += 1
         selector = XPath('ncx:content/@src')
-        for i, elem in enumerate(xpath(ncx, '//*[@playOrder and '
-                                       './ncx:content[@src]]')):
+        nodes = xpath(ncx, '//*[@playOrder and ./ncx:content[@src]]')
+        assert is_element_list(nodes)
+        for i, elem in enumerate(nodes):
             href = urlnormalize(selector(elem)[0])
             order = playorder.get(href, i)
             elem.attrib['playOrder'] = str(order)
-        return
 
-    def _to_ncx(self):
+    def _to_ncx(self) -> etree._Element:
         try:
             lang = str(self.metadata.language[0])
         except IndexError:
             lang = 'en'
         lang = lang.replace('_', '-')
-        ncx = etree.Element(tag('ncx', 'ncx'),
-                            attrib={'version': '2005-1',
-                                    tag('xml', 'lang'): lang},
-                            nsmap={None: const.NCX_NS})
-        head = etree.SubElement(ncx, tag('ncx', 'head'))
-        etree.SubElement(head, tag('ncx', 'meta'),
-                         name='dtb:uid', content=str(self.uid))
-        etree.SubElement(head, tag('ncx', 'meta'),
-                         name='dtb:depth', content=str(self.toc.depth()))
-        generator = ''.join(['calibre (', __version__, ')'])
-        etree.SubElement(head, tag('ncx', 'meta'),
-                         name='dtb:generator', content=generator)
-        etree.SubElement(head, tag('ncx', 'meta'), name='dtb:totalPageCount',
-                         content=str(len(self.pages)))
-        maxpnum = etree.SubElement(head, tag('ncx', 'meta'),
-                                   name='dtb:maxPageNumber', content='0')
-        title = etree.SubElement(ncx, tag('ncx', 'docTitle'))
-        text = etree.SubElement(title, tag('ncx', 'text'))
+        ncx = etree.Element(NCX('ncx'), attrib={'version': '2005-1', XML('lang'): lang}, nsmap={None: NCX_NS})
+        head = etree.SubElement(ncx, NCX('head'))
+        etree.SubElement(head, NCX('meta'), name='dtb:uid', content=str(self.uid))
+        etree.SubElement(head, NCX('meta'), name='dtb:depth', content=str(self.toc.depth()))
+        generator = f'calibre ({__version__})'
+        etree.SubElement(head, NCX('meta'), name='dtb:generator', content=generator)
+        etree.SubElement(head, NCX('meta'), name='dtb:totalPageCount', content=str(len(self.pages)))
+        maxpnum = etree.SubElement(head, NCX('meta'), name='dtb:maxPageNumber', content='0')
+        title = etree.SubElement(ncx, NCX('docTitle'))
+        text = etree.SubElement(title, NCX('text'))
         text.text = str(self.metadata.title[0])
-        navmap = etree.SubElement(ncx, tag('ncx', 'navMap'))
+        navmap = etree.SubElement(ncx, NCX('navMap'))
         self.toc.to_ncx(navmap)
         if len(self.pages) > 0:
             plist = self.pages.to_ncx(ncx)
-            value = max(int(x) for x in xpath(plist, '//@value'))
+            values = xpath(plist, '//@value')
+            assert is_str_list(values)
+            value = max(int(x) for x in values)
             maxpnum.attrib['content'] = str(value)
         self._update_playorder(ncx)
         return ncx
 
-    def to_opf2(self, page_map=False):
+    def to_opf2(self, page_map: bool = False) -> dict[str, tuple[str, etree._Element]]:
         """Produce OPF 2.0 representing the book's metadata and structure.
 
         Returns a dictionary in which the keys are MIME types and the values
         are tuples of (default) filenames and lxml.etree element structures.
         """
-        results = {}
-        package = etree.Element(tag('opf', 'package'),
-                                attrib={'version': '2.0',
-                                        'unique-identifier': self.uid.id},
-                                nsmap={None: const.OPF2_NS})
+        results: dict[str, tuple[str, etree._Element]] = {}
+        _uid2 = self.uid
+        assert _uid2 is not None
+        package = etree.Element(OPF('package'), attrib={'version': '2.0', 'unique-identifier': _uid2.id}, nsmap={None: OPF2_NS})
         self.metadata.to_opf2(package)
         manifest = self.manifest.to_opf2(package)
         spine = self.spine.to_opf2(package)
         self.guide.to_opf2(package)
         results[OPF_MIME] = ('content.opf', package)
         id, href = self.manifest.generate('ncx', 'toc.ncx')
-        etree.SubElement(manifest, tag('opf', 'item'), id=id, href=href,
-                         attrib={'media-type': NCX_MIME})
+        etree.SubElement(manifest, OPF('item'), id=id, href=href, attrib={'media-type': NCX_MIME})
         spine.attrib['toc'] = id
         results[NCX_MIME] = (href, self._to_ncx())
         if page_map and len(self.pages) > 0:
             id, href = self.manifest.generate('page-map', 'page-map.xml')
-            etree.SubElement(manifest, tag('opf', 'item'), id=id, href=href,
-                             attrib={'media-type': PAGE_MAP_MIME})
+            etree.SubElement(manifest, OPF('item'), id=id, href=href, attrib={'media-type': PAGE_MAP_MIME})
             spine.attrib['page-map'] = id
             results[PAGE_MAP_MIME] = (href, self.pages.to_page_map())
         if self.spine.page_progression_direction in {'ltr', 'rtl'}:
-            spine.attrib['page-progression-direction'] = \
-                    self.spine.page_progression_direction
+            spine.attrib['page-progression-direction'] = self.spine.page_progression_direction
         return results
 
 
-def rel_href(base_href, href):
+def rel_href(base_href: str, href: str) -> str:
     """Convert the URL provided in :param:`href` to a URL relative to the URL
-    in :param:`base_href`  """
-    if urllib.parse.urlparse(href).scheme:
+    in :param:`base_href`"""
+    if urlparse(href).scheme:
         return href
     if '/' not in base_href:
         return href
-    base = list(filter(lambda x: x and x != '.',
-                       os.path.dirname(os.path.normpath(base_href))
-                       .replace(os.sep, '/').split('/')))
+    base = list(filter(lambda x: x and x != '.', os.path.dirname(os.path.normpath(base_href)).replace(os.sep, '/').split('/')))
     while True:
         try:
             idx = base.index('..')
         except ValueError:
             break
         if idx > 0:
-            del base[idx-1:idx+1]
+            del base[idx - 1 : idx + 1]
         else:
             break
     if not base:
         return href
-    target, frag = urllib.parse.urldefrag(href)
+    target, frag = urldefrag(href)
     target = target.split('/')
     index = 0
     for index in range(min(len(base), len(target))):
@@ -2123,5 +2327,5 @@ def rel_href(base_href, href):
     relhref = (['..'] * (len(base) - index)) + target[index:]
     relhref = '/'.join(relhref)
     if frag:
-        relhref = '#'.join((relhref, frag))
+        relhref = f'{relhref}#{frag}'
     return relhref

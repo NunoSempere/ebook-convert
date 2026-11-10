@@ -1,0 +1,147 @@
+# License: GPLv3 Copyright: 2009, John Schember <john@nachtimwald.com>
+
+from __future__ import annotations
+import os
+import struct
+import zlib
+from typing import IO, TYPE_CHECKING
+
+from ebook_convert import CurrentDir
+from ebook_convert.ebooks.metadata.opf2 import OPFCreator
+from ebook_convert.ebooks.metadata.rb import get_metadata
+from ebook_convert.ebooks.rb import HEADER, RocketBookError
+from ebook_convert.polyglot.builtins import as_unicode
+from ebook_convert.polyglot.urllib import unquote
+
+if TYPE_CHECKING:
+    from ebook_convert.utils.logging import Log
+
+
+class RBToc(list):
+    class Item:
+        def __init__(self, name: bytes = b'', size: int = 0, offset: int = 0, flags: int = 0) -> None:
+            self.name = name
+            self.size = size
+            self.offset = offset
+            self.flags = flags
+
+
+class Reader:
+    def __init__(self, stream: IO[bytes], log: Log, encoding: str | None = None) -> None:
+        self.stream = stream
+        self.log = log
+        self.encoding = encoding
+
+        self.verify_file()
+
+        self.mi = get_metadata(self.stream)
+        self.toc = self.get_toc()
+
+    def read_i32(self) -> int:
+        return struct.unpack('<I', self.stream.read(4))[0]
+
+    def verify_file(self) -> None:
+        self.stream.seek(0)
+        if self.stream.read(14) != HEADER:
+            raise RocketBookError(f'Could not read file: {self.stream.name}. Does not contain a valid RocketBook Header.')
+
+        self.stream.seek(28)
+        size = self.read_i32()
+        self.stream.seek(0, os.SEEK_END)
+        real_size = self.stream.tell()
+        if size != real_size:
+            raise RocketBookError('File is corrupt. The file size recorded in the header does not match the actual file size.')
+
+    def get_toc(self) -> RBToc:
+        self.stream.seek(24)
+        toc_offset = self.read_i32()
+
+        self.stream.seek(toc_offset)
+        pages = self.read_i32()
+
+        toc = RBToc()
+        for i in range(pages):
+            name = unquote(self.stream.read(32).strip(b'\x00'))
+            size, offset, flags = self.read_i32(), self.read_i32(), self.read_i32()
+            toc.append(RBToc.Item(name=name, size=size, offset=offset, flags=flags))
+
+        return toc
+
+    def get_safe_path(self, output_dir: str, name: str) -> str:
+        base = os.path.abspath(output_dir)
+        if not base.endswith(os.sep):
+            base += os.sep
+        ans = os.path.abspath(os.path.join(base, name))
+        if not ans.startswith(base):
+            ans = ''
+        return ans
+
+    def get_text(self, toc_item: RBToc.Item, output_dir: str) -> None:
+        if toc_item.flags in (1, 2):
+            return
+
+        output = ''
+        self.stream.seek(toc_item.offset)
+
+        if toc_item.flags == 8:
+            count = self.read_i32()
+            self.read_i32()  # Uncompressed size.
+            chunck_sizes = []
+            for i in range(count):
+                chunck_sizes.append(self.read_i32())
+
+            for size in chunck_sizes:
+                cm_chunck = self.stream.read(size)
+                output += zlib.decompress(cm_chunck).decode('cp1252' if self.encoding is None else self.encoding, 'replace')
+        else:
+            output += self.stream.read(toc_item.size).decode('cp1252' if self.encoding is None else self.encoding, 'replace')
+
+        if path := self.get_safe_path(output_dir, toc_item.name.decode('utf-8')):
+            with open(path, 'wb') as html:
+                html.write(output.replace('<TITLE>', '<TITLE> ').encode('utf-8'))
+
+    def get_image(self, toc_item: RBToc.Item, output_dir: str) -> None:
+        if toc_item.flags != 0:
+            return
+
+        self.stream.seek(toc_item.offset)
+        data = self.stream.read(toc_item.size)
+
+        if path := self.get_safe_path(output_dir, toc_item.name.decode('utf-8')):
+            with open(path, 'wb') as img:
+                img.write(data)
+
+    def extract_content(self, output_dir: str) -> str:
+        self.log.debug('Extracting content from file...')
+        html = []
+        images = []
+
+        for item in self.toc:
+            iname = as_unicode(item.name)
+            if iname.lower().endswith('html'):
+                self.log.debug(f'HTML item {iname} found...')
+                html.append(iname)
+                self.get_text(item, output_dir)
+            if iname.lower().endswith('png'):
+                self.log.debug(f'PNG item {iname} found...')
+                images.append(iname)
+                self.get_image(item, output_dir)
+
+        opf_path = self.create_opf(output_dir, html, images)
+
+        return opf_path
+
+    def create_opf(self, output_dir: str, pages: list[str], images: list[str]) -> str:
+        with CurrentDir(output_dir):
+            opf = OPFCreator(output_dir, self.mi)
+
+            manifest = []
+            for page in pages + images:
+                manifest.append((page, None))
+
+            opf.create_manifest(manifest)
+            opf.create_spine(pages)
+            with open('metadata.opf', 'wb') as opffile:
+                opf.render(opffile)
+
+        return os.path.join(output_dir, 'metadata.opf')

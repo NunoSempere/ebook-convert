@@ -1,55 +1,72 @@
-from ebook_convert import polyglot
+#!/usr/bin/env python
+# License: GPLv3 Copyright: 2017, Kovid Goyal <kovid at kovidgoyal.net>
 
+from __future__ import annotations
+from typing import TYPE_CHECKING, Any, cast
 
 MSGPACK_MIME = 'application/x-msgpack'
 CANARY = 'jPoAv3zOyHvQ5JFNYg4hJ9'
 
+if TYPE_CHECKING:
+    from collections.abc import Buffer, Callable
+    from datetime import datetime
 
-def encoded(typ, data, ExtType):
+    import msgpack
+
+    from ebook_convert.db.categories import Tag
+    from ebook_convert.ebooks.metadata.book.base import Metadata
+    from ebook_convert.library.field_metadata import FieldMetadata, SerializedFieldMetadata
+
+
+def encoded(typ: int, data: object, ExtType: type[msgpack.ExtType] | None) -> dict[str, object] | msgpack.ExtType:
     if ExtType is None:
         return {CANARY: typ, 'v': data}
     return ExtType(typ, msgpack_dumps(data))
 
 
-def create_encoder(for_json=False):
+def create_encoder(for_json: bool = False) -> Callable[[object], object]:
     from datetime import datetime
+
     ExtType = None
     if not for_json:
         import msgpack
+
         ExtType = msgpack.ExtType
 
-    def encoder(obj):
+    def encoder(obj: object) -> object:
         if isinstance(obj, datetime):
             return encoded(0, str(obj.isoformat()), ExtType)
         if isinstance(obj, (set, frozenset)):
             return encoded(1, tuple(obj), ExtType)
         if getattr(obj, '__calibre_serializable__', False):
+            from ebook_convert.db.categories import Tag
             from ebook_convert.ebooks.metadata.book.base import Metadata
             from ebook_convert.library.field_metadata import FieldMetadata, fm_as_dict
-            from ebook_convert.db.categories import Tag
+
             if isinstance(obj, Metadata):
                 from ebook_convert.ebooks.metadata.book.serialize import metadata_as_dict
-                return encoded(
-                    2, metadata_as_dict(obj, encode_cover_data=for_json), ExtType
-                )
+
+                return encoded(2, metadata_as_dict(obj, encode_cover_data=for_json), ExtType)
             elif isinstance(obj, FieldMetadata):
                 return encoded(3, fm_as_dict(obj), ExtType)
             elif isinstance(obj, Tag):
                 return encoded(4, obj.as_dict(), ExtType)
         if for_json and isinstance(obj, bytes):
             return obj.decode('utf-8')
-        raise TypeError('Cannot serialize objects of type {}'.format(type(obj)))
+        raise TypeError(f'Cannot serialize objects of type {type(obj)}')
 
     return encoder
 
 
-def msgpack_dumps(obj):
+def msgpack_dumps(obj: object) -> bytes:
     import msgpack
+
     return msgpack.packb(obj, default=create_encoder(), use_bin_type=True)
 
 
-def json_dumps(data, **kw):
+def json_dumps(data: object, **kw: Any) -> bytes:  # ruff: ignore[any-type]
     import json
+
     kw['default'] = create_encoder(for_json=True)
     kw['ensure_ascii'] = False
     ans = json.dumps(data, **kw)
@@ -58,63 +75,68 @@ def json_dumps(data, **kw):
     return ans
 
 
-def decode_metadata(x, for_json):
+def decode_metadata(x: dict[str, Any], for_json: bool) -> Metadata:
     from ebook_convert.ebooks.metadata.book.serialize import metadata_from_dict
+    from ebook_convert.polyglot.binary import from_base64_bytes
+
     obj = metadata_from_dict(x)
-    if for_json and obj.cover_data and obj.cover_data[1]:
-        obj.cover_data = (obj.cover_data[0],
-                          polyglot.from_base64_bytes(obj.cover_data[1]))
+    if for_json and obj.cover_data[1]:
+        obj.cover_data = obj.cover_data[0], from_base64_bytes(obj.cover_data[1])
     return obj
 
 
-def decode_field_metadata(x, for_json):
+def decode_field_metadata(x: dict[str, Any], for_json: bool) -> FieldMetadata:
     from ebook_convert.library.field_metadata import fm_from_dict
-    return fm_from_dict(x)
+
+    return fm_from_dict(cast('SerializedFieldMetadata', x))
 
 
-def decode_category_tag(x, for_json):
+def decode_category_tag(x: dict[str, Any], for_json: bool) -> Tag:
     from ebook_convert.db.categories import Tag
+
     return Tag.from_dict(x)
 
 
-def decode_datetime(x, fj):
+def decode_datetime(x: str, fj: bool) -> datetime:
     from ebook_convert.utils.iso8601 import parse_iso8601
+
     return parse_iso8601(x, assume_utc=True)
 
 
-decoders = (
-    decode_datetime,
-    lambda x, fj: set(x),
-    decode_metadata, decode_field_metadata, decode_category_tag
-)
+decoders = (decode_datetime, lambda x, fj: set(x), decode_metadata, decode_field_metadata, decode_category_tag)
 
 
-def json_decoder(obj):
+def json_decoder(obj: dict[str, Any]) -> Any:  # ruff: ignore[any-type]
     typ = obj.get(CANARY)
     if typ is None:
         return obj
     return decoders[typ](obj['v'], True)
 
 
-def msgpack_decoder(code, data):
+def msgpack_decoder(code: int, data: bytes) -> Any:  # ruff: ignore[any-type]
     return decoders[code](msgpack_loads(data), False)
 
 
-def msgpack_loads(dump, use_list=True):
+def msgpack_loads(dump: Buffer | str, use_list: bool = True) -> Any:  # ruff: ignore[any-type]
     # use_list controls whether msgpack arrays are unpacked as lists or tuples
     import msgpack
-    return msgpack.unpackb(dump, ext_hook=msgpack_decoder, raw=False, use_list=use_list)
+
+    return msgpack.unpackb(dump, ext_hook=msgpack_decoder, raw=False, use_list=use_list, strict_map_key=False)
 
 
-def json_loads(data):
+def json_loads(data: str | bytes | bytearray) -> Any:  # ruff: ignore[any-type]
     import json
+
     return json.loads(data, object_hook=json_decoder)
 
 
-def pickle_dumps(data):
+def pickle_dumps(data: object) -> bytes:
     import pickle
+
     return pickle.dumps(data, -1)
 
-def pickle_loads(dump):
+
+def pickle_loads(dump: Buffer) -> Any:  # ruff: ignore[any-type]
     import pickle
-    return pickle.loads(dump, encoding='utf-8')
+
+    return pickle.loads(dump, encoding='utf-8')  # nosec: only used for calibre's own serialized data

@@ -1,34 +1,39 @@
-'''
-Read content from palmdoc pdb file.
-'''
+# License: GPLv3 Copyright: 2009, John Schember <john@nachtimwald.com>
 
+"""
+Read content from palmdoc pdb file.
+"""
+
+from __future__ import annotations
 import io
 import struct
+from typing import IO, TYPE_CHECKING
 
 from ebook_convert.ebooks.pdb.formatreader import FormatReader
 
+if TYPE_CHECKING:
+    from optparse import Values
 
-__license__ = 'GPL v3'
-__copyright__ = '2009, John Schember <john@nachtimwald.com>'
-__docformat__ = 'restructuredtext en'
+    from ebook_convert.ebooks.oeb.base import OEBBook
+    from ebook_convert.ebooks.pdb.header import PdbHeaderReader
+    from ebook_convert.utils.logging import Log
 
 
-class HeaderRecord(object):
-    '''
+class HeaderRecord:
+    """
     The first record in the file is always the header record. It holds
     information related to the location of text, images, and so on
     in the file. This is used in conjunction with the sections
     defined in the file header.
-    '''
+    """
 
-    def __init__(self, raw):
-        self.compression, = struct.unpack('>H', raw[0:2])
-        self.num_records, = struct.unpack('>H', raw[8:10])
+    def __init__(self, raw: bytes) -> None:
+        (self.compression,) = struct.unpack('>H', raw[0:2])
+        (self.num_records,) = struct.unpack('>H', raw[8:10])
 
 
 class Reader(FormatReader):
-
-    def __init__(self, header, stream, log, options):
+    def __init__(self, header: PdbHeaderReader, stream: IO[bytes], log: Log, options: Values) -> None:
         self.stream = stream
         self.log = log
         self.options = options
@@ -39,23 +44,24 @@ class Reader(FormatReader):
 
         self.header_record = HeaderRecord(self.section_data(0))
 
-    def section_data(self, number):
+    def section_data(self, number: int) -> bytes:
         return self.sections[number]
 
-    def decompress_text(self, number):
+    def decompress_text(self, number: int) -> bytes:
         if self.header_record.compression == 1:
             return self.section_data(number)
-        if self.header_record.compression == 2 or self.header_record.compression == 258:
+        if self.header_record.compression in {2, 258}:
             from ebook_convert.ebooks.compression.palmdoc import decompress_doc
+
             return decompress_doc(self.section_data(number))
         return b''
 
-    def extract_content(self, output_dir):
+    def extract_content(self, output_dir: str) -> str | OEBBook | None:
         raw_txt = b''
 
         self.log.info('Decompressing text...')
         for i in range(1, self.header_record.num_records + 1):
-            self.log.debug('\tDecompressing text section %i', i)
+            self.log.debug(f'\tDecompressing text section {i}')
             raw_txt += self.decompress_text(i)
 
         self.log.info('Converting text to OEB...')
@@ -64,6 +70,7 @@ class Reader(FormatReader):
         from ebook_convert.customize.ui import plugin_for_input_format
 
         txt_plugin = plugin_for_input_format('txt')
+        assert txt_plugin is not None
         for opt in txt_plugin.options:
             if not hasattr(self.options, opt.option.name):
                 setattr(self.options, opt.option.name, opt.recommended_value)

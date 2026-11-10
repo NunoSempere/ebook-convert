@@ -9,40 +9,39 @@ scripts such as Hebrew, Arabic, Persian and Urdu that is the reverse of logical
 bidirectional algorithm and does not suffer from this, but the HTML/XML output
 device in poppler does not, so we have to undo the visual ordering ourselves.
 
-In Calibre the reordering itself is done by ICU, via
-calibre.utils.icu.visual_to_logical(), which implements the inverse of the
-Unicode bidirectional algorithm. ebook-convert has no ICU extension and adds no
-dependency for this, so here the reordering is a no-op: right-to-left text is
-detected and a notice is logged once, but the text is left in the visual order
-pdftohtml produced. Every function that reorders text takes a ``convert``
-parameter with the signature of ICU's visual_to_logical() so that a real
-implementation can be plugged in without changing the callers.
+The reordering itself is done by ICU, which calibre already links against, via
+calibre.utils.icu.visual_to_logical(). ICU implements the inverse of the
+Unicode bidirectional algorithm, so it detects the base direction of each line,
+keeps runs of numbers and Latin text that are embedded in right-to-left text
+the right way round, and mirrors brackets, all per the Unicode standard.
 
-What this module adds on top of the reordering primitive is the ability to
-reorder a line that has inline markup in it, which the primitive knows nothing
-about. A line is broken into runs of text, each remembering the tags it is
-nested inside, the runs are reordered as a unit, and the markup is then rebuilt
-around them. Elements with no text in them, such as anchors and images, take
-part in the reordering as neutral objects, so that they end up in the right
-place too.
+What this module adds on top is the ability to reorder a line that has inline
+markup in it, which ICU knows nothing about. A line is broken into runs of
+text, each remembering the tags it is nested inside, the runs are reordered as
+a unit, and the markup is then rebuilt around them. Elements with no text in
+them, such as anchors and images, take part in the reordering as neutral
+objects, so that they end up in the right place too.
 
 Note that if poppler ever fixes its HTML output device to emit logical order,
 this would double reverse and would need to be gated on the poppler version.
 """
 
 from __future__ import annotations
-
 import re
 from html import escape, unescape
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal, Protocol, overload
+
+from ebook_convert.utils.icu import visual_to_logical as icu_visual_to_logical
 
 if TYPE_CHECKING:
-    from typing import Callable
 
-    # A bidi reordering function with the signature of ICU's
-    # visual_to_logical(): convert(text) -> text and
-    # convert(text, True) -> (text, index_map)
-    Converter = Callable[..., object]
+    class Converter(Protocol):
+        "A bidi reordering function with the signature of icu.visual_to_logical()"
+
+        @overload
+        def __call__(self, text: str, want_map: Literal[False] = False, /) -> str: ...
+        @overload
+        def __call__(self, text: str, want_map: Literal[True], /) -> tuple[str, tuple[int, ...]]: ...
 
 
 # Cheap pre-filter, the blocks containing right-to-left scripts. Used to avoid
@@ -50,30 +49,22 @@ if TYPE_CHECKING:
 # every character with a bidi class of R or AL.
 HAS_RTL_PAT = re.compile(
     # Hebrew, Arabic, Syriac, Thaana, NKo, Samaritan, Mandaic, Arabic Extended
-    r'[֐-ࣿ'
+    r'[\u0590-\u08ff'
     # The right-to-left mark
-    r'‏'
+    r'\u200f'
     # Hebrew and Arabic presentation forms
-    r'יִ-﷿ﹰ-ﻼ'
+    r'\ufb1d-\ufdff\ufe70-\ufefc'
     # Cypriot, Phoenician, Kharoshthi, Avestan, Adlam and the rest
     r'\U00010800-\U00010fff\U0001e800-\U0001ecbf\U0001ed00-\U0001eeff]'
 )
 
-OBJECT_REPLACEMENT = '￼'
+OBJECT_REPLACEMENT = '\ufffc'
 
 # Elements that never have any text content, so are always treated as objects
 VOID_TAGS = frozenset({'br', 'hr', 'img', 'image', 'input', 'meta', 'link'})
 
 TOKEN_PAT = re.compile(r'<[^>]*>')
 TAG_NAME_PAT = re.compile(r'<\s*(/?)\s*([a-zA-Z][-a-zA-Z0-9:]*)')
-
-RTL_NOTICE = (
-    'Right-to-left text detected in the PDF. ebook-convert cannot reorder it '
-    'from the visual order produced by pdftohtml into logical order (Calibre '
-    'uses its ICU extension for this), so such text is left as it is and may '
-    'come out with its letters backwards.'
-)
-_rtl_notice_shown = False
 
 
 def has_rtl(text: str) -> bool:
@@ -97,41 +88,17 @@ def is_predominantly_rtl(text: str) -> bool:
     return rtl > ltr
 
 
-def notice_rtl_unsupported() -> None:
-    "Log, once per process, that right-to-left text will not be reordered"
-    global _rtl_notice_shown
-    if _rtl_notice_shown:
-        return
-    _rtl_notice_shown = True
-    from ebook_convert.logging import default_log
-
-    default_log.warning(RTL_NOTICE)
-
-
-def identity_visual_to_logical(text: str, want_map: bool = False):
-    """
-    The fallback reordering primitive: leaves text in the order pdftohtml
-    produced it. Has the signature of ICU's visual_to_logical().
-    """
-    if want_map:
-        return text, tuple(range(len(text)))
-    return text
-
-
-def visual_to_logical(text: str, convert: Converter | None = None) -> str:
+def visual_to_logical(text: str) -> str:
     "Convert a line of plain text from visual to logical order"
     if not has_rtl(text):
         return text
-    if convert is None:
-        notice_rtl_unsupported()
-        return text
-    return convert(text)
+    return icu_visual_to_logical(text)
 
 
 # Reordering runs of text {{{
 
 
-def reorder_runs(runs: list, convert: Converter = identity_visual_to_logical) -> list:
+def reorder_runs(runs: list, convert: Converter = icu_visual_to_logical) -> list:
     """
     Reorder runs, a list of (text, context) pairs making up a single line in
     visual order, into logical order. context is opaque to this function, it
@@ -257,7 +224,7 @@ def parse_markup(raw: str) -> list:
     pos = 0
     for m in TOKEN_PAT.finditer(raw):
         if m.start() > pos:
-            stack[-1].children.append(raw[pos:m.start()])
+            stack[-1].children.append(raw[pos : m.start()])
         pos = m.end()
         token = m.group()
         name, is_close = tag_name(token)
@@ -270,7 +237,7 @@ def parse_markup(raw: str) -> list:
             # none, as closing an element we never opened would lose text
             for i in range(len(stack) - 1, 0, -1):
                 if stack[i].name == name:
-                    del stack[i + 1:]
+                    del stack[i + 1 :]
                     stack.pop()
                     break
             else:
@@ -325,19 +292,15 @@ def rebuild(runs: list) -> str:
     return ''.join(ans)
 
 
-def fix_markup_line(raw: str, convert: Converter | None = None) -> str:
+def fix_markup_line(raw: str, convert: Converter = icu_visual_to_logical) -> str:
     """
     Convert a single line of markup, as generated by pdftohtml, from visual to
     logical order. The text of the line is reordered as a whole, across any
     inline markup in it, so that a phrase that is split up by a change of style
     or by being in several fragments is still reordered correctly. See
-    reorder_runs() for convert. Without a convert function the line is
-    returned unchanged, after logging a notice if it has right-to-left text.
+    reorder_runs() for convert.
     """
     if not has_rtl(raw):
-        return raw
-    if convert is None:
-        notice_rtl_unsupported()
         return raw
     runs: list = []
     flatten(parse_markup(raw), (), runs)
@@ -373,18 +336,14 @@ BODY_PAT = re.compile(r'(<body[^>]*>)(.*)(</body\s*>)', re.IGNORECASE | re.DOTAL
 HTML_OPEN_PAT = re.compile(r'<html(?=[\s>])[^>]*>', re.IGNORECASE)
 
 
-def fix_pdftohtml_html(raw: str, convert: Converter | None = None) -> str:
+def fix_pdftohtml_html(raw: str) -> str:
     """
     Convert the right-to-left lines of the HTML generated by pdftohtml from
     visual to logical order. Also marks the document as right-to-left if it is
     predominantly so, without which the punctuation still renders on the wrong
-    side. Without a convert function the document is returned unchanged, after
-    logging a notice if it has right-to-left text.
+    side.
     """
     if not has_rtl(raw):
-        return raw
-    if convert is None:
-        notice_rtl_unsupported()
         return raw
     m = BODY_PAT.search(raw)
     if m is None:
@@ -392,12 +351,12 @@ def fix_pdftohtml_html(raw: str, convert: Converter | None = None) -> str:
     body = m.group(2)
     pos, parts = 0, []
     for sep in LINE_BREAK_PAT.finditer(body):
-        parts.append(fix_markup_line(body[pos:sep.start()], convert))
+        parts.append(fix_markup_line(body[pos : sep.start()]))
         parts.append(sep.group())
         pos = sep.end()
-    parts.append(fix_markup_line(body[pos:], convert))
+    parts.append(fix_markup_line(body[pos:]))
     body = ''.join(parts)
-    raw = raw[:m.start()] + m.group(1) + body + m.group(3) + raw[m.end():]
+    raw = raw[: m.start()] + m.group(1) + body + m.group(3) + raw[m.end() :]
     if is_predominantly_rtl(markup_to_text(body)):
         # On the html element rather than the body as pdftohtml_rules() in
         # conversion/preprocess.py throws away the attributes of the body
@@ -409,7 +368,7 @@ def fix_pdftohtml_html(raw: str, convert: Converter | None = None) -> str:
                 end = '/>'
             else:
                 end = '>'
-            raw = raw[:hm.start()] + tag + ' dir="rtl"' + end + raw[hm.end():]
+            raw = raw[: hm.start()] + tag + ' dir="rtl"' + end + raw[hm.end() :]
     return raw
 
 

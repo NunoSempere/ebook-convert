@@ -1,41 +1,33 @@
-"""
-Default fonts used in the PRS500
-"""
+# License: GPLv3 Copyright: 2008, Kovid Goyal <kovid at kovidgoyal.net>
+
+from __future__ import annotations
 from PIL import ImageFont
 
-from ebook_convert.utils.fonts.scanner import font_scanner
+'''
+Default fonts used in the PRS500
+'''
+
+LIBERATION_FONT_MAP = {
+    'Swis721 BT Roman': 'LiberationSans-Regular',
+    'Dutch801 Rm BT Roman': 'LiberationSerif-Regular',
+    'Courier10 BT Roman': 'LiberationMono-Regular',
+}
+
+# Maps full font name to font file path, the name is None if the font has no full name
+FONT_FILE_MAP: dict[str | None, str] = {}
 
 
-__license__ = 'GPL v3'
-__copyright__ = '2008, Kovid Goyal <kovid at kovidgoyal.net>'
-
-LIBERATION_FONT_MAP = {'Swis721 BT Roman': 'Liberation Sans Regular',
-                       'Dutch801 Rm BT Roman': 'Liberation Serif Regular',
-                       'Courier10 BT Roman': 'Liberation Mono Regular'}
-_LIB_CACHE = {}
-FONT_FILE_MAP = {}
-
-
-def get_font(name, size, encoding='unic'):
+def get_font(name: str, size: float, encoding: str = 'unic') -> ImageFont.FreeTypeFont | None:
     """
     Get an ImageFont object by name.
     @param size: Font height in pixels. To convert from pts:
                  sz in pixels = (dpi/72) * size in pts
-    @param encoding: Font encoding to use. E.g. 'unic', 'symbol', 'ADOB',
-                     'ADBE', 'aprm'
+    @param encoding: Font encoding to use. E.g. 'unic', 'symbol', 'ADOB', 'ADBE', 'aprm'
+    @param manager: A dict that will store the PersistentTemporary
     """
-    if name in LIBERATION_FONT_MAP:
-        if not _LIB_CACHE:
-            for key in font_scanner.cache['fonts']:
-                record = font_scanner.cache['fonts'][key]
-                _LIB_CACHE[record['family_name'] + ' ' +
-                           record['subfamily_name']] = record['path']
+    from ebook_convert.utils.resources import get_path as P
 
-        fpath = _LIB_CACHE.get(LIBERATION_FONT_MAP[name])
-        if not fpath:
-            raise ValueError('There is no liberation font existing in the '
-                             'system. Please install them before converter '
-                             'use.')
-        return ImageFont.truetype(fpath, size, encoding=encoding)
+    if name in LIBERATION_FONT_MAP:
+        return ImageFont.truetype(P(f'fonts/liberation/{LIBERATION_FONT_MAP[name]}.ttf'), size, encoding=encoding)
     elif name in FONT_FILE_MAP:
         return ImageFont.truetype(FONT_FILE_MAP[name], size, encoding=encoding)

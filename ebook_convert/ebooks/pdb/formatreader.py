@@ -1,15 +1,23 @@
+# License: GPLv3 Copyright: 2009, John Schember <john@nachtimwald.com>
+
 """
 Interface defining the necessary public functions for a pdb format reader.
 """
-__license__ = 'GPL v3'
-__copyright__ = '2009, John Schember <john@nachtimwald.com>'
-__docformat__ = 'restructuredtext en'
+
+from __future__ import annotations
+from typing import IO, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from optparse import Values
+
+    from ebook_convert.ebooks.oeb.base import OEBBook
+    from ebook_convert.ebooks.pdb.header import PdbHeaderReader
+    from ebook_convert.utils.logging import Log
 
 
-class FormatReader(object):
-
-    def __init__(self, header, stream, log, options):
+class FormatReader:
+    def __init__(self, header: PdbHeaderReader, stream: IO[bytes], log: Log, options: Values) -> None:
         raise NotImplementedError()
 
-    def extract_content(self, output_dir):
+    def extract_content(self, output_dir: str) -> str | OEBBook | None:
         raise NotImplementedError()

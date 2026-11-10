@@ -1,37 +1,51 @@
+#!/usr/bin/env python
+# License: GPLv3 Copyright: 2013, Kovid Goyal <kovid at kovidgoyal.net>
+
+from __future__ import annotations
 import os
 import re
+from typing import TYPE_CHECKING, cast
 
-from lxml.html.builder import IMG, HR
+from lxml.html.builder import HR, IMG
 
+from ebook_convert import sanitize_file_name
+from ebook_convert.constants import iswindows
 from ebook_convert.ebooks.docx.names import SVG_BLIP_URI, barename
 from ebook_convert.utils.filenames import ascii_filename
-from ebook_convert.utils.filenames import sanitize_file_name
-from ebook_convert.utils.img import resize_to_fit, image_to_data
+from ebook_convert.utils.img import image_to_data, resize_to_fit
 from ebook_convert.utils.imghdr import what
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+
+    from lxml.etree import _Element
+    from lxml.html import HtmlElement
+
+    from ebook_convert.ebooks.docx.container import DOCX
+    from ebook_convert.ebooks.docx.names import AttrGetter, DOCXNamespace, XPathFunc
+    from ebook_convert.ebooks.docx.styles import PageProperties
+    from ebook_convert.utils.logging import Log
 
 
 class LinkedImageNotFound(ValueError):
-
-    def __init__(self, fname):
+    def __init__(self, fname: str) -> None:
         ValueError.__init__(self, fname)
         self.fname = fname
 
 
-def image_filename(x):
-    # Sanitize strictly, some EPUB software chokes on anything but
-    # alphanumerics in image names
+def image_filename(x: str) -> str:
     return sanitize_file_name(re.sub(r'[^0-9a-zA-Z.-]', '_', ascii_filename(x)).lstrip('_').lstrip('.'))
 
 
-def emu_to_pt(x):
+def emu_to_pt(x: float) -> float:
     return x / 12700
 
 
-def pt_to_emu(x):
+def pt_to_emu(x: float) -> int:
     return int(x * 12700)
 
 
-def get_image_properties(parent, XPath, get):
+def get_image_properties(parent: _Element, XPath: XPathFunc, get: AttrGetter) -> tuple[dict[str, str], str | None, str | None]:
     width = height = None
     for extent in XPath('./wp:extent')(parent):
         try:
@@ -42,11 +56,11 @@ def get_image_properties(parent, XPath, get):
             height = emu_to_pt(int(extent.get('cy')))
         except (TypeError, ValueError):
             pass
-    ans = {}
+    ans: dict[str, str] = {}
     if width is not None:
-        ans['width'] = '%.3gpt' % width
+        ans['width'] = f'{width:.3g}pt'
     if height is not None:
-        ans['height'] = '%.3gpt' % height
+        ans['height'] = f'{height:.3g}pt'
 
     alt = None
     title = None
@@ -65,7 +79,7 @@ def get_image_properties(parent, XPath, get):
                 except Exception:
                     rot = None
             if rot:
-                transforms.append('rotate(%gdeg)' % rot)
+                transforms.append(f'rotate({rot:g}deg)')
             fliph = xfrm.get('flipH')
             if fliph in ('1', 'true'):
                 transforms.append('scaleX(-1)')
@@ -79,20 +93,20 @@ def get_image_properties(parent, XPath, get):
     return ans, alt, title
 
 
-def get_image_margins(elem):
-    ans = {}
-    for w, css in {'L':'left', 'T':'top', 'R':'right', 'B':'bottom'}.items():
-        val = elem.get('dist%s' % w, None)
+def get_image_margins(elem: _Element) -> dict[str, str]:
+    ans: dict[str, str] = {}
+    for w, css in {'L': 'left', 'T': 'top', 'R': 'right', 'B': 'bottom'}.items():
+        val = elem.get(f'dist{w}', None)
         if val is not None:
             try:
-                val = emu_to_pt(int(val))
-            except (TypeError, ValueError):
+                pt = emu_to_pt(int(val))
+            except ValueError:
                 continue
-            ans['padding-%s' % css] = '%.3gpt' % val
+            ans[f'padding-{css}'] = f'{pt:.3g}pt'
     return ans
 
 
-def get_hpos(anchor, page_width, XPath, get, width_frac):
+def get_hpos(anchor: _Element, page_width: float, XPath: XPathFunc, get: AttrGetter, width_frac: float) -> float:
     for ph in XPath('./wp:positionH')(anchor):
         rp = ph.get('relativeFrom', None)
         if rp == 'leftMargin':
@@ -100,7 +114,7 @@ def get_hpos(anchor, page_width, XPath, get, width_frac):
         if rp == 'rightMargin':
             return 1 + width_frac
         al = None
-        almap = {'left':0, 'center':0.5, 'right':1}
+        almap = {'left': 0, 'center': 0.5, 'right': 1}
         for align in XPath('./wp:align')(ph):
             al = almap.get(align.text)
             if al is not None:
@@ -112,36 +126,37 @@ def get_hpos(anchor, page_width, XPath, get, width_frac):
                 pos = emu_to_pt(int(po.text))
             except (TypeError, ValueError):
                 continue
-            return pos/page_width + width_frac
+            return pos / page_width + width_frac
 
     for sp in XPath('./wp:simplePos')(anchor):
         try:
             x = emu_to_pt(int(sp.get('x', None)))
         except (TypeError, ValueError):
             continue
-        return x/page_width + width_frac
+        return x / page_width + width_frac
 
     return 0
 
 
-class Images(object):
-
-    def __init__(self, namespace, log):
+class Images:
+    def __init__(self, namespace: DOCXNamespace, log: Log) -> None:
         self.namespace = namespace
-        self.rid_map = {}
-        self.used = {}
+        self.rid_map: dict[str, str] = {}
+        self.used: dict[tuple[str, int | None, int | None], str] = {}
         self.resized = {}
-        self.names = set()
-        self.all_images = set()
-        self.links = []
+        self.names: set[str] = set()
+        self.all_images: set[str] = set()
+        self.links: list[tuple[HtmlElement, dict[str, str], dict[str, str]]] = []
         self.log = log
 
-    def __call__(self, relationships_by_id):
+    def __call__(self, relationships_by_id: dict[str, str]) -> None:
         self.rid_map = relationships_by_id
 
-    def read_image_data(self, fname, base=None):
+    def read_image_data(self, fname: str, base: str | None = None) -> tuple[bytes, str]:
         if fname.startswith('file://'):
-            src = fname[len('file://'):]
+            src = fname[len('file://') :]
+            if iswindows and src and src[0] == '/':
+                src = src[1:]
             if not src or not os.path.exists(src):
                 raise LinkedImageNotFound(src)
             with open(src, 'rb') as rawsrc:
@@ -155,14 +170,13 @@ class Images(object):
         ext = what(None, raw) or base.rpartition('.')[-1] or 'jpeg'
         if ext == 'emf':
             # For an example, see: https://bugs.launchpad.net/bugs/1224849
-            self.log.info('Found an EMF image: %s, trying to extract '
-                          'embedded raster image', fname)
+            self.log(f'Found an EMF image: {fname}, trying to extract embedded raster image')
             from ebook_convert.utils.wmf.emf import emf_unwrap
+
             try:
                 raw = emf_unwrap(raw)
             except Exception:
-                self.log.exception('Failed to extract embedded raster image '
-                                   'from EMF')
+                self.log.exception('Failed to extract embedded raster image from EMF')
             else:
                 ext = 'png'
         base = base.rpartition('.')[0]
@@ -171,25 +185,27 @@ class Images(object):
         base += '.' + ext
         return raw, base
 
-    def unique_name(self, base):
+    def unique_name(self, base: str) -> str:
         exists = frozenset(self.used.values())
         c = 1
         name = base
         while name in exists:
             n, e = base.rpartition('.')[0::2]
-            name = '%s-%d.%s' % (n, c, e)
+            name = f'{n}-{c}.{e}'
             c += 1
         return name
 
-    def resize_image(self, raw, base, max_width, max_height):
+    def resize_image(self, raw: bytes, base: str, max_width: int, max_height: int) -> tuple[bytes, str, bool]:
         resized, img = resize_to_fit(raw, max_width, max_height)
         if resized:
             base, ext = os.path.splitext(base)
-            base = base + '-%dx%d%s' % (max_width, max_height, ext)
+            base = base + f'-{max_width}x{max_height}{ext}'
             raw = image_to_data(img, fmt=ext[1:])
         return raw, base, resized
 
-    def generate_filename(self, rid, base=None, rid_map=None, max_width=None, max_height=None):
+    def generate_filename(
+        self, rid: str, base: str | None = None, rid_map: dict[str, str] | None = None, max_width: int | None = None, max_height: int | None = None
+    ) -> str:
         rid_map = self.rid_map if rid_map is None else rid_map
         fname = rid_map[rid]
         key = (fname, max_width, max_height)
@@ -212,12 +228,12 @@ class Images(object):
         self.all_images.add('images/' + name)
         return name
 
-    def pic_to_img(self, pic, alt, parent, title):
+    def pic_to_img(self, pic: _Element, alt: str | None, parent: _Element, title: str | None) -> HtmlElement | None:
         XPath, get = self.namespace.XPath, self.namespace.get
         name = None
         link = None
         for hl in XPath('descendant::a:hlinkClick[@r:id]')(parent):
-            link = {'id':get(hl, 'r:id')}
+            link = {'id': cast('str', get(hl, 'r:id'))}  # the XPath ensures r:id exists
             tgt = hl.get('tgtFrame', None)
             if tgt:
                 link['target'] = tgt
@@ -232,8 +248,7 @@ class Images(object):
             alt = pr.get('descr') or alt
             for a in XPath('descendant::a:blip[@r:embed or @r:link]')(pic):
                 rid = get(a, 'r:embed') or get(a, 'r:link')
-                # Prefer the SVG original over its raster fallback
-                for asvg in XPath('./a:extLst/a:ext[@uri="%s"]/asvg:svgBlip[@r:embed or @r:link]' % SVG_BLIP_URI)(a):
+                for asvg in XPath(f'./a:extLst/a:ext[@uri="{SVG_BLIP_URI}"]/asvg:svgBlip[@r:embed or @r:link]')(a):
                     svg_rid = get(asvg, 'r:embed') or get(asvg, 'r:link')
                     if svg_rid and svg_rid in self.rid_map:
                         rid = svg_rid
@@ -242,10 +257,9 @@ class Images(object):
                     try:
                         src = self.generate_filename(rid, name)
                     except LinkedImageNotFound as err:
-                        self.log.warning('Linked image: %s not found, '
-                                         'ignoring', err.fname)
+                        self.log.warn(f'Linked image: {err.fname} not found, ignoring')
                         continue
-                    img = IMG(src='images/%s' % src)
+                    img = IMG(src=f'images/{src}')
                     img.set('alt', alt or 'Image')
                     if title:
                         img.set('title', title)
@@ -253,7 +267,7 @@ class Images(object):
                         self.links.append((img, link, self.rid_map))
                     return img
 
-    def drawing_to_html(self, drawing, page):
+    def drawing_to_html(self, drawing: _Element, page: PageProperties) -> Iterator[HtmlElement]:
         XPath, get = self.namespace.XPath, self.namespace.get
         # First process the inline pictures
         for inline in XPath('./wp:inline')(drawing):
@@ -262,7 +276,7 @@ class Images(object):
                 ans = self.pic_to_img(pic, alt, inline, title)
                 if ans is not None:
                     if style:
-                        ans.set('style', '; '.join('%s: %s' % (k, v) for k, v in style.items()))
+                        ans.set('style', '; '.join(f'{k}: {v}' for k, v in style.items()))
                     yield ans
 
         # Now process the floats
@@ -273,29 +287,29 @@ class Images(object):
                 ans = self.pic_to_img(pic, alt, anchor, title)
                 if ans is not None:
                     if style:
-                        ans.set('style', '; '.join('%s: %s' % (k, v) for k, v in style.items()))
+                        ans.set('style', '; '.join(f'{k}: {v}' for k, v in style.items()))
                     yield ans
 
-    def pict_to_html(self, pict, page):
+    def pict_to_html(self, pict: _Element, page: PageProperties) -> Iterator[HtmlElement]:
         XPath, get = self.namespace.XPath, self.namespace.get
         # First see if we have an <hr>
         is_hr = len(pict) == 1 and get(pict[0], 'o:hr') in {'t', 'true'}
         if is_hr:
-            style = {}
+            style: dict[str, str] = {}
             hr = HR()
             try:
-                pct = float(get(pict[0], 'o:hrpct'))
+                pct = float(get(pict[0], 'o:hrpct', ''))
             except (ValueError, TypeError, AttributeError):
                 pass
             else:
                 if pct > 0:
-                    style['width'] = '%.3g%%' % pct
+                    style['width'] = f'{pct:.3g}%'
             align = get(pict[0], 'o:hralign', 'center')
             if align in {'left', 'right'}:
                 style['margin-left'] = '0' if align == 'left' else 'auto'
                 style['margin-right'] = 'auto' if align == 'left' else '0'
             if style:
-                hr.set('style', '; '.join(('%s:%s' % (k, v) for k, v in style.items())))
+                hr.set('style', '; '.join((f'{k}:{v}' for k, v in style.items())))
             yield hr
 
         for imagedata in XPath('descendant::v:imagedata[@r:id]')(pict):
@@ -304,18 +318,17 @@ class Images(object):
                 try:
                     src = self.generate_filename(rid)
                 except LinkedImageNotFound as err:
-                    self.log.warning('Linked image: %s not found, ignoring',
-                                     err.fname)
+                    self.log.warn(f'Linked image: {err.fname} not found, ignoring')
                     continue
                 shape_style = get(imagedata.getparent(), 'style', '')
-                img = IMG(src='images/%s' % src)
+                img = IMG(src=f'images/{src}')
                 alt = get(imagedata, 'o:title')
                 img.set('alt', alt or 'Image')
                 if 'position:absolute' in shape_style:
                     img.set('style', 'display: block')
                 yield img
 
-    def get_float_properties(self, anchor, style, page):
+    def get_float_properties(self, anchor: _Element, style: dict[str, str], page: PageProperties) -> None:
         XPath, get = self.namespace.XPath, self.namespace.get
         if 'display' not in style:
             style['display'] = 'block'
@@ -327,15 +340,16 @@ class Images(object):
             # Ignore margins
             page_width = page.width
 
-        hpos = get_hpos(anchor, page_width, XPath, get, width/(2*page_width))
+        hpos = get_hpos(anchor, page_width, XPath, get, width / (2 * page_width))
 
         wrap_elem = None
         dofloat = False
 
         for child in reversed(anchor):
-            if not isinstance(child.tag, str):
-                continue  # comments and processing instructions
-            bt = barename(child.tag)
+            tag = child.tag
+            if not isinstance(tag, str):
+                continue  # comments and processing instructions are not wrap elements
+            bt = barename(tag)
             if bt in {'wrapNone', 'wrapSquare', 'wrapThrough', 'wrapTight', 'wrapTopAndBottom'}:
                 wrap_elem = child
                 dofloat = bt not in {'wrapNone', 'wrapTopAndBottom'}
@@ -356,14 +370,14 @@ class Images(object):
 
         style.update(padding)
 
-    def to_html(self, elem, page, docx, dest_dir):
+    def to_html(self, elem: _Element, page: PageProperties, docx: DOCX, dest_dir: str) -> Iterator[HtmlElement]:
         dest = os.path.join(dest_dir, 'images')
         if not os.path.exists(dest):
             os.mkdir(dest)
         self.dest_dir, self.docx = dest, docx
-        if elem.tag.endswith('}drawing'):
-            for tag in self.drawing_to_html(elem, page):
-                yield tag
+        tag = elem.tag
+        assert isinstance(tag, str)  # elem is a w:drawing or w:pict element
+        if tag.endswith('}drawing'):
+            yield from self.drawing_to_html(elem, page)
         else:
-            for tag in self.pict_to_html(elem, page):
-                yield tag
+            yield from self.pict_to_html(elem, page)

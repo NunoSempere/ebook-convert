@@ -1,10 +1,14 @@
-import io
+from __future__ import annotations
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from io import TextIOWrapper
 
 
-def open_for_read(path):
-    return io.open(path, encoding='utf-8', errors='replace')
+def open_for_read(path: str) -> TextIOWrapper:
+    return open(path, encoding='utf-8', errors='replace')
 
 
-def open_for_write(path, append=False):
+def open_for_write(path: str, append: bool = False) -> TextIOWrapper:
     mode = 'a' if append else 'w'
-    return io.open(path, mode, encoding='utf-8', errors='replace', newline='')
+    return open(path, mode, encoding='utf-8', errors='replace', newline='')

@@ -11,6 +11,13 @@
 #                                                                       #
 #########################################################################
 
+# Each list is [attributes, [level attributes], [level attributes], ...]
+from __future__ import annotations
+type ListIds = list[str | None]
+type ListAttrs = dict[str, str | ListIds]  # only list-id holds a ListIds
+type LevelAttrs = dict[str, str]
+type ListInfo = list[ListAttrs | list[LevelAttrs]]
+
 
 class ListTable:
     """
@@ -19,15 +26,15 @@ class ListTable:
     """
 
     def __init__(
-                self,
-                bug_handler,
-                run_level=1,
-                ):
+        self,
+        bug_handler: type[Exception],
+        run_level: int = 1,
+    ) -> None:
         self.__bug_handler = bug_handler
         self.__initiate_values()
         self.__run_level = run_level
 
-    def __initiate_values(self):
+    def __initiate_values(self) -> None:
         self.__list_table_final = ''
         self.__state = 'default'
         self.__final_dict = {}
@@ -40,44 +47,42 @@ class ListTable:
         self.__prefix_string = None
         self.__level_numbers_string = ''
         self.__state_dict = {
-            'default'       : self.__default_func,
-            'level'         : self.__level_func,
-            'list'          : self.__list_func,
-            'unsure_ob'     : self.__after_bracket_func,
-            'level_number'  : self.__level_number_func,
-            'level_text'    : self.__level_text_func,
-            'list_name'     : self.__list_name_func,
+            'default': self.__default_func,
+            'level': self.__level_func,
+            'list': self.__list_func,
+            'unsure_ob': self.__after_bracket_func,
+            'level_number': self.__level_number_func,
+            'level_text': self.__level_text_func,
+            'list_name': self.__list_name_func,
         }
         self.__main_list_dict = {
-            'cw<ls<ls-tem-id_'  :       'list-template-id',
-            'cw<ls<list-hybri'  :       'list-hybrid',
-            'cw<ls<lis-tbl-id'  :       'list-table-id',
+            'cw<ls<ls-tem-id_': 'list-template-id',
+            'cw<ls<list-hybri': 'list-hybrid',
+            'cw<ls<lis-tbl-id': 'list-table-id',
         }
         self.__level_dict = {
-            'cw<ls<level-star'  :       'list-number-start',
-            'cw<ls<level-spac'  :       'list-space',
-            'cw<ls<level-inde'  :       'level-indent',
-            'cw<ls<fir-ln-ind'  :       'first-line-indent',
-            'cw<ls<left-inden'  :       'left-indent',
-            'cw<ls<tab-stop__'  :       'tabs',
-            'cw<ls<level-type'  :       'numbering-type',
-            'cw<pf<right-inde'  :       'right-indent',
-            'cw<pf<left-inden'  :       'left-indent',
-            'cw<pf<fir-ln-ind'  :       'first-line-indent',
-            'cw<ci<italics___'  :       'italics',
-            'cw<ci<bold______'  :       'bold',
-            'cw<ss<para-style'  :       'paragraph-style-name',
+            'cw<ls<level-star': 'list-number-start',
+            'cw<ls<level-spac': 'list-space',
+            'cw<ls<level-inde': 'level-indent',
+            'cw<ls<fir-ln-ind': 'first-line-indent',
+            'cw<ls<left-inden': 'left-indent',
+            'cw<ls<tab-stop__': 'tabs',
+            'cw<ls<level-type': 'numbering-type',
+            'cw<pf<right-inde': 'right-indent',
+            'cw<pf<left-inden': 'left-indent',
+            'cw<pf<fir-ln-ind': 'first-line-indent',
+            'cw<ci<italics___': 'italics',
+            'cw<ci<bold______': 'bold',
+            'cw<ss<para-style': 'paragraph-style-name',
         }
-        """
-        all_lists =
-        [{anything here?}
-            [{list-templateid = ""}
-                [{level-indent}],[{level-indent}]
-            ]
-        ],
-        """
+        # all_lists =
+        # [{anything here?}
+        #     [{list-templateid = ""}
+        #         [{level-indent}],[{level-indent}]
+        #     ]
+        # ],
 
-    def __parse_lines(self, line):
+    def __parse_lines(self, line: str) -> None:
         """
         Required : line --line to parse
         Returns:  nothing
@@ -99,11 +104,12 @@ class ListTable:
             action = self.__state_dict.get(self.__state)
             if action is None:
                 print(self.__state)
-            action(line)
+            else:
+                action(line)
         self.__write_final_string()
         # self.__add_to_final_line()
 
-    def __default_func(self, line):
+    def __default_func(self, line: str) -> None:
         """
         Requires: line --line to process
         Return: nothing
@@ -114,8 +120,8 @@ class ListTable:
         if self.__token_info == 'ob<nu<open-brack':
             self.__state = 'unsure_ob'
 
-    def __found_list_func(self, line):
-        """
+    def __found_list_func(self, line: str) -> None:
+        '''
         Requires: line -- line to process
         Returns: nothing
         Logic:
@@ -127,14 +133,14 @@ class ListTable:
             "list-id" and the value of an empty list. Later, this empty list
             will be filled with all the ids for which the formatting is valid.
             Append the temporary dictionary to the new list.
-        """
+        '''
         self.__state = 'list'
         self.__list_ob_count = self.__ob_count
         self.__all_lists.append([])
         the_dict = {'list-id': []}
         self.__all_lists[-1].append(the_dict)
 
-    def __list_func(self, line):
+    def __list_func(self, line: str) -> None:
         """
         Requires: line --line to process
         Returns: nothing
@@ -143,8 +149,7 @@ class ListTable:
             Check for the end of the list. Otherwise, use the self.__mainlist_dict
             to determine if you need to add a lines values to the main list.
         """
-        if self.__token_info == 'cb<nu<clos-brack' and\
-            self.__cb_count == self.__list_ob_count:
+        if self.__token_info == 'cb<nu<clos-brack' and self.__cb_count == self.__list_ob_count:
             self.__state = 'default'
         elif self.__token_info == 'ob<nu<open-brack':
             self.__state = 'unsure_ob'
@@ -156,7 +161,7 @@ class ListTable:
                 # [{att:value}, [], [att:value, []]
                 self.__all_lists[-1][0][att] = value
 
-    def __found_level_func(self, line):
+    def __found_level_func(self, line: str) -> None:
         """
         Requires: line -- line to process
         Returns: nothing
@@ -182,9 +187,8 @@ class ListTable:
         self.__all_lists[-1].append([])
         the_dict = {}
         self.__all_lists[-1][-1].append(the_dict)
-        self.__level_dict
 
-    def __level_func(self, line):
+    def __level_func(self, line: str) -> None:
         """
         Requires:
             line -- line to parse
@@ -195,8 +199,7 @@ class ListTable:
             Change states if an open bracket is found.
             Add attributes to all_dicts if an appropriate token is found.
         """
-        if self.__token_info == 'cb<nu<clos-brack' and\
-            self.__cb_count == self.__level_ob_count:
+        if self.__token_info == 'cb<nu<clos-brack' and self.__cb_count == self.__level_ob_count:
             self.__state = 'list'
         elif self.__token_info == 'ob<nu<open-brack':
             self.__state = 'unsure_ob'
@@ -206,55 +209,51 @@ class ListTable:
                 value = line[20:]
                 self.__all_lists[-1][-1][0][att] = value
 
-    def __level_number_func(self, line):
-        """
+    def __level_number_func(self, line: str) -> None:
+        '''
         Requires:
             line -- line to process
         Returns:
             nothing
         Logic:
             Check for the end of the group.
-            Otherwise, if the token is hexidecimal, create an attribute.
+            Otherwise, if the token is hexadecimal, create an attribute.
             Do so by finding the base-10 value of the number. Then divide
             this by 2 and round it. Remove the ".0". Sandwwhich the result to
             give you something like level1-show-level.
             The show-level attribute means the numbering for this level.
-        """
-        if self.__token_info == 'cb<nu<clos-brack' and\
-            self.__cb_count == self.__level_number_ob_count:
+        '''
+        if self.__token_info == 'cb<nu<clos-brack' and self.__cb_count == self.__level_number_ob_count:
             self.__state = 'level'
             self.__all_lists[-1][-1][0]['level-numbers'] = self.__level_numbers_string
             self.__level_numbers_string = ''
         elif self.__token_info == 'tx<hx<__________':
-            self.__level_numbers_string += '\\&#x0027;%s' % line[18:]
+            self.__level_numbers_string += f'\\&#x0027;{line[18:]}'
         elif self.__token_info == 'tx<nu<__________':
             self.__level_numbers_string += line[17:]
-            """
-            num = line[18:]
-            num = int(num, 16)
-            level = str(round((num - 1)/2, 0))
-            level = level[:-2]
-            level = 'level%s-show-level' % level
-            self.__all_lists[-1][-1][0][level] = 'true'
-            """
+            # num = line[18:]
+            # num = int(num, 16)
+            # level = str(round((num - 1)/2, 0))
+            # level = level[:-2]
+            # level = 'level%s-show-level' % level
+            # self.__all_lists[-1][-1][0][level] = 'true'
 
-    def __level_text_func(self, line):
-        """
+    def __level_text_func(self, line: str) -> None:
+        '''
         Requires:
             line --line to process
         Returns:
             nothing
         Logic:
             Check for the end of the group.
-            Otherwise, if the text is hexidecimal, call on the method
+            Otherwise, if the text is hexadecimal, call on the method
             __parse_level_text_length.
-            Otheriwse, if the text is regular text, create an attribute.
+            Otherwise, if the text is regular text, create an attribute.
             This attribute indicates the puncuation after a certain level.
             An example is "level1-marker = '.'"
             Otherwise, check for a level-template-id.
-        """
-        if self.__token_info == 'cb<nu<clos-brack' and\
-            self.__cb_count == self.__level_text_ob_count:
+        '''
+        if self.__token_info == 'cb<nu<clos-brack' and self.__cb_count == self.__level_text_ob_count:
             if self.__prefix_string:
                 if self.__all_lists[-1][-1][0]['numbering-type'] == 'bullet':
                     self.__prefix_string = self.__prefix_string.replace('_', '')
@@ -277,10 +276,10 @@ class ListTable:
             value = line[20:]
             self.__all_lists[-1][-1][0]['level-template-id'] = value
 
-    def __parse_level_text_length(self, line):
+    def __parse_level_text_length(self, line: str) -> None:
         """
         Requires:
-            line --line with hexidecimal number
+            line --line with hexadecimal number
         Returns:
             nothing
         Logic:
@@ -294,16 +293,16 @@ class ListTable:
         else:
             the_num += 1
             the_string = str(the_num)
-            level_marker = 'level%s-suffix' % the_string
-            show_marker = 'show-level%s' % the_string
+            level_marker = f'level{the_string}-suffix'
+            show_marker = f'show-level{the_string}'
             self.__level_text_position = level_marker
             self.__all_lists[-1][-1][0][show_marker] = 'true'
             if self.__prefix_string:
-                prefix_marker = 'level%s-prefix' % the_string
+                prefix_marker = f'level{the_string}-prefix'
                 self.__all_lists[-1][-1][0][prefix_marker] = self.__prefix_string
                 self.__prefix_string = None
 
-    def __list_name_func(self, line):
+    def __list_name_func(self, line: str) -> None:
         """
         Requires:
             line --line to process
@@ -312,12 +311,11 @@ class ListTable:
         Logic:
             Simply check for the end of the group and change states.
         """
-        if self.__token_info == 'cb<nu<clos-brack' and\
-            self.__cb_count == self.__list_name_ob_count:
+        if self.__token_info == 'cb<nu<clos-brack' and self.__cb_count == self.__list_name_ob_count:
             self.__state = 'list'
 
-    def __after_bracket_func(self, line):
-        """
+    def __after_bracket_func(self, line: str) -> None:
+        '''
         Requires:
             line --line to parse
         Returns:
@@ -327,7 +325,7 @@ class ListTable:
             you are now in.
             WARNING: this could cause problems. If no group is found, the state will remain
             unsure_ob, which means no other text will be parsed.
-        """
+        '''
         if self.__token_info == 'cw<ls<level-text':
             self.__state = 'level_text'
             self.__level_text_ob_count = self.__ob_count
@@ -341,24 +339,21 @@ class ListTable:
         elif self.__token_info == 'cw<ls<list-name_':
             self.__state = 'list_name'
             self.__list_name_ob_count = self.__ob_count
-        else:
-            if self.__run_level > 3:
-                msg = 'No matching token after open bracket\n'
-                msg += 'token is "%s\n"' % (line)
-                raise self.__bug_handler
+        elif self.__run_level > 3:
+            msg = 'No matching token after open bracket\n'
+            msg += f'token is "{line}\n"'
+            raise self.__bug_handler
 
-    def __add_to_final_line(self):
+    def __add_to_final_line(self) -> None:
         """
         Method no longer used.
         """
         self.__list_table_final = 'mi<mk<listabbeg_\n'
-        self.__list_table_final += 'mi<tg<open______<list-table\n' + \
-        'mi<mk<listab-beg\n' + self.__list_table_final
-        self.__list_table_final += \
-        'mi<mk<listab-end\n' + 'mi<tg<close_____<list-table\n'
+        self.__list_table_final += 'mi<tg<open______<list-table\n' + 'mi<mk<listab-beg\n' + self.__list_table_final
+        self.__list_table_final += 'mi<mk<listab-end\n' + 'mi<tg<close_____<list-table\n'
         self.__list_table_final += 'mi<mk<listabend_\n'
 
-    def __write_final_string(self):
+    def __write_final_string(self) -> None:
         """
         Requires:
             nothing
@@ -370,14 +365,15 @@ class ListTable:
             a list-in-table tag. Get the dictionary of this list
             (the first item). Print out the key => value pair.
             Remove the first item (the dictionary) form this list. Now iterate
-            through what is left in the list. Each list will conatin one item,
+            through what is left in the list. Each list will contain one item,
             a dictionary. Get this dictionary and print out key => value pair.
         """
-        not_allow = ['list-id',]
+        not_allow = [
+            'list-id',
+        ]
         id = 0
         self.__list_table_final = 'mi<mk<listabbeg_\n'
-        self.__list_table_final += 'mi<tg<open______<list-table\n' + \
-        'mi<mk<listab-beg\n' + self.__list_table_final
+        self.__list_table_final += 'mi<tg<open______<list-table\n' + 'mi<mk<listab-beg\n' + self.__list_table_final
         for list in self.__all_lists:
             id += 1
             self.__list_table_final += 'mi<tg<open-att__<list-in-table'
@@ -389,14 +385,14 @@ class ListTable:
                     continue
                 att = the_key
                 value = the_dict[att]
-                self.__list_table_final += '<%s>%s' % (att, value)
+                self.__list_table_final += f'<{att}>{value}'
             self.__list_table_final += '\n'
             levels = list[1:]
             level_num = 0
             for level in levels:
                 level_num += 1
                 self.__list_table_final += 'mi<tg<empty-att_<level-in-table'
-                self.__list_table_final += '<level>%s' % (str(level_num))
+                self.__list_table_final += f'<level>{level_num!s}'
                 the_dict2 = level[0]
                 the_keys2 = the_dict2.keys()
                 is_bullet = 0
@@ -420,24 +416,23 @@ class ListTable:
                         # sys.stderr.write('%s\n' % att2)
                         bullet_text += value2
                     else:
-                        self.__list_table_final += '<%s>%s' % (att2, value2)
+                        self.__list_table_final += f'<{att2}>{value2}'
                 if is_bullet:
                     pass
                     # self.__list_table_final += '<bullet-type>%s' % (bullet_text)
                 self.__list_table_final += '\n'
             self.__list_table_final += 'mi<tg<close_____<list-in-table\n'
-        self.__list_table_final += \
-        'mi<mk<listab-end\n' + 'mi<tg<close_____<list-table\n'
+        self.__list_table_final += 'mi<mk<listab-end\n' + 'mi<tg<close_____<list-table\n'
         self.__list_table_final += 'mi<mk<listabend_\n'
 
-    def parse_list_table(self, line):
+    def parse_list_table(self, line: str) -> tuple[str, list[ListInfo]]:
         """
         Requires:
             line -- line with border definition in it
         Returns:
             A string and the dictionary of list-table values and attributes.
         Logic:
-            Call on the __parse_lines metod, which splits the text string into
+            Call on the __parse_lines method, which splits the text string into
             lines (which will be tokens) and processes them.
         """
         self.__parse_lines(line)

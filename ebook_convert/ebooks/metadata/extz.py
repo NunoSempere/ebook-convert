@@ -1,73 +1,129 @@
-"""
-Metadata for "extended zip" containers (HTMLZ, TXTZ): a zip archive that
-carries a ``metadata.opf`` next to the content, optionally with a cover
-image referenced from it.
-"""
-import os
-import posixpath
-from io import BytesIO
+# License: GPLv3 Copyright: 2011, John Schember <john@nachtimwald.com>
 
-from ebook_convert.ebooks.metadata.opf2 import OPF, metadata_to_opf
-from ebook_convert.ebooks.metadata.book.base import Metadata
+"""
+Read meta information from extZ (TXTZ, HTMLZ...) files.
+"""
+
+from __future__ import annotations
+import io
+import os
+from typing import IO, TYPE_CHECKING
+
+from ebook_convert.ebooks.metadata import MetaInformation
+from ebook_convert.ebooks.metadata.opf2 import OPF
+from ebook_convert.ptempfile import PersistentTemporaryFile
+from ebook_convert.utils.localization import _
 from ebook_convert.utils.zipfile import ZipFile, safe_replace
 
-
-OPF_NAME = 'metadata.opf'
-
-
-def _opf_name(names):
-    for name in names:
-        if posixpath.basename(name).lower() == OPF_NAME:
-            return name
-    return None
+if TYPE_CHECKING:
+    from ebook_convert.ebooks.metadata.book.base import Metadata
 
 
-def get_metadata(stream, extract_cover=True):
-    """Return a :class:`Metadata` built from the archive's ``metadata.opf``."""
-    mi = Metadata('Unknown')
+def get_metadata(stream: IO[bytes], extract_cover: bool = True) -> Metadata:
+    """
+    Return metadata as a L{MetaInfo} object
+    """
+    mi = MetaInformation(_('Unknown'), [_('Unknown')])
     stream.seek(0)
-    with ZipFile(stream) as zf:
-        names = zf.namelist()
-        opf_name = _opf_name(names)
-        if opf_name is None:
-            return mi
-        opf = OPF(BytesIO(zf.read(opf_name)), basedir='')
-        mi = opf.to_book_metadata()
-        if extract_cover:
-            cover_href = opf.raster_cover or opf.cover
-            if not cover_href:
-                # TXTZ files use a special element for the cover
-                # (Calibre c86de09698)
-                for cpath in opf.root.xpath('//cover-relpath-from-base'):
-                    if cpath.text:
-                        cover_href = cpath.text.strip()
-                        break
-            if cover_href:
-                cover_name = posixpath.normpath(posixpath.join(
-                    posixpath.dirname(opf_name), cover_href))
-                if cover_name in names:
-                    ext = os.path.splitext(cover_name)[1][1:].lower() or 'jpg'
-                    mi.cover_data = (ext, zf.read(cover_name))
+    try:
+        with ZipFile(stream) as zf:
+            opf_name = get_first_opf_name(zf)
+            with zf.open(opf_name) as opf_stream:
+                opf = OPF(opf_stream)
+            mi = opf.to_book_metadata()
+            if extract_cover:
+                cover_href = opf.raster_cover
+                if not cover_href:
+                    gc = opf.guide_raster_cover
+                    if gc is not None:
+                        cover_href = gc.get('href')
+                if not cover_href:
+                    for meta in opf.metadata.xpath('//*[local-name()="meta" and @name="cover"]'):
+                        val = meta.get('content')
+                        if val.rpartition('.')[2].lower() in {'jpeg', 'jpg', 'png'}:
+                            cover_href = val
+                            break
+                    else:
+                        for val in opf.guide_cover_path(opf.root):  # this is needed because the cover is not in the manifest
+                            if val.rpartition('.')[2].lower() in {'jpeg', 'jpg', 'png'}:
+                                cover_href = val
+                                break
+                        else:
+                            # txtz files use a special element for cover
+                            for cpath in opf.root.xpath('//cover-relpath-from-base'):
+                                if cpath.text:
+                                    cover_href = cpath.text
+                                    break
+                if cover_href:
+                    try:
+                        mi.cover_data = (os.path.splitext(cover_href)[1], zf.read(cover_href))
+                    except Exception:
+                        pass
+    except Exception:
+        return mi
     return mi
 
 
-def set_metadata(stream, mi):
-    """Replace the archive's ``metadata.opf`` with ``mi`` (and its cover
-    image, if ``mi.cover_data`` is set)."""
-    stream.seek(0)
+def set_metadata(stream: IO[bytes], mi: Metadata) -> None:
+    replacements = {}
+
+    # Get the OPF in the archive.
     with ZipFile(stream) as zf:
-        names = zf.namelist()
-        opf_name = _opf_name(names) or OPF_NAME
-        base = posixpath.dirname(opf_name)
-        cover_name = None
-        if getattr(mi, 'cover_data', None) and mi.cover_data[1]:
-            ext = (mi.cover_data[0] or 'jpg').lower().lstrip('.')
-            cover_name = posixpath.join(base, 'cover.' + ext) if base \
-                else 'cover.' + ext
-    if cover_name:
-        safe_replace(stream, cover_name, BytesIO(mi.cover_data[1]),
-                     add_missing=True)
-        mi.cover = posixpath.basename(cover_name)
-    stream.seek(0)
-    safe_replace(stream, opf_name, BytesIO(metadata_to_opf(mi)),
-                 add_missing=True)
+        opf_path = get_first_opf_name(zf)
+        opf_stream = io.BytesIO(zf.read(opf_path))
+    opf = OPF(opf_stream)
+
+    # Cover.
+    new_cdata = None
+    try:
+        new_cdata = mi.cover_data[1]
+        if not new_cdata:
+            raise Exception('no cover')
+    except Exception:
+        try:
+            assert mi.cover is not None  # failures are ignored below
+            with open(mi.cover, 'rb') as f:
+                new_cdata = f.read()
+        except Exception:
+            pass
+    if new_cdata:
+        cpath = opf.raster_cover
+        if not cpath:
+            cpath = 'cover.jpg'
+        new_cover = _write_new_cover(new_cdata, cpath)
+        replacements[cpath] = open(new_cover.name, 'rb')  # ruff: ignore[open-file-with-context-handler]
+        mi.cover = cpath
+
+    # Update the metadata.
+    opf.smart_update(mi, replace_metadata=True)
+    newopf = io.BytesIO(opf.render())
+    safe_replace(stream, opf_path, newopf, extra_replacements=replacements, add_missing=True)
+
+    # Cleanup temporary files.
+    try:
+        if cpath is not None:
+            replacements[cpath].close()
+            os.remove(replacements[cpath].name)
+    except Exception:
+        pass
+
+
+def get_first_opf_name(zf: ZipFile) -> str:
+    names = zf.namelist()
+    opfs = []
+    for n in names:
+        if n.endswith('.opf') and '/' not in n:
+            opfs.append(n)
+    if not opfs:
+        raise Exception('No OPF found')
+    opfs.sort()
+    return opfs[0]
+
+
+def _write_new_cover(new_cdata: bytes, cpath: str) -> PersistentTemporaryFile:
+    from ebook_convert.utils.img import save_cover_data_to
+
+    new_cover = PersistentTemporaryFile(suffix=os.path.splitext(cpath)[1])
+    new_cover.close()
+    save_cover_data_to(new_cdata, new_cover.name)
+    return new_cover

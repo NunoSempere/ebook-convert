@@ -1,90 +1,98 @@
-import mimetypes
+#!/usr/bin/env python
+# License: GPLv3 Copyright: 2010, Kovid Goyal <kovid@kovidgoyal.net>
+
+from __future__ import annotations
 import textwrap
-import urllib.parse
+from typing import TYPE_CHECKING, cast
 
-from lxml import etree
-
+from ebook_convert import guess_type, prepare_string_for_xml
 from ebook_convert.utils.imghdr import identify
-from ebook_convert import polyglot
+from ebook_convert.utils.localization import lang_as_bcp47
+from ebook_convert.utils.xml_parse import safe_xml_fromstring
+from ebook_convert.polyglot.urllib import unquote
+
+if TYPE_CHECKING:
+    from optparse import Values
+
+    from ebook_convert.ebooks.oeb.base import OEBBook
+    from ebook_convert.utils.logging import Log
 
 
-class CoverManager(object):
-
+class CoverManager:
     SVG_TEMPLATE = textwrap.dedent('''\
-<html xmlns="http://www.w3.org/1999/xhtml"__lang__>
-    <head>
-        <meta http-equiv="Content-Type" content="text/html; charset=UTF-8" />
-        <meta name="calibre:cover" content="true" />
-        <title>__title__</title>
-        <style type="text/css" title="override_css">
-            @page {padding: 0pt; margin:0pt}
-            body { text-align: center; padding:0pt; margin: 0pt; }
-        </style>
-    </head>
-    <body>
-        <div>
-            <svg version="1.1" xmlns="http://www.w3.org/2000/svg"
-                xmlns:xlink="http://www.w3.org/1999/xlink"
-                width="100%%" height="100%%" viewBox="__viewbox__"
-                preserveAspectRatio="__ar__">
+        <html xmlns="http://www.w3.org/1999/xhtml"__lang__>
+            <head>
+                <meta http-equiv="Content-Type" content="text/html; charset=UTF-8" />
+                <meta name="calibre:cover" content="true" />
                 <title>__title__</title>
-                <image width="__width__" height="__height__" xlink:href="%s"/>
-            </svg>
-        </div>
-    </body>
-</html>''')
+                <style type="text/css" title="override_css">
+                    @page {padding: 0pt; margin:0pt}
+                    body { text-align: center; padding:0pt; margin: 0pt; }
+                </style>
+            </head>
+            <body>
+                <div>
+                    <svg version="1.1" xmlns="http://www.w3.org/2000/svg"
+                        xmlns:xlink="http://www.w3.org/1999/xlink"
+                        width="100%%" height="100%%" viewBox="__viewbox__"
+                        preserveAspectRatio="__ar__">
+                        <title>__title__</title>
+                        <image width="__width__" height="__height__" xlink:href="%s"/>
+                    </svg>
+                </div>
+            </body>
+        </html>
+        ''')
 
     NONSVG_TEMPLATE = textwrap.dedent('''\
-<html xmlns="http://www.w3.org/1999/xhtml"__lang__>
-    <head>
-        <meta http-equiv="Content-Type" content="text/html; charset=UTF-8" />
-        <meta name="calibre:cover" content="true" />
-        <title>__title__</title>
-        <style type="text/css" title="override_css">
-            @page {padding: 0pt; margin:0pt}
-            body { text-align: center; padding:0pt; margin: 0pt }
-            div { padding:0pt; margin: 0pt }
-            img { padding:0pt; margin: 0pt }
-        </style>
-    </head>
-    <body>
-        <div>
-            <img src="%s" alt="__title__" __style__ />
-        </div>
-    </body>
-</html>
+        <html xmlns="http://www.w3.org/1999/xhtml"__lang__>
+            <head>
+                <meta http-equiv="Content-Type" content="text/html; charset=UTF-8" />
+                <meta name="calibre:cover" content="true" />
+                <title>__title__</title>
+                <style type="text/css" title="override_css">
+                    @page {padding: 0pt; margin:0pt}
+                    body { text-align: center; padding:0pt; margin: 0pt }
+                    div { padding:0pt; margin: 0pt }
+                    img { padding:0pt; margin: 0pt }
+                </style>
+            </head>
+            <body>
+                <div>
+                    <img src="%s" alt="__title__" __style__ />
+                </div>
+            </body>
+        </html>
     ''')
 
     @staticmethod
-    def fill_metadata(template, title, lang):
+    def fill_metadata(template: str, title: str, lang: str | None) -> str:
         # The title of the book is the text alternative of the cover image for
         # screen readers, and the language of the book is the language of the
         # page. The template is later used with %, so escape that too.
-        from ebook_convert.utils.entities import prepare_string_for_xml
-
-        def escape(x):
+        def escape(x: str) -> str:
             return prepare_string_for_xml(x, True).replace('%', '%%')
 
-        template = template.replace('__title__',
-                                    escape(title.strip() or 'Cover'))
-        return template.replace(
-            '__lang__', ' xml:lang="%s"' % escape(lang) if lang else '')
+        template = template.replace('__title__', escape(title.strip() or 'Cover'))
+        return template.replace('__lang__', f' xml:lang="{escape(lang)}"' if lang else '')
 
     @staticmethod
-    def book_language(oeb):
+    def book_language(oeb: OEBBook) -> str | None:
         # The language of the book as a BCP 47 language tag, for use in the
         # lang attributes of HTML files. A language guessed from the calibre
         # interface language is not used, as it is likely to be wrong.
-        from ebook_convert.utils.localization import lang_as_bcp47
         for lang in oeb.metadata.language:
-            if not getattr(lang, 'is_fallback', False):
-                ans = lang_as_bcp47(str(lang))
-                if ans:
-                    return ans
+            if not lang.is_fallback and (ans := lang_as_bcp47(str(lang))):
+                return ans
         return None
 
-    def __init__(self, no_default_cover=False, no_svg_cover=False,
-                 preserve_aspect_ratio=False, fixed_size=None):
+    def __init__(
+        self,
+        no_default_cover: bool = False,
+        no_svg_cover: bool = False,
+        preserve_aspect_ratio: bool = False,
+        fixed_size: tuple[object, object] | None = None,
+    ) -> None:
         self.no_default_cover = no_default_cover
         self.no_svg_cover = no_svg_cover
         self.preserve_aspect_ratio = preserve_aspect_ratio
@@ -96,33 +104,69 @@ class CoverManager(object):
             style = 'style="height: 100%%"'
         else:
             width, height = fixed_size
-            style = 'style="height: %s; width: %s"' % (height, width)
-        self.non_svg_template = self.NONSVG_TEMPLATE.replace('__style__',
-                                                             style)
+            style = f'style="height: {height}; width: {width}"'
+        self.non_svg_template = self.NONSVG_TEMPLATE.replace('__style__', style)
 
-    def __call__(self, oeb, opts, log):
+    def __call__(self, oeb: OEBBook, opts: Values, log: Log) -> None:
         self.oeb = oeb
         self.log = log
         self.insert_cover()
 
-    def inspect_cover(self, href):
+    def default_cover(self) -> str | None:
+        """
+        Create a generic cover for books that don't have a cover
+        """
+        if self.no_default_cover:
+            return None
+        self.log('Generating default cover')
+        m = self.oeb.metadata
+        title = str(m.title[0])
+        authors = [str(x) for x in m.creator if x.role == 'aut']
+        try:
+            from ebook_convert.ebooks.covers import create_cover
+
+            series: str | None = None
+            series_index: float | None = None
+            if m.series:
+                try:
+                    series, series_index = str(m.series[0]), float(str(m.series_index[0]))
+                except (IndexError, ValueError):
+                    pass
+            img_data = create_cover(title, authors, series, series_index)
+            id, href = self.oeb.manifest.generate('cover', 'cover_image.jpg')
+            item = self.oeb.manifest.add(id, href, cast('str', guess_type('t.jpg')[0]), data=img_data)
+            m.clear('cover')
+            m.add('cover', item.id)
+
+            return item.href
+        except Exception:
+            self.log.exception('Failed to generate default cover')
+        return None
+
+    def inspect_cover(self, href: str) -> tuple[int, int]:
         from ebook_convert.ebooks.oeb.base import urlnormalize
+
         for x in self.oeb.manifest:
             if x.href == urlnormalize(href):
                 try:
                     raw = x.data
+                    # an image item, anything else made identify() raise, which is caught below
+                    assert isinstance(raw, (str, bytes))
                     return identify(raw)[1:]
                 except Exception:
                     self.log.exception('Failed to read cover image dimensions')
         return -1, -1
 
-    def insert_cover(self):
+    def insert_cover(self) -> None:
+        from ebook_convert.ebooks.oeb.base import urldefrag
+
         g, m = self.oeb.guide, self.oeb.manifest
         item = None
-        href = None
         if 'titlepage' not in g:
             if 'cover' in g:
                 href = g['cover'].href
+            else:
+                href = self.default_cover()
             if href is None:
                 return
             width, height = self.inspect_cover(href)
@@ -130,37 +174,25 @@ class CoverManager(object):
                 self.log.warning('Failed to read cover dimensions')
                 width, height = 600, 800
             # if self.preserve_aspect_ratio:
-            #    width, height = 600, 800
-            self.svg_template = self.svg_template.replace('__viewbox__',
-                                                          '0 0 %d %d' %
-                                                          (width, height))
-            self.svg_template = self.svg_template.replace('__width__',
-                                                          str(width))
-            self.svg_template = self.svg_template.replace('__height__',
-                                                          str(height))
+            #     width, height = 600, 800
+            self.svg_template = self.svg_template.replace('__viewbox__', f'0 0 {width} {height}')
+            self.svg_template = self.svg_template.replace('__width__', str(width))
+            self.svg_template = self.svg_template.replace('__height__', str(height))
 
             if href is not None:
-                templ = self.non_svg_template if self.no_svg_cover \
-                        else self.svg_template
-                title = (str(self.oeb.metadata.title[0])
-                         if self.oeb.metadata.title else '')
-                templ = self.fill_metadata(templ, title,
-                                           self.book_language(self.oeb))
-                tp = templ % polyglot.unquote(href)
+                templ = self.non_svg_template if self.no_svg_cover else self.svg_template
+                title = str(self.oeb.metadata.title[0]) if self.oeb.metadata.title else ''
+                tp = self.fill_metadata(templ, title, self.book_language(self.oeb)) % unquote(href)
                 id, href = m.generate('titlepage', 'titlepage.xhtml')
-                item = m.add(id, href, mimetypes.guess_type('t.xhtml')[0],
-                             data=etree.fromstring(tp))
+                item = m.add(id, href, cast('str', guess_type('t.xhtml')[0]), data=safe_xml_fromstring(tp))
         else:
-            key = urllib.parse.urldefrag(self.oeb.guide['titlepage'].href)[0]
-            item = self.oeb.manifest.hrefs[key]
+            item = self.oeb.manifest.hrefs[urldefrag(self.oeb.guide['titlepage'].href)[0]]
         if item is not None:
             if item in self.oeb.spine:
-                # The titlepage may already be in the spine, e.g. when the
-                # input book marked it and it got split (85ec0e6fbf)
                 self.oeb.spine.remove(item)
             self.oeb.spine.insert(0, item, True)
             if 'cover' not in self.oeb.guide.refs:
-                self.oeb.guide.add('cover', 'Title Page', 'a')
+                self.oeb.guide.add('cover', 'Title page', 'a')
             self.oeb.guide.refs['cover'].href = item.href
             if 'titlepage' in self.oeb.guide.refs:
                 self.oeb.guide.refs['titlepage'].href = item.href

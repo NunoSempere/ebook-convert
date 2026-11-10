@@ -1,54 +1,51 @@
-import os
+# License: GPLv3 Copyright: 2009, John Schember <john@nachtimwald.com>
 
-from ebook_convert.customize.conversion import OutputFormatPlugin, \
-    OptionRecommendation
+from __future__ import annotations
+from typing import TYPE_CHECKING
 
+from ebook_convert.customize.conversion import InputFormatPlugin, OptionRecommendation, OutputFormatPlugin
+from ebook_convert.utils import StreamOrPath
+from ebook_convert.utils.localization import _
 
-__license__ = 'GPL 3'
-__copyright__ = '2009, John Schember <john@nachtimwald.com>'
-__docformat__ = 'restructuredtext en'
+if TYPE_CHECKING:
+    from optparse import Values
+
+    from ebook_convert.ebooks.oeb.base import OEBBook
+    from ebook_convert.utils.logging import Log
 
 
 class TCROutput(OutputFormatPlugin):
-
     name = 'TCR Output'
     author = 'John Schember'
     file_type = 'tcr'
     commit_name = 'tcr_output'
 
     options = {
-        OptionRecommendation(name='tcr_output_encoding', recommended_value='utf-8',
+        OptionRecommendation(
+            name='tcr_output_encoding',
+            recommended_value='utf-8',
             level=OptionRecommendation.LOW,
-            help='Specify the character encoding of the output document. '
-            'The default is utf-8.')}
+            help=_('Specify the character encoding of the output document. The default is utf-8.'),
+        )
+    }
 
-    def convert(self, oeb_book, output_path, input_plugin, opts, log):
-        from ebook_convert.ebooks.txt.txtml import TXTMLizer
+    def convert(self, oeb_book: OEBBook, output: str, input_plugin: InputFormatPlugin, opts: Values, log: Log) -> None:
         from ebook_convert.ebooks.compression.tcr import compress
+        from ebook_convert.ebooks.txt.txtml import TXTMLizer
 
-        close = False
-        if not hasattr(output_path, 'write'):
-            close = True
-            if not os.path.exists(os.path.dirname(output_path)) and os.path.dirname(output_path):
-                os.makedirs(os.path.dirname(output_path))
-            out_stream = open(output_path, 'wb')
-        else:
-            out_stream = output_path
+        with StreamOrPath(output, 'wb', makedirs=True) as out_stream:
+            opts.flush_paras = False
+            opts.max_line_length = 0
+            opts.force_max_line_length = False
+            opts.indent_paras = False
 
-        setattr(opts, 'flush_paras', False)
-        setattr(opts, 'max_line_length', 0)
-        setattr(opts, 'force_max_line_length', False)
-        setattr(opts, 'indent_paras', False)
+            writer = TXTMLizer(log)
+            opts.use_alt_text_for_images = False
+            txt = writer.extract_content(oeb_book, opts).encode(opts.tcr_output_encoding, 'replace')
 
-        writer = TXTMLizer(log)
-        txt = writer.extract_content(oeb_book, opts).encode(opts.tcr_output_encoding, 'replace')
+            log.info('Compressing text...')
+            txt = compress(txt)
 
-        log.info('Compressing text...')
-        txt = compress(txt)
-
-        out_stream.seek(0)
-        out_stream.truncate()
-        out_stream.write(txt)
-
-        if close:
-            out_stream.close()
+            out_stream.seek(0)
+            out_stream.truncate()
+            out_stream.write(txt)

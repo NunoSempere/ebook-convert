@@ -1,28 +1,30 @@
+# License: GPLv3 Copyright: 2009, John Schember <john@nachtimwald.com>
+
+from __future__ import annotations
 import os
+from typing import TYPE_CHECKING
 
-
-__license__ = 'GPL v3'
-__copyright__ = '2009, John Schember <john@nachtimwald.com>'
-__docformat__ = 'restructuredtext en'
+if TYPE_CHECKING:
+    from collections.abc import Container
 
 
 class EreaderError(Exception):
     pass
 
 
-def image_name(name, taken_names=()):
+def image_name(name: str, taken_names: Container[str] = ()) -> str:
     name = os.path.basename(name)
 
     if len(name) > 32:
         cut = len(name) - 32
         names = name[:10]
-        namee = name[10+cut:]
-        name = '%s%s.png' % (names, namee)
+        namee = name[10 + cut :]
+        name = f'{names}{namee}.png'
 
     i = 0
     base_name, ext = os.path.splitext(name)
     while name in taken_names:
         i += 1
-        name = '%s%s%s' % (base_name, i, ext)
+        name = f'{base_name}{i}{ext}'
 
     return name.ljust(32, '\x00')[:32]

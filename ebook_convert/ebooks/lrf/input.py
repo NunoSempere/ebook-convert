@@ -1,32 +1,41 @@
-import copy
-import mimetypes
+#!/usr/bin/env python
+# License: GPLv3 Copyright: 2009, Kovid Goyal <kovid@kovidgoyal.net>
+
+from __future__ import annotations
 import operator
 import textwrap
+from copy import copy, deepcopy
+from typing import TYPE_CHECKING
 
 from lxml import etree
 
-from ebook_convert import polyglot
+from ebook_convert import guess_type
+from ebook_convert.polyglot.builtins import as_bytes
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+
+    from ebook_convert.utils.logging import Log
 
 
 class Canvas(etree.XSLTExtension):
-
-    def __init__(self, doc, styles, text_block, log):
+    def __init__(self, doc: etree._Element, styles: Styles, text_block: TextBlock, log: Log) -> None:
         self.doc = doc
         self.styles = styles
         self.text_block = text_block
         self.log = log
-        self.processed = set()
+        self.processed: set[str] = set()
 
-    def execute(self, context, self_node, input_node, output_parent):
+    def execute(self, context: object, self_node: etree._Element, input_node: etree._Element, output_parent: etree._Element | None) -> None:
         cid = input_node.get('objid', None)
         if cid is None or cid in self.processed:
             return
         self.processed.add(cid)
-        input_node = self.doc.xpath('//Canvas[@objid="%s"]'%cid)[0]
+        input_node = self.doc.xpath(f'//Canvas[@objid="{cid}"]')[0]
 
         objects = list(self.get_objects(input_node))
         if len(objects) == 1 and objects[0][0].tag == 'ImageBlock':
-            self.image_page(input_node, objects[0][0], output_parent)
+            self.image_page(input_node, objects[0][0], output_parent)  # ty: ignore[invalid-argument-type] output_parent is not None, the templates call this inside an element
         else:
             canvases = [input_node]
             for x in input_node.itersiblings():
@@ -48,20 +57,19 @@ class Canvas(etree.XSLTExtension):
                 table.append(tr)
                 for obj, x, y in self.get_objects(canvas):
                     if obj.tag != 'TextBlock':
-                        self.log.warning('%s elements in Canvas not supported',
-                                         obj.tag)
+                        self.log.warn(obj.tag, 'elements in Canvas not supported')
                         continue
                     td = table.makeelement('td')
                     self.text_block.render_block(obj, td)
                     tr.append(td)
-            output_parent.append(table)
+            output_parent.append(table)  # ty: ignore[unresolved-attribute] output_parent is not None, the templates call this inside an element
 
-    def image_page(self, input_node, block, output_parent):
+    def image_page(self, input_node: etree._Element, block: etree._Element, output_parent: etree._Element) -> None:
         div = etree.Element('div')
         div.set('id', input_node.get('objid', 'scuzzy'))
         div.set('class', 'image_page')
-        width = self.styles.to_num(block.get("xsize", None))
-        height = self.styles.to_num(block.get("ysize", None))
+        width = self.styles.to_num(block.get('xsize', None))
+        height = self.styles.to_num(block.get('ysize', None))
         img = div.makeelement('img')
         if width is not None:
             img.set('width', str(int(width)))
@@ -69,7 +77,7 @@ class Canvas(etree.XSLTExtension):
             img.set('height', str(int(height)))
         ref = block.get('refstream', None)
         if ref is not None:
-            imstr = self.doc.xpath('//ImageStream[@objid="%s"]'%ref)
+            imstr = self.doc.xpath(f'//ImageStream[@objid="{ref}"]')
             if imstr:
                 src = imstr[0].get('file', None)
                 if src:
@@ -77,64 +85,60 @@ class Canvas(etree.XSLTExtension):
         div.append(img)
         output_parent.append(div)
 
-    def get_objects(self, node):
+    def get_objects(self, node: etree._Element) -> Iterator[tuple[etree._Element, int, int]]:
         for x in node.xpath('descendant::PutObj[@refobj and @x1 and @y1]'):
-            objs = node.xpath('//*[@objid="%s"]'%x.get('refobj'))
+            objs = node.xpath('//*[@objid="{}"]'.format(x.get('refobj')))
             x, y = map(self.styles.to_num, (x.get('x1'), x.get('y1')))
             if objs and x is not None and y is not None:
                 yield objs[0], int(x), int(y)
 
 
 class MediaType(etree.XSLTExtension):
-
-    def execute(self, context, self_node, input_node, output_parent):
+    def execute(self, context: object, self_node: etree._Element, input_node: etree._Element, output_parent: etree._Element | None) -> None:
         name = input_node.get('file', None)
-        typ = mimetypes.guess_type(name)[0]
+        typ = guess_type(name)[0]
         if not typ:
             typ = 'application/octet-stream'
-        output_parent.text = typ
+        output_parent.text = typ  # ty: ignore[invalid-assignment] output_parent is not None, the templates call this inside an element
 
 
 class ImageBlock(etree.XSLTExtension):
-
-    def __init__(self, canvas):
+    def __init__(self, canvas: Canvas) -> None:
         etree.XSLTExtension.__init__(self)
         self.canvas = canvas
 
-    def execute(self, context, self_node, input_node, output_parent):
-        self.canvas.image_page(input_node, input_node, output_parent)
+    def execute(self, context: object, self_node: etree._Element, input_node: etree._Element, output_parent: etree._Element | None) -> None:
+        self.canvas.image_page(input_node, input_node, output_parent)  # ty: ignore[invalid-argument-type] output_parent is not None, the templates call this inside an element
 
 
 class RuledLine(etree.XSLTExtension):
-
-    def execute(self, context, self_node, input_node, output_parent):
+    def execute(self, context: object, self_node: etree._Element, input_node: etree._Element, output_parent: etree._Element | None) -> None:
         hr = etree.Element('hr')
-        output_parent.append(hr)
+        output_parent.append(hr)  # ty: ignore[unresolved-attribute] output_parent is not None, the templates call this inside an element
 
 
 class TextBlock(etree.XSLTExtension):
-
-    def __init__(self, styles, char_button_map, plot_map, log):
+    def __init__(self, styles: Styles, char_button_map: dict[str, str], plot_map: dict[str, str], log: Log) -> None:
         etree.XSLTExtension.__init__(self)
         self.styles = styles
         self.log = log
         self.char_button_map = char_button_map
         self.plot_map = plot_map
 
-    def execute(self, context, self_node, input_node, output_parent):
-        input_node = copy.deepcopy(input_node)
+    def execute(self, context: object, self_node: etree._Element, input_node: etree._Element, output_parent: etree._Element | None) -> None:
+        input_node = deepcopy(input_node)
         div = etree.Element('div')
         self.render_block(input_node, div)
-        output_parent.append(div)
+        output_parent.append(div)  # ty: ignore[unresolved-attribute] output_parent is not None, the templates call this inside an element
 
-    def render_block(self, node, root):
+    def render_block(self, node: etree._Element, root: etree._Element) -> None:
         ts = node.get('textstyle', None)
         classes = []
         bs = node.get('blockstyle')
         if bs in self.styles.block_style_map:
-            classes.append('bs%d'%self.styles.block_style_map[bs])
+            classes.append(f'bs{self.styles.block_style_map[bs]}')
         if ts in self.styles.text_style_map:
-            classes.append('ts%d'%self.styles.text_style_map[ts])
+            classes.append(f'ts{self.styles.text_style_map[ts]}')
         if classes:
             root.set('class', ' '.join(classes))
         objid = node.get('objid', None)
@@ -148,10 +152,10 @@ class TextBlock(etree.XSLTExtension):
         for child in node:
             self.process_child(child)
 
-    def fix_deep_nesting(self, node):
+    def fix_deep_nesting(self, node: etree._Element) -> None:
         deepest = 1
 
-        def depth(node):
+        def depth(node: etree._Element) -> int:
             parent = node.getparent()
             ans = 1
             while parent is not None:
@@ -169,15 +173,15 @@ class TextBlock(etree.XSLTExtension):
         if deepest < 500:
             return
 
-        self.log.warning('Found deeply nested spans. Flattening.')
+        self.log.warn('Found deeply nested spans. Flattening.')
         # with open('/t/before.xml', 'wb') as f:
-        #    f.write(etree.tostring(node, method='xml'))
+        #     f.write(etree.tostring(node, method='xml'))
 
         spans = [(depth(span), span) for span in node.xpath('descendant::Span')]
         spans.sort(key=operator.itemgetter(0), reverse=True)
 
-        for depth, span in spans:
-            if depth < 3:
+        for span_depth, span in spans:
+            if span_depth < 3:
                 continue
             p = span.getparent()
             gp = p.getparent()
@@ -185,34 +189,33 @@ class TextBlock(etree.XSLTExtension):
             pidx = gp.index(p)
             children = list(p)[idx:]
             t = children[-1].tail
-            t = t if t else ''
-            children[-1].tail = t + (p.tail if p.tail else '')
+            t = t or ''
+            children[-1].tail = t + (p.tail or '')
             p.tail = ''
             pattrib = dict(**p.attrib) if p.tag == 'Span' else {}
             for child in children:
                 p.remove(child)
-                if pattrib and child.tag == "Span":
-                    attrib = copy.copy(pattrib)
+                if pattrib and child.tag == 'Span':
+                    attrib = copy(pattrib)
                     attrib.update(child.attrib)
                     child.attrib.update(attrib)
 
             for child in reversed(children):
-                gp.insert(pidx+1, child)
+                gp.insert(pidx + 1, child)
 
         # with open('/t/after.xml', 'wb') as f:
-        #    f.write(etree.tostring(node, method='xml'))
+        #     f.write(etree.tostring(node, method='xml'))
 
-    def add_text(self, text):
+    def add_text(self, text: str | None) -> None:
         if text:
             if getattr(self.add_text_to[0], self.add_text_to[1]) is None:
                 setattr(self.add_text_to[0], self.add_text_to[1], '')
-            setattr(self.add_text_to[0], self.add_text_to[1],
-                    getattr(self.add_text_to[0], self.add_text_to[1])+ text)
+            setattr(self.add_text_to[0], self.add_text_to[1], getattr(self.add_text_to[0], self.add_text_to[1]) + text)
 
-    def process_container(self, child, tgt):
+    def process_container(self, child: etree._Element, tgt: etree._Element) -> None:
         idx = self.styles.get_text_styles(child)
         if idx is not None:
-            tgt.set('class', 'ts%d'%idx)
+            tgt.set('class', f'ts{idx}')
         self.parent.append(tgt)
         orig_parent = self.parent
         self.parent = tgt
@@ -224,7 +227,7 @@ class TextBlock(etree.XSLTExtension):
         self.add_text_to = (tgt, 'tail')
         self.add_text(child.tail)
 
-    def process_child(self, child):
+    def process_child(self, child: etree._Element) -> None:
         if child.tag == 'CR':
             if self.parent == self.root or self.parent.tag == 'p':
                 self.parent = self.root.makeelement('p')
@@ -239,7 +242,7 @@ class TextBlock(etree.XSLTExtension):
             span = self.root.makeelement('span')
             if child.tag == 'EmpLine':
                 td = 'underline' if child.get('emplineposition', 'before') == 'before' else 'overline'
-                span.set('style', 'text-decoration: '+td)
+                span.set('style', 'text-decoration: ' + td)
             self.process_container(child, span)
         elif child.tag == 'Sup':
             sup = self.root.makeelement('sup')
@@ -257,8 +260,8 @@ class TextBlock(etree.XSLTExtension):
                 a.set('href', self.char_button_map[oid])
             self.process_container(child, a)
         elif child.tag == 'Plot':
-            xsize = self.styles.to_num(child.get('xsize', None), 166/720)
-            ysize = self.styles.to_num(child.get('ysize', None), 166/720)
+            xsize = self.styles.to_num(child.get('xsize', None), 166 / 720)
+            ysize = self.styles.to_num(child.get('ysize', None), 166 / 720)
             img = self.root.makeelement('img')
             if xsize is not None:
                 img.set('width', str(int(xsize)))
@@ -271,39 +274,39 @@ class TextBlock(etree.XSLTExtension):
             self.add_text_to = (img, 'tail')
             self.add_text(child.tail)
         else:
-            self.log.warning('Unhandled Text element: %s', child.tag)
+            self.log.warn('Unhandled Text element:', child.tag)
 
 
 class Styles(etree.XSLTExtension):
-
-    def __init__(self):
+    def __init__(self) -> None:
         etree.XSLTExtension.__init__(self)
-        self.text_styles, self.block_styles = [], []
-        self.text_style_map, self.block_style_map = {}, {}
+        self.text_styles: list[dict[str, str]] = []
+        self.block_styles: list[dict[str, str]] = []
+        self.text_style_map: dict[str | None, int] = {}
+        self.block_style_map: dict[str | None, int] = {}
         self.CSS = textwrap.dedent('''
         .image_page { text-align:center }
         ''')
 
-    def write(self, name='styles.css'):
+    def write(self, name: str = 'styles.css') -> None:
 
-        def join(style):
-            ans = ['%s : %s;'%(k, v) for k, v in style.items()]
+        def join(style: dict[str, str]) -> str:
+            ans = [f'{k} : {v};' for k, v in style.items()]
             if ans:
                 ans[-1] = ans[-1][:-1]
             return '\n\t'.join(ans)
 
         with open(name, 'wb') as f:
-            f.write(polyglot.as_bytes(self.CSS))
-            for (w, sel) in [(self.text_styles, 'ts'), (self.block_styles,
-                'bs')]:
+            f.write(as_bytes(self.CSS))
+            for w, sel in [(self.text_styles, 'ts'), (self.block_styles, 'bs')]:
                 for i, s in enumerate(w):
                     if not s:
                         continue
-                    rsel = '.%s%d'%(sel, i)
+                    rsel = f'.{sel}{i}'
                     s = join(s)
-                    f.write(polyglot.as_bytes(rsel + ' {\n\t' + s + '\n}\n\n'))
+                    f.write(as_bytes(rsel + ' {\n\t' + s + '\n}\n\n'))
 
-    def execute(self, context, self_node, input_node, output_parent):
+    def execute(self, context: object, self_node: etree._Element, input_node: etree._Element, output_parent: etree._Element | None) -> None:
         if input_node.tag == 'TextStyle':
             idx = self.get_text_styles(input_node)
             if idx is not None:
@@ -312,41 +315,40 @@ class Styles(etree.XSLTExtension):
             idx = self.get_block_styles(input_node)
             self.block_style_map[input_node.get('objid')] = idx
 
-    def px_to_pt(self, px):
-        # attribute values are strings, so convert before scaling
+    def px_to_pt(self, px: str | None) -> float | None:
         if px is None:
             return None
         try:
-            return float(px) * 72/166
+            return float(px) * 72 / 166
         except ValueError:
             return None
 
-    def color(self, val):
+    def color(self, val: str | None) -> str | None:
         try:
-            val = int(val, 16)
-            r, g, b, a = val & 0xFF, (val>>8)&0xFF, (val>>16)&0xFF, (val>>24)&0xFF
+            ival = int(val, 16)  # ty: ignore[invalid-argument-type] None raises TypeError, handled below
+            r, g, b, a = ival & 0xFF, (ival >> 8) & 0xFF, (ival >> 16) & 0xFF, (ival >> 24) & 0xFF
             if a == 255:
                 return None
             if a == 0:
-                return 'rgb(%d,%d,%d)'%(r,g,b)
-            return 'rgba(%d,%d,%d,%f)'%(r,g,b,1.-a/255.)
-        except:
+                return f'rgb({r},{g},{b})'
+            return f'rgba({r},{g},{b},{1.0 - a / 255.0:f})'
+        except Exception:
             return None
 
-    def get_block_styles(self, node):
-        ans = {}
+    def get_block_styles(self, node: etree._Element) -> int:
+        ans: dict[str, str] = {}
         sm = self.px_to_pt(node.get('sidemargin', None))
         if sm is not None:
-            ans['margin-left'] = ans['margin-right'] = '%fpt'%sm
+            ans['margin-left'] = ans['margin-right'] = f'{sm:f}pt'
         ts = self.px_to_pt(node.get('topskip', None))
         if ts is not None:
-            ans['margin-top'] = '%fpt'%ts
+            ans['margin-top'] = f'{ts:f}pt'
         fs = self.px_to_pt(node.get('footskip', None))
         if fs is not None:
-            ans['margin-bottom'] = '%fpt'%fs
+            ans['margin-bottom'] = f'{fs:f}pt'
         fw = self.px_to_pt(node.get('framewidth', None))
         if fw is not None:
-            ans['border-width'] = '%fpt'%fw
+            ans['border-width'] = f'{fw:f}pt'
             ans['border-style'] = 'solid'
         fc = self.color(node.get('framecolor', None))
         if fc is not None:
@@ -358,24 +360,24 @@ class Styles(etree.XSLTExtension):
             self.block_styles.append(ans)
         return self.block_styles.index(ans)
 
-    def to_num(self, val, factor=1.):
+    def to_num(self, val: str | None, factor: float = 1.0) -> float | None:
         try:
-            return float(val)*factor
-        except:
+            return float(val) * factor  # ty: ignore[invalid-argument-type] None raises TypeError, handled below
+        except Exception:
             return None
 
-    def get_text_styles(self, node):
-        ans = {}
+    def get_text_styles(self, node: etree._Element) -> int | None:
+        ans: dict[str, str] = {}
         fs = self.to_num(node.get('fontsize', None), 0.1)
         if fs is not None:
-            ans['font-size'] = '%fpt'%fs
+            ans['font-size'] = f'{fs:f}pt'
         fw = self.to_num(node.get('fontweight', None))
         if fw is not None:
-            ans['font-weight'] = ('bold' if fw >= 700 else 'normal')
+            ans['font-weight'] = 'bold' if fw >= 700 else 'normal'
         # fn = getattr(obj, 'fontfacename', None)
         # if fn is not None:
-        #    fn = cls.FONT_MAP[fn]
-        #    item('font-family: %s;'%fn)
+        #     fn = cls.FONT_MAP[fn]
+        #     item('font-family: %s;'%fn)
         fg = self.color(node.get('textcolor', None))
         if fg is not None:
             ans['color'] = fg
@@ -388,10 +390,10 @@ class Styles(etree.XSLTExtension):
             ans['text-align'] = all.get(al, 'left')
         # lh = self.to_num(node.get('linespace', None), 0.1)
         # if lh is not None:
-        #    ans['line-height'] = '%fpt'%lh
+        #     ans['line-height'] = '%fpt'%lh
         pi = self.to_num(node.get('parindent', None), 0.1)
         if pi is not None:
-            ans['text-indent'] = '%fpt'%pi
+            ans['text-indent'] = f'{pi:f}pt'
         if not ans:
             return None
         if ans not in self.text_styles:

@@ -1,13 +1,30 @@
+#!/usr/bin/env python
+# License: GPLv3 Copyright: 2015, Kovid Goyal <kovid at kovidgoyal.net>
+
+from __future__ import annotations
 import posixpath
 import re
-import urllib.parse
-import uuid
+from typing import TYPE_CHECKING, cast
+from urllib.parse import urlparse
+from uuid import uuid4
 
-from ebook_convert.ebooks.oeb.base import urlquote
+from ebook_convert.ebooks.oeb.base import Manifest, urlquote
 from ebook_convert.utils.filenames import ascii_text
+from ebook_convert.utils.localization import __
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from lxml import etree
+
+    from ebook_convert.ebooks.docx.names import DOCXNamespace
+    from ebook_convert.ebooks.docx.writer.container import DocumentRelationships
+    from ebook_convert.ebooks.docx.writer.styles import CombinedStyle
+    from ebook_convert.ebooks.oeb.base import TOC, OEBBook
+    from ebook_convert.utils.logging import Log
 
 
-def start_text(tag, prefix_len=0, top_level=True):
+def start_text(tag: etree._Element, prefix_len: int = 0, top_level: bool = True) -> str:
     ans = tag.text or ''
     limit = 50 - prefix_len
     if len(ans) < limit:
@@ -20,16 +37,15 @@ def start_text(tag, prefix_len=0, top_level=True):
     return ans
 
 
-class TOCItem(object):
-
-    def __init__(self, title, bmark, level):
+class TOCItem:
+    def __init__(self, title: str | None, bmark: str, level: int) -> None:
         self.title, self.bmark, self.level = title, bmark, level
         self.is_first = self.is_last = False
 
-    def serialize(self, body, makeelement):
+    def serialize(self, body: etree._Element, makeelement: Callable[..., etree._Element]) -> None:
         p = makeelement(body, 'w:p', append=False)
         ppr = makeelement(p, 'w:pPr')
-        makeelement(ppr, 'w:pStyle', w_val="Normal")
+        makeelement(ppr, 'w:pStyle', w_val='Normal')
         makeelement(ppr, 'w:ind', w_left='0', w_firstLineChars='0', w_firstLine='0', w_leftChars=str(200 * self.level))
         if self.is_first:
             makeelement(ppr, 'w:pageBreakBefore', w_val='off')
@@ -52,32 +68,35 @@ class TOCItem(object):
         body.insert(0, p)
 
 
-def sanitize_bookmark_name(base):
+def sanitize_bookmark_name(base: str) -> str:
     # Max length allowed by Word appears to be 40, we use 32 to leave some
     # space for making the name unique
     return re.sub(r'[^0-9a-zA-Z]', '_', ascii_text(base))[:32].rstrip('_')
 
 
-class LinksManager(object):
+# (source item, href, title) of an <a> tag
+Link = tuple[Manifest.Item, str, str | None]
 
-    def __init__(self, namespace, document_relationships, log):
+
+class LinksManager:
+    def __init__(self, namespace: DOCXNamespace, document_relationships: DocumentRelationships, log: Log) -> None:
         self.namespace = namespace
         self.log = log
         self.document_relationships = document_relationships
-        self.top_anchor = str(uuid.uuid4().hex)
-        self.anchor_map = {}
-        self.used_bookmark_names = set()
+        self.top_anchor = str(uuid4().hex)
+        self.anchor_map: dict[tuple[str, str], str] = {}
+        self.used_bookmark_names: set[str] = set()
         self.bmark_id = 0
-        self.document_hrefs = set()
-        self.external_links = {}
-        self.toc = []
+        self.document_hrefs: set[str] = set()
+        self.external_links: dict[str, str] = {}
+        self.toc: list[TOCItem] = []
 
-    def bookmark_for_anchor(self, anchor, current_item, html_tag):
+    def bookmark_for_anchor(self, anchor: str, current_item: Manifest.Item, html_tag: etree._Element) -> str:
         key = (current_item.href, anchor)
         if key in self.anchor_map:
             return self.anchor_map[key]
         if anchor == self.top_anchor:
-            name = ('Top of %s' % posixpath.basename(current_item.href))
+            name = f'Top of {posixpath.basename(current_item.href)}'
             self.document_hrefs.add(current_item.href)
         else:
             name = start_text(html_tag).strip() or anchor
@@ -85,27 +104,25 @@ class LinksManager(object):
         i, bname = 0, name
         while name in self.used_bookmark_names:
             i += 1
-            name  = bname + ('_%d' % i)
+            name = bname + f'_{i}'
         self.anchor_map[key] = name
         self.used_bookmark_names.add(name)
         return name
 
     @property
-    def bookmark_id(self):
+    def bookmark_id(self) -> int:
         self.bmark_id += 1
         return self.bmark_id
 
-    def link_target(self, link):
-        ''' Return (bookmark, False) for internal links, (rid, True) for
-        external links, None otherwise '''
+    def link_target(self, link: Link) -> tuple[str, bool] | None:
+        """Return (bookmark, False) for internal links, (rid, True) for external links, None otherwise"""
         item, url, tooltip = link
-        purl = urllib.parse.urlparse(url)
+        purl = urlparse(url)
         href = purl.path
 
         if not purl.scheme:
             href = item.abshref(href)
             if href not in self.document_hrefs:
-                # Files with URL unsafe characters in their names
                 href = urlquote(href)
             if href in self.document_hrefs:
                 key = (href, purl.fragment or self.top_anchor)
@@ -115,18 +132,16 @@ class LinksManager(object):
                     bmark = self.anchor_map[(href, self.top_anchor)]
                 return bmark, False
             else:
-                self.log.warning('Ignoring internal hyperlink with href (%s) '
-                                 'pointing to unknown destination', url)
+                self.log.warn(f'Ignoring internal hyperlink with href ({url}) pointing to unknown destination')
         if purl.scheme in {'http', 'https', 'ftp'}:
             if url not in self.external_links:
                 self.external_links[url] = self.document_relationships.add_relationship(url, self.namespace.names['LINKS'], target_mode='External')
             return self.external_links[url], True
         if purl.scheme:
-            self.log.warning('Ignoring hyperlink with href (%s) with '
-                             'unsupported scheme', url)
+            self.log.warn(f'Ignoring hyperlink with href ({url}) with unsupported scheme')
         return None
 
-    def serialize_hyperlink(self, parent, link):
+    def serialize_hyperlink(self, parent: etree._Element, link: Link) -> etree._Element:
         target = self.link_target(link)
         if target is None:
             return parent
@@ -135,11 +150,10 @@ class LinksManager(object):
         tooltip = link[2]
         if tooltip:
             kw['w_tooltip'] = tooltip
-        return self.namespace.makeelement(parent, 'w:hyperlink', **kw)
+        return self.namespace.makeelement(parent, 'w:hyperlink', append=True, **kw)
 
-    def serialize_drawing_link(self, drawing, link):
-        # Word ignores <w:hyperlink> around floating images, so link the image
-        # itself, the way Word does
+    def serialize_drawing_link(self, drawing: etree._Element, link: Link) -> None:
+        # Word ignores <w:hyperlink> around floating images, so link the image itself, the way Word does
         target = self.link_target(link)
         if target is None:
             return
@@ -153,10 +167,10 @@ class LinksManager(object):
         for pr in self.namespace.XPath('descendant::wp:docPr | descendant::pic:cNvPr')(drawing):
             pr.insert(0, self.namespace.makeelement(pr, 'a:hlinkClick', append=False, **kw))
 
-    def process_toc_node(self, toc, level=0):
+    def process_toc_node(self, toc: TOC, level: int = 0) -> None:
         href = toc.href
         if href:
-            purl = urllib.parse.urlparse(href)
+            purl = urlparse(href)
             href = purl.path
             if href in self.document_hrefs:
                 key = (href, purl.fragment or self.top_anchor)
@@ -166,9 +180,9 @@ class LinksManager(object):
                     bmark = self.anchor_map[(href, self.top_anchor)]
                 self.toc.append(TOCItem(toc.title, bmark, level))
         for child in toc:
-            self.process_toc_node(child, level+1)
+            self.process_toc_node(child, level + 1)
 
-    def process_toc_links(self, oeb):
+    def process_toc_links(self, oeb: OEBBook) -> None:
         self.toc = []
         has_toc = oeb.toc and oeb.toc.count() > 1
         if not has_toc:
@@ -179,17 +193,17 @@ class LinksManager(object):
             self.toc[0].is_first = True
             self.toc[-1].is_last = True
 
-    def serialize_toc(self, body, primary_heading_style):
+    def serialize_toc(self, body: etree._Element, primary_heading_style: CombinedStyle | None) -> None:
         pbb = body[0].xpath('//*[local-name()="pageBreakBefore"]')[0]
-        pbb.set('{%s}val' % self.namespace.namespaces['w'], 'on')
+        pbb.set('{{{}}}val'.format(self.namespace.namespaces['w']), 'on')
         for block in reversed(self.toc):
             block.serialize(body, self.namespace.makeelement)
-        title = 'Table of Contents'
+        title = __('Table of Contents')
         makeelement = self.namespace.makeelement
         p = makeelement(body, 'w:p', append=False)
         ppr = makeelement(p, 'w:pPr')
         if primary_heading_style is not None:
-            makeelement(ppr, 'w:pStyle', w_val=primary_heading_style.id)
+            makeelement(ppr, 'w:pStyle', w_val=cast('str', primary_heading_style.id))  # ids are assigned in StylesManager.finalize()
         makeelement(ppr, 'w:pageBreakBefore', w_val='off')
         makeelement(makeelement(p, 'w:r'), 'w:t').text = title
         body.insert(0, p)

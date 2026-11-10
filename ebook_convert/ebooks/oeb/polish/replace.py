@@ -1,30 +1,52 @@
-import codecs, shutil, os, posixpath
-from functools import partial
-from collections import Counter, defaultdict
-import urllib.parse
+#!/usr/bin/env python
+# License: GPLv3 Copyright: 2013, Kovid Goyal <kovid at kovidgoyal.net>
 
-from ebook_convert.utils import filenames as fms
+from __future__ import annotations
+import codecs
+import os
+import posixpath
+import shutil
+from collections import Counter, defaultdict
+from collections.abc import Callable
+from functools import partial
+from typing import TYPE_CHECKING
+from urllib.parse import urlparse, urlunparse
+
+from css_parser.css import CSSStyleSheet
+from lxml import etree
+
+from ebook_convert import sanitize_file_name
 from ebook_convert.ebooks.chardet import strip_encoding_declarations
 from ebook_convert.ebooks.oeb.base import css_text
 from ebook_convert.ebooks.oeb.polish.css import iter_declarations, remove_property_value
 from ebook_convert.ebooks.oeb.polish.utils import extract
+from ebook_convert.utils.localization import _
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable, Mapping
+
+    from css_parser.css import CSSStyleDeclaration
+    from css_parser.css.value import Value
+
+    from ebook_convert.ebooks.oeb.polish.container import Container
+
+#: Maps (name, fragment) to a new fragment
+type FragMap = Callable[[str, str], str | None]
+#: Called with (name, href, fragment), return True to remove the link
+type LinkPredicate = Callable[[str | None, str, str | None], bool]
 
 
-__license__ = 'GPL v3'
-__copyright__ = '2013, Kovid Goyal <kovid at kovidgoyal.net>'
-__docformat__ = 'restructuredtext en'
+class LinkReplacer:
+    file_type: str
 
-
-class LinkReplacer(object):
-
-    def __init__(self, base, container, link_map, frag_map):
+    def __init__(self, base: str, container: Container, link_map: Mapping[str, str], frag_map: FragMap) -> None:
         self.base = base
         self.frag_map = frag_map
         self.link_map = link_map
         self.container = container
         self.replaced = False
 
-    def __call__(self, url):
+    def __call__(self, url: str) -> str:
         if url and url.startswith('#'):
             repl = self.frag_map(self.base, url[1:])
             if not repl or repl == url[1:]:
@@ -37,24 +59,25 @@ class LinkReplacer(object):
         nname = self.link_map.get(name, None)
         if not nname:
             return url
-        purl = urllib.parse.urlparse(url)
+        purl = urlparse(url)
         href = self.container.name_to_href(nname, self.base)
         if purl.fragment:
             nfrag = self.frag_map(name, purl.fragment)
             if nfrag:
-                href += '#%s'%nfrag
+                href += f'#{nfrag}'
         if href != url:
             self.replaced = True
         return href
 
 
-class IdReplacer(object):
+class IdReplacer:
+    file_type: str
 
-    def __init__(self, base, container, id_map):
+    def __init__(self, base: str, container: Container, id_map: Mapping[str, Mapping[str, str]]) -> None:
         self.base, self.container, self.replaced = base, container, False
         self.id_map = id_map
 
-    def __call__(self, url):
+    def __call__(self, url: str) -> str:
         if url and url.startswith('#'):
             repl = self.id_map.get(self.base, {}).get(url[1:])
             if repl is None or repl == url[1:]:
@@ -67,28 +90,29 @@ class IdReplacer(object):
         id_map = self.id_map.get(name)
         if id_map is None:
             return url
-        purl = urllib.parse.urlparse(url)
+        purl = urlparse(url)
         nfrag = id_map.get(purl.fragment)
         if nfrag is None:
             return url
         purl = purl._replace(fragment=nfrag)
-        href = urllib.parse.urlunparse(purl)
+        href = urlunparse(purl)
         if href != url:
             self.replaced = True
         return href
 
 
-class LinkRebaser(object):
+class LinkRebaser:
+    file_type: str
 
-    def __init__(self, container, old_name, new_name):
+    def __init__(self, container: Container, old_name: str, new_name: str) -> None:
         self.old_name, self.new_name = old_name, new_name
         self.container = container
         self.replaced = False
 
-    def __call__(self, url):
+    def __call__(self, url: str) -> str:
         if url and url.startswith('#'):
             return url
-        purl = urllib.parse.urlparse(url)
+        purl = urlparse(url)
         frag = purl.fragment
         name = self.container.href_to_name(url, self.old_name)
         if not name:
@@ -103,8 +127,8 @@ class LinkRebaser(object):
         return href
 
 
-def replace_links(container, link_map, frag_map=lambda name, frag:frag, replace_in_opf=False):
-    '''
+def replace_links(container: Container, link_map: Mapping[str, str], frag_map: FragMap = lambda name, frag: frag, replace_in_opf: bool = False) -> None:
+    """
     Replace links to files in the container. Will iterate over all files in the container and change the specified links in them.
 
     :param link_map: A mapping of old canonical name to new canonical name. For example: :code:`{'images/old.png': 'images/new.png'}`
@@ -113,7 +137,7 @@ def replace_links(container, link_map, frag_map=lambda name, frag:frag, replace_
         HTML files. By default, it does nothing.
     :param replace_in_opf: If False, links are not replaced in the OPF file.
 
-    '''
+    """
     for name, media_type in container.mime_map.items():
         if name == container.opf_name and not replace_in_opf:
             continue
@@ -121,14 +145,14 @@ def replace_links(container, link_map, frag_map=lambda name, frag:frag, replace_
         container.replace_links(name, repl)
 
 
-def replace_ids(container, id_map):
-    '''
+def replace_ids(container: Container, id_map: Mapping[str, Mapping[str, str]]) -> bool:
+    """
     Replace all links in the container that pointed to the changed ids.
 
     :param id_map: A mapping of {name:id_map} where each id_map is a mapping of {old_id:new_id}
     :return: True iff at least one link was changed
 
-    '''
+    """
     changed = False
     for name, media_type in container.mime_map.items():
         repl = IdReplacer(name, container, id_map)
@@ -146,8 +170,9 @@ def replace_ids(container, id_map):
     return changed
 
 
-def smarten_punctuation(container, report):
+def smarten_punctuation(container: Container, report: Callable[[str], object]) -> bool:
     from ebook_convert.ebooks.conversion.preprocess import smarten_punctuation
+
     smartened = False
     for path in container.spine_items:
         name = container.abspath_to_name(path)
@@ -157,7 +182,7 @@ def smarten_punctuation(container, report):
             newhtml = smarten_punctuation(html, container.log)
             if newhtml != html:
                 changed = True
-                report('Smartened punctuation in: %s' % name)
+                report(_('Smartened punctuation in: %s') % name)
                 newhtml = strip_encoding_declarations(newhtml)
                 f.seek(0)
                 f.truncate()
@@ -166,34 +191,35 @@ def smarten_punctuation(container, report):
             # Add an encoding declaration (it will be added automatically when
             # serialized)
             root = container.parsed(name)
+            assert isinstance(root, etree._Element)  # spine items are HTML
             for m in root.xpath('descendant::*[local-name()="meta" and @http-equiv]'):
                 m.getparent().remove(m)
             container.dirty(name)
             smartened = True
     if not smartened:
-        report('No punctuation that could be smartened found')
+        report(_('No punctuation that could be smartened found'))
     return smartened
 
 
-def rename_files(container, file_map):
-    '''
+def rename_files(container: Container, file_map: Mapping[str, str]) -> None:
+    """
     Rename files in the container, automatically updating all links to them.
 
     :param file_map: A mapping of old canonical name to new canonical name, for
         example: :code:`{'text/chapter1.html': 'chapter1.html'}`.
-    '''
+    """
     overlap = set(file_map).intersection(set(file_map.values()))
     if overlap:
-        raise ValueError('Circular rename detected. The files %s are both rename targets and destinations' % ', '.join(overlap))
+        raise ValueError('Circular rename detected. The files {} are both rename targets and destinations'.format(', '.join(overlap)))
     for name, dest in file_map.items():
         if container.exists(dest):
             if name != dest and name.lower() == dest.lower():
                 # A case change on an OS with a case insensitive file-system.
                 continue
-            raise ValueError('Cannot rename {0} to {1} as {1} already exists'.format(name, dest))
-    if len(file_map.values()) != len(set(file_map.values())):
+            raise ValueError(f'Cannot rename {name} to {dest} as {dest} already exists')
+    if len(tuple(file_map.values())) != len(set(file_map.values())):
         raise ValueError('Cannot rename, the set of destination files contains duplicates')
-    link_map = {}
+    link_map: dict[str, str] = {}
     for current_name, new_name in file_map.items():
         container.rename(current_name, new_name)
         if new_name != container.opf_name:  # OPF is handled by the container
@@ -201,9 +227,9 @@ def rename_files(container, file_map):
     replace_links(container, link_map, replace_in_opf=True)
 
 
-def replace_file(container, name, path, basename, force_mt=None):
+def replace_file(container: Container, name: str, path: str, basename: str, force_mt: str | None = None) -> None:
     dirname, base = name.rpartition('/')[0::2]
-    nname = fms.sanitize_file_name(basename)
+    nname = sanitize_file_name(basename)
     if dirname:
         nname = dirname + '/' + nname
     with open(path, 'rb') as src:
@@ -212,23 +238,23 @@ def replace_file(container, name, path, basename, force_mt=None):
             b, e = nname.rpartition('.')[0::2]
             while container.exists(nname):
                 count += 1
-                nname = b + ('_%d.%s' % (count, e))
-            rename_files(container, {name:nname})
+                nname = b + f'_{count}.{e}'
+            rename_files(container, {name: nname})
             mt = force_mt or container.guess_type(nname)
             container.mime_map[nname] = mt
             for itemid, q in container.manifest_id_map.items():
                 if q == nname:
-                    for item in container.opf_xpath('//opf:manifest/opf:item[@href and @id="%s"]' % itemid):
+                    for item in container.opf_xpath(f'//opf:manifest/opf:item[@href and @id="{itemid}"]'):
                         item.set('media-type', mt)
         container.dirty(container.opf_name)
         with container.open(nname, 'wb') as dest:
             shutil.copyfileobj(src, dest)
 
 
-def mt_to_category(container, mt):
-    from ebook_convert.ebooks.oeb.polish.utils import guess_type
-    from ebook_convert.ebooks.oeb.polish.container import OEB_FONTS
+def mt_to_category(container: Container, mt: str) -> str:
     from ebook_convert.ebooks.oeb.base import OEB_DOCS, OEB_STYLES
+    from ebook_convert.ebooks.oeb.polish.utils import OEB_FONTS, guess_type
+
     if mt in OEB_DOCS:
         category = 'text'
     elif mt in OEB_STYLES:
@@ -244,13 +270,14 @@ def mt_to_category(container, mt):
     return category
 
 
-def get_recommended_folders(container, names):
-    ''' Return the folders that are recommended for the given filenames. The
+def get_recommended_folders(container: Container, names: Iterable[str]) -> dict[str, str]:
+    """Return the folders that are recommended for the given filenames. The
     recommendation is based on where the majority of files of the same type are
     located in the container. If no files of a particular type are present, the
-    recommended folder is assumed to be the folder containing the OPF file. '''
+    recommended folder is assumed to be the folder containing the OPF file."""
     from ebook_convert.ebooks.oeb.polish.utils import guess_type
-    counts = defaultdict(Counter)
+
+    counts: defaultdict[str, Counter[str]] = defaultdict(Counter)
     for name, mt in container.mime_map.items():
         folder = name.rpartition('/')[0] if '/' in name else ''
         counts[mt_to_category(container, mt)][folder] += 1
@@ -260,22 +287,22 @@ def get_recommended_folders(container, names):
     except KeyError:
         opf_folder = ''
 
-    recommendations = {category:counter.most_common(1)[0][0] for category, counter in counts.items()}
-    return {n:recommendations.get(mt_to_category(container, guess_type(os.path.basename(n))), opf_folder) for n in names}
+    recommendations = {category: counter.most_common(1)[0][0] for category, counter in counts.items()}
+    return {n: recommendations.get(mt_to_category(container, guess_type(os.path.basename(n))), opf_folder) for n in names}
 
 
-def normalize_case(container, val):
+def normalize_case(container: Container, val: str) -> str:
 
-    def safe_listdir(x):
+    def safe_listdir(x: str) -> list[str] | tuple[()]:
         try:
             return os.listdir(x)
-        except EnvironmentError:
+        except OSError:
             return ()
 
     parts = val.split('/')
-    ans = []
+    ans: list[str] = []
     for i in range(len(parts)):
-        q = '/'.join(parts[:i+1])
+        q = '/'.join(parts[: i + 1])
         x = container.name_to_abspath(q)
         xl = parts[i].lower()
         candidates = [c for c in safe_listdir(os.path.dirname(x)) if c != parts[i] and c.lower() == xl]
@@ -283,10 +310,10 @@ def normalize_case(container, val):
     return '/'.join(ans)
 
 
-def rationalize_folders(container, folder_type_map):
+def rationalize_folders(container: Container, folder_type_map: dict[str, str]) -> dict[str, str]:
     all_names = set(container.mime_map)
-    new_names = set()
-    name_map = {}
+    new_names: set[str] = set()
+    name_map: dict[str, str] = {}
     for key in tuple(folder_type_map):
         val = folder_type_map[key]
         folder_type_map[key] = normalize_case(container, val)
@@ -303,14 +330,14 @@ def rationalize_folders(container, folder_type_map):
                 while new_name in all_names or new_name in new_names:
                     c += 1
                     n, ext = bn.rpartition('.')[0::2]
-                    new_name = posixpath.join(folder, '%s_%d.%s' % (n, c, ext))
+                    new_name = posixpath.join(folder, f'{n}_{c}.{ext}')
                 name_map[name] = new_name
                 new_names.add(new_name)
     return name_map
 
 
-def remove_links_in_sheet(href_to_name, sheet, predicate):
-    import_rules_to_remove = []
+def remove_links_in_sheet(href_to_name: Callable[[str], str | None], sheet: CSSStyleSheet, predicate: LinkPredicate) -> bool:
+    import_rules_to_remove: list[int] = []
     changed = False
     for i, r in enumerate(sheet):
         if r.type == r.IMPORT_RULE:
@@ -326,8 +353,8 @@ def remove_links_in_sheet(href_to_name, sheet, predicate):
     return changed
 
 
-def remove_links_in_declaration(href_to_name, style, predicate):
-    def check_pval(v):
+def remove_links_in_declaration(href_to_name: Callable[[str], str | None], style: CSSStyleDeclaration, predicate: LinkPredicate) -> bool:
+    def check_pval(v: Value) -> bool:
         if v.type == v.URI:
             name = href_to_name(v.uri)
             return predicate(name, v.uri, None)
@@ -340,28 +367,29 @@ def remove_links_in_declaration(href_to_name, style, predicate):
     return changed
 
 
-def remove_links_to(container, predicate):
-    ''' predicate must be a function that takes the arguments (name, href,
-    fragment=None) and returns True iff the link should be removed '''
-    from ebook_convert.ebooks.oeb.base import iterlinks, OEB_DOCS, OEB_STYLES, XPath, XHTML
+def remove_links_to(container: Container, predicate: LinkPredicate) -> set[str]:
+    """predicate must be a function that takes the arguments (name, href,
+    fragment=None) and returns True iff the link should be removed"""
+    from ebook_convert.ebooks.oeb.base import OEB_DOCS, OEB_STYLES, XHTML, XPath, iterlinks
+
     stylepath = XPath('//h:style')
     styleattrpath = XPath('//*[@style]')
-    changed = set()
+    changed: set[str] = set()
     for name, mt in container.mime_map.items():
         removed = False
         if mt in OEB_DOCS:
             root = container.parsed(name)
+            assert isinstance(root, etree._Element)
             for el, attr, href, pos in iterlinks(root, find_links_in_css=False):
                 hname = container.href_to_name(href, name)
                 frag = href.partition('#')[-1]
                 if predicate(hname, href, frag):
                     if attr is None:
                         el.text = None
+                    elif el.tag == XHTML('link') or el.tag == XHTML('img'):
+                        extract(el)
                     else:
-                        if el.tag == XHTML('link') or el.tag == XHTML('img'):
-                            extract(el)
-                        else:
-                            del el.attrib[attr]
+                        del el.attrib[attr]
                     removed = True
             for tag in stylepath(root):
                 if tag.text and (tag.get('type') or 'text/css').lower() == 'text/css':
@@ -377,20 +405,24 @@ def remove_links_to(container, predicate):
                         removed = True
                         tag.set('style', css_text(style))
         elif mt in OEB_STYLES:
-            removed = remove_links_in_sheet(partial(container.href_to_name, base=name), container.parsed(name), predicate)
+            sheet = container.parsed(name)
+            assert isinstance(sheet, CSSStyleSheet)  # CSS files are parsed into css_parser stylesheets
+            removed = remove_links_in_sheet(partial(container.href_to_name, base=name), sheet, predicate)
         if removed:
             changed.add(name)
-    tuple(map(container.dirty, changed))
+    for i in changed:
+        container.dirty(i)
     return changed
 
 
-def get_spine_order_for_all_files(container):
-    linear_names, non_linear_names = [], []
+def get_spine_order_for_all_files(container: Container) -> dict[str | None, tuple[int, int]]:
+    linear_names: list[str] = []
+    non_linear_names: list[str] = []
     for name, is_linear in container.spine_names:
         (linear_names if is_linear else non_linear_names).append(name)
     all_names = linear_names + non_linear_names
     spine_names = frozenset(all_names)
-    ans = {}
+    ans: dict[str | None, tuple[int, int]] = {}
     for spine_pos, name in enumerate(all_names):
         ans.setdefault(name, (spine_pos, -1))
         for i, href in enumerate(container.iterlinks(name, get_line_numbers=False)):

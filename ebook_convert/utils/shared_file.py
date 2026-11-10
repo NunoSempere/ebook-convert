@@ -1,4 +1,18 @@
-"""
+#!/usr/bin/env python
+# License: GPLv3 Copyright: 2015, Kovid Goyal <kovid at kovidgoyal.net>
+
+from __future__ import annotations
+import os
+import sys
+from typing import IO, TYPE_CHECKING, Any
+
+from ebook_convert.constants import iswindows
+from ebook_convert.polyglot.builtins import reraise
+
+if TYPE_CHECKING:
+    import unittest
+
+'''
 This module defines a share_open() function which is a replacement for
 python's builtin open() function.
 
@@ -13,20 +27,89 @@ delete a file that is open, you cannot open a new file with the same filename
 until all open file handles are closed. You also cannot delete the containing
 directory until all file handles are closed. To get around this, rename the
 file before deleting it.
-"""
-import os
+'''
+
+if iswindows:
+    import msvcrt
+    from numbers import Integral
+
+    from ebook_convert.calibre_extensions import winutil
+
+    _ACCESS_MASK = os.O_RDONLY | os.O_WRONLY | os.O_RDWR
+    _ACCESS_MAP = {
+        os.O_RDONLY: winutil.GENERIC_READ,
+        os.O_WRONLY: winutil.GENERIC_WRITE,
+        os.O_RDWR: winutil.GENERIC_READ | winutil.GENERIC_WRITE,
+    }
+
+    _CREATE_MASK = os.O_CREAT | os.O_EXCL | os.O_TRUNC
+    _CREATE_MAP = {
+        0: winutil.OPEN_EXISTING,
+        os.O_EXCL: winutil.OPEN_EXISTING,
+        os.O_CREAT: winutil.OPEN_ALWAYS,
+        os.O_CREAT | os.O_EXCL: winutil.CREATE_NEW,
+        os.O_CREAT | os.O_TRUNC | os.O_EXCL: winutil.CREATE_NEW,
+        os.O_TRUNC: winutil.TRUNCATE_EXISTING,
+        os.O_TRUNC | os.O_EXCL: winutil.TRUNCATE_EXISTING,
+        os.O_CREAT | os.O_TRUNC: winutil.CREATE_ALWAYS,
+    }
+
+    def os_open(path: str, flags: int, mode: int = 0o777, share_flags: int = winutil.FILE_SHARE_VALID_FLAGS) -> int:
+        """
+        Replacement for os.open() allowing moving or unlinking before closing
+        """
+        if not isinstance(flags, Integral):
+            raise TypeError('flags must be an integer')
+        if not isinstance(mode, Integral):
+            raise TypeError('mode must be an integer')
+
+        if share_flags & ~winutil.FILE_SHARE_VALID_FLAGS:
+            raise ValueError(f'bad share_flags: {share_flags!r}')
+
+        access_flags = _ACCESS_MAP[flags & _ACCESS_MASK]
+        create_flags = _CREATE_MAP[flags & _CREATE_MASK]
+        attrib_flags = winutil.FILE_ATTRIBUTE_NORMAL
+
+        if flags & os.O_CREAT and mode & ~0o444 == 0:
+            attrib_flags = winutil.FILE_ATTRIBUTE_READONLY
+
+        if flags & os.O_TEMPORARY:
+            share_flags |= winutil.FILE_SHARE_DELETE
+            attrib_flags |= winutil.FILE_FLAG_DELETE_ON_CLOSE
+            access_flags |= winutil.DELETE
+
+        if flags & os.O_SHORT_LIVED:
+            attrib_flags |= winutil.FILE_ATTRIBUTE_TEMPORARY
+
+        if flags & os.O_SEQUENTIAL:
+            attrib_flags |= winutil.FILE_FLAG_SEQUENTIAL_SCAN
+
+        if flags & os.O_RANDOM:
+            attrib_flags |= winutil.FILE_FLAG_RANDOM_ACCESS
+
+        h = winutil.create_file(path, access_flags, share_flags, create_flags, attrib_flags)
+        ans = msvcrt.open_osfhandle(int(h), flags | os.O_NOINHERIT)
+        h.detach()
+        return ans
+
+    def share_open(*a: object, **kw: object) -> IO[Any]:
+        kw['opener'] = os_open
+        return open(*a, **kw)  # ty: ignore[no-matching-overload]
+
+else:
+    share_open = open
+
+    def raise_winerror(x: object) -> None:
+        reraise(NotImplementedError, None, sys.exc_info()[2])
 
 
-share_open = open
-
-
-def find_tests():
+def find_tests() -> unittest.TestSuite:
     import unittest
+
     from ebook_convert.ptempfile import TemporaryDirectory
 
     class SharedFileTest(unittest.TestCase):
-
-        def test_shared_file(self):
+        def test_shared_file(self) -> None:
             eq = self.assertEqual
 
             with TemporaryDirectory() as tdir:
@@ -35,15 +118,32 @@ def find_tests():
                     f.write(b'a' * 20 * 1024)
                     eq(fname, f.name)
                 f = share_open(fname, 'rb')
-                eq(f.read(1), b'a')
-                os.remove(fname)
-                eq(f.read(1), b'a')
-                f2 = share_open(fname, 'w+b')
-                f2.write(b'b' * 10 * 1024)
-                f2.seek(0)
-                eq(f.read(10000), b'a'*10000)
-                eq(f2.read(100), b'b' * 100)
-                f3 = share_open(fname, 'rb')
-                eq(f3.read(100), b'b' * 100)
+                close = [f]
+                try:
+                    eq(f.read(1), b'a')
+                    if iswindows:
+                        os.rename(fname, fname + '.moved')
+                        os.remove(fname + '.moved')
+                    else:
+                        os.remove(fname)
+                    eq(f.read(1), b'a')
+                    f2 = share_open(fname, 'w+b')
+                    close.append(f2)
+                    f2.write(b'b' * 10 * 1024)
+                    f2.seek(0)
+                    eq(f.read(10000), b'a' * 10000)
+                    eq(f2.read(100), b'b' * 100)
+                    f3 = share_open(fname, 'rb')
+                    close.append(f3)
+                    eq(f3.read(100), b'b' * 100)
+                finally:
+                    for f in close:
+                        f.close()
 
     return unittest.defaultTestLoader.loadTestsFromTestCase(SharedFileTest)
+
+
+def run_tests() -> None:
+    from ebook_convert.utils.run_tests import run_tests
+
+    run_tests(find_tests)
