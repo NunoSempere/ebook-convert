@@ -66,8 +66,11 @@ class EPUBInput(InputFormatPlugin):
                     traceback.print_exc()
                     key = None
 
+        from ebook_convert.utils.filenames import is_existing_subpath
         try:
             root = etree.parse(encfile)
+            base_dir = os.path.dirname(encfile)
+            container_base = os.path.dirname(base_dir)
             for em in root.xpath('descendant::*[contains(name(), '
                                  '"EncryptionMethod")]'):
                 algorithm = em.get('Algorithm', '')
@@ -76,10 +79,11 @@ class EPUBInput(InputFormatPlugin):
                 cr = em.getparent().xpath('descendant::*[contains(name(), '
                                           '"CipherReference")]')[0]
                 uri = cr.get('URI')
-                path = os.path.abspath(os.path.join(os.path.dirname(encfile),
-                                                    '..', *uri.split('/')))
+                path = os.path.abspath(os.path.join(base_dir, '..',
+                                                    *uri.split('/')))
                 tkey = (key if algorithm == ADOBE_OBFUSCATION else idpf_key)
-                if (tkey and os.path.exists(path)):
+                # Only de-obfuscate files inside the book (267bfd3402)
+                if tkey and is_existing_subpath(path, container_base):
                     self._encrypted_font_uris.append(uri)
                     decrypt_font(tkey, path, algorithm)
             return True
@@ -372,6 +376,51 @@ class EPUBInput(InputFormatPlugin):
 
         return os.path.abspath('content.opf')
 
+    def landmarks_to_guide(self, root, nav_path, opf, log):
+        # The rest of the conversion pipeline uses only the OPF guide, so
+        # replace guide entries with the landmarks from the EPUB 3 nav.
+        # Landmark types with no equivalent guide type use custom guide
+        # types, see https://bugs.launchpad.net/bugs/2172176
+        from ebook_convert.ebooks.oeb.polish.upgrade import \
+            guide_type_for_epubtype
+
+        et = '{%s}type' % const.EPUB_NS
+        base_dir = os.path.relpath(
+            os.path.dirname(os.path.abspath(nav_path))).replace(os.sep, '/')
+        nav_href = base.urlquote(os.path.basename(nav_path))
+        seen = {}
+        for nav in root.iterdescendants(base.tag('xhtml', 'nav')):
+            if nav.get(et) != 'landmarks':
+                continue
+            for a in nav.iterdescendants(base.tag('xhtml', 'a')):
+                href, epubtypes = a.get('href'), (a.get(et) or '').split()
+                if not href or not epubtypes:
+                    continue
+                gtype = guide_type_for_epubtype(epubtypes[0])
+                # The cover is handled by rationalize_cover3()
+                if gtype == 'cover' or gtype in seen:
+                    continue
+                path, frag = href.partition('#')[::2]
+                path = posixpath.normpath(posixpath.join(base_dir,
+                                                         path or nav_href))
+                if path == getattr(self, 'removed_cover', None):
+                    continue
+                if not os.path.isfile(urllib.parse.unquote(path)):
+                    log.warning('Ignoring landmark of type %s pointing to '
+                                'missing file: %s', gtype, href)
+                    continue
+                seen[gtype] = len(seen)
+                title = etree.tostring(a, method='text', encoding='unicode',
+                                       with_tail=False).strip()
+                self.set_guide_type(opf, gtype,
+                                    '%s#%s' % (path, frag) if frag else path,
+                                    title)
+        # Put the landmarks first, in their original order
+        refs = sorted((r for r in opf.iterguide() if r.get('type') in seen),
+                      key=lambda r: seen[r.get('type')])
+        for i, r in enumerate(refs):
+            r.getparent().insert(i, r)
+
     def convert_epub3_nav(self, nav_path, opf, log, opts):
         from lxml import etree
         from ebook_convert.ebooks.chardet import xml_to_unicode
@@ -385,6 +434,7 @@ class EPUBInput(InputFormatPlugin):
         raw = xml_to_unicode(raw, strip_encoding_pats=True,
                              assume_utf8=True)[0]
         root = parse(raw, log=log)
+        self.landmarks_to_guide(root, nav_path, opf, log)
         ncx = etree.fromstring('<ncx xmlns="http://www.daisy.org/z3986/2005/'
                                'ncx/" version="2005-1" xml:lang="eng">'
                                '<navMap/></ncx>')
