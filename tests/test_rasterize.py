@@ -85,8 +85,12 @@ def test_svg_is_rasterized_for_formats_without_svg(epub_with_svg_path,
     if ext == 'docx':
         with zipfile.ZipFile(out) as zf:
             media = [n for n in zf.namelist() if n.startswith('word/media/')]
+            document = zf.read('word/document.xml')
+        # PNG fallback for old Word, plus the original SVG embedded through
+        # the asvg:svgBlip extension (Calibre 41f7a01e35).
         assert any(n.endswith('.png') for n in media)
-        assert not any(n.endswith('.svg') for n in media)
+        assert any(n.endswith('.svg') for n in media)
+        assert b'svgBlip' in document
     elif ext == 'fb2':
         assert b'image/png' in data
     else:

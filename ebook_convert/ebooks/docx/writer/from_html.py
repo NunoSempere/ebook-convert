@@ -481,7 +481,8 @@ class Convert(object):
         self.stylizer_cache = {}
         self.svg_rasterizer = None
         try:
-            self.svg_rasterizer = SVGRasterizer(base_css=self.base_css)
+            self.svg_rasterizer = SVGRasterizer(base_css=self.base_css,
+                                                save_svg_originals=True)
         except Unavailable:
             self.log.warning('SVG rasterizer unavailable, SVG will not be '
                              'converted')

@@ -123,11 +123,16 @@ def render_svg(svg_bytes, width=0, height=0, size=None, bgcolor='#ffffff'):
 
 class SVGRasterizer(object):
 
-    def __init__(self, base_css=''):
+    def __init__(self, base_css='', save_svg_originals=False):
         if not renderer_available():
             raise Unavailable('SVG rasterization needs the resvg_py package; '
                               'SVG images are left as they are')
         self.base_css = base_css
+        # When set, the original SVG of every rasterized image is kept in the
+        # manifest and mapped PNG href -> SVG href, so writers that can embed
+        # vector graphics with a bitmap fallback (DOCX) can use both.
+        self.save_svg_originals = save_svg_originals
+        self.svg_originals = {}
 
     @classmethod
     def config(cls, cfg):
@@ -243,6 +248,11 @@ class SVGRasterizer(object):
         id, href = manifest.generate(item.id, href)
         manifest.add(id, href, PNG_MIME, data=data)
         img = elem.makeelement(base.tag('xhtml', 'img'), src=item.relhref(href))
+        if self.save_svg_originals:
+            svg_bytes = xml2str(elem, with_tail=False)
+            svg_id, svg_href = manifest.generate(item.id, 'inline.svg')
+            manifest.add(svg_id, svg_href, SVG_MIME, data=svg_bytes)
+            self.svg_originals[href] = svg_href
         elem.getparent().replace(elem, img)
         # Keep the text that followed the <svg> element
         img.tail = elem.tail
@@ -270,6 +280,7 @@ class SVGRasterizer(object):
             id, href = manifest.generate(svgitem.id, href)
             manifest.add(id, href, PNG_MIME, data=data)
             self.images[key] = href
+        self.svg_originals[href] = svgitem.href
         elem.tag = base.tag('xhtml', 'img')
         for attr in list(elem.attrib):
             if attr not in KEEP_ATTRS:
