@@ -244,6 +244,8 @@ class SVGRasterizer(object):
         manifest.add(id, href, PNG_MIME, data=data)
         img = elem.makeelement(base.tag('xhtml', 'img'), src=item.relhref(href))
         elem.getparent().replace(elem, img)
+        # Keep the text that followed the <svg> element
+        img.tail = elem.tail
         for prop in ('width', 'height'):
             if prop in elem.attrib:
                 img.attrib[prop] = elem.attrib[prop]

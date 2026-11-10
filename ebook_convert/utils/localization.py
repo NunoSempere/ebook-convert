@@ -97,7 +97,7 @@ def canonicalize_lang(raw):
     raw = raw.lower().strip()
     if not raw:
         return None
-    raw = raw.replace('_', '-').partition('-')[0].strip()
+    raw = raw.replace('_', '-').partition('-')[0].partition('@')[0].strip()
     if not raw:
         return None
     iso639 = _load_iso639()
@@ -114,19 +114,41 @@ def canonicalize_lang(raw):
     return iso639['name_map'].get(raw, None)
 
 
-def is_rtl_lang(lang):
-    '''Whether the language (a name or an ISO 639 code, optionally with a
-    region) is written right to left: Arabic, Hebrew, Farsi, Urdu and
-    Yiddish.'''
-    lang = canonicalize_lang(lang)
-    return bool(lang) and lang in ('ara', 'heb', 'fas', 'urd', 'yid')
-
-
 def lang_as_iso639_1(name_or_code):
     code = canonicalize_lang(name_or_code)
     if code is not None:
         iso639 = _load_iso639()
         return iso639['3to2'].get(code, None)
+
+
+def lang_as_bcp47(raw):
+    # Convert a language as found in book metadata to a BCP 47 language tag,
+    # for use in lang attributes. Returns None for languages that are not
+    # actual languages, such as und.
+    if not raw:
+        return None
+    if isinstance(raw, bytes):
+        raw = raw.decode('utf-8', 'ignore')
+    primary, *subtags = raw.strip().replace('_', '-').split('-')
+    # canonicalize_lang() also accepts language names, which are not valid in
+    # tags
+    code = (canonicalize_lang(primary)
+            if primary.isalpha() and len(primary) in (2, 3) else None)
+    if code and code not in ('und', 'mul', 'zxx'):
+        # Three letter codes that have a two letter equivalent are not valid
+        # language tags
+        return '-'.join([lang_as_iso639_1(code) or code, *subtags])
+    return None
+
+
+def is_rtl_lang(lang):
+    """True if ``lang`` (a language code or name, optionally with a region)
+    is written right-to-left."""
+    lang = canonicalize_lang(lang)
+    # Arabic, Hebrew, Azeri, Dhivehi, Aramaic (arc/syc/myz), Sorani, Urdu,
+    # Farsi, Yiddish
+    return bool(lang and lang in ('ara', 'heb', 'aze', 'div', 'arc', 'syc',
+                                  'myz', 'ckb', 'urd', 'fas', 'yid'))
 
 
 _udc = None

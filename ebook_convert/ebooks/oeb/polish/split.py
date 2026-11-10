@@ -334,10 +334,10 @@ def all_anchors(root):
 
 def all_stylesheets(container, name):
     for link in base.XPath('//h:head/h:link[@href]')(container.parsed(name)):
-        name = container.href_to_name(link.get('href'), name)
+        sname = container.href_to_name(link.get('href'), name)
         typ = link.get('type', 'text/css')
         if typ == 'text/css':
-            yield name
+            yield sname
 
 
 def unique_anchor(seen_anchors, current):
@@ -379,7 +379,8 @@ def merge_html(container, names, master, insert_page_breaks=False):
             continue
         # Insert new stylesheets into master
         for sheet in all_stylesheets(container, name):
-            if sheet not in seen_stylesheets:
+            # sheet is None for links that do not point to a file in the book
+            if sheet is not None and sheet not in seen_stylesheets:
                 seen_stylesheets.add(sheet)
                 link = head.makeelement(base.tag('xhtml', 'link'), rel='stylesheet', type='text/css', href=container.name_to_href(sheet, master))
                 container.insert_into_xml(head, link)
@@ -399,9 +400,12 @@ def merge_html(container, names, master, insert_page_breaks=False):
             if not isinstance(first_child, (str, bytes)):
                 break
         if isinstance(first_child, (str, bytes)):
-            # body contained only text, no tags
-            first_child = body.makeelement(base.tag('xhtml', 'p'))
-            first_child.text, children[0] = children[0], first_child
+            # body contained only text, no tags, or there is no body
+            first_child = root.makeelement(base.tag('xhtml', 'p'))
+            if children:
+                first_child.text, children[0] = children[0], first_child
+            else:
+                children.append(first_child)
 
         amap = anchor_map[name]
         remove_name_attributes(root)
@@ -432,6 +436,7 @@ def merge_html(container, names, master, insert_page_breaks=False):
             q = a.get('href')[1:]
             if q in amap:
                 a.set('href', '#' + amap[q])
+        base.rewrite_idrefs(root, lambda eid: amap.get(eid, eid))
 
         for child in children:
             if isinstance(child, (str, bytes)):

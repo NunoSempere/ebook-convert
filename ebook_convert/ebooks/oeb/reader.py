@@ -76,6 +76,10 @@ class OEBReader(object):
                 elem.tag = base.tag('opf', parse_utils.barename(elem.tag))
         nsmap.update(const.OPF2_NSMAP)
         attrib = dict(opf.attrib)
+        # Handle invalid xmlns:= (671d5cec4b)
+        xmlns = attrib.pop('xmlns:', None)
+        if xmlns:
+            attrib['xmlns'] = xmlns
         nroot = etree.Element(base.tag('opf', 'package'),
                               nsmap={None: const.OPF2_NS}, attrib=attrib)
         metadata = etree.SubElement(nroot, base.tag('opf', 'metadata'),
@@ -137,14 +141,22 @@ class OEBReader(object):
         if pwm:
             self.oeb.metadata.primary_writing_mode = pwm
         mi = o.to_book_metadata()
+        # A language guessed from the interface language (by the OPF reader
+        # or here) must not be used where it would be wrong, e.g. in lang
+        # attributes, so mark it as a fallback
+        lang_is_fallback = getattr(o, 'languages_are_fallback', False)
         if not mi.language:
             mi.language = get_lang().replace('_', '-')
+            lang_is_fallback = True
         self.oeb.metadata.add('language', mi.language)
         if not mi.book_producer:
             mi.book_producer = ('%(a)s (%(v)s) [http://%(a)s-ebook.com]' %
                                 dict(a=__appname__, v=__version__))
         meta_info_to_oeb_metadata(mi, self.oeb.metadata, self.logger)
         m = self.oeb.metadata
+        if lang_is_fallback:
+            for lang in m.language:
+                lang.is_fallback = True
         m.add('identifier', str(uuid.uuid4()), id='uuid_id', scheme='uuid')
         self.oeb.uid = self.oeb.metadata.identifier[-1]
         if not m.title:
@@ -263,6 +275,18 @@ class OEBReader(object):
 
     def _manifest_from_opf(self, opf):
         manifest = self.oeb.manifest
+        # ids generated for <item> elements without one must not collide with
+        # ids used by later items (or referenced by the spine)
+        opf_ids = set(base.xpath(opf, '/o2:package/o2:manifest/o2:item/@id'))
+
+        def generate_id():
+            candidate, c = 'id', 0
+            while candidate in opf_ids or candidate in manifest.ids:
+                c += 1
+                candidate = 'id%d' % c
+            opf_ids.add(candidate)
+            return candidate
+
         for elem in base.xpath(opf, '/o2:package/o2:manifest/o2:item'):
             id = elem.get('id')
             href = elem.get('href')
@@ -279,10 +303,12 @@ class OEBReader(object):
             if href in manifest.hrefs:
                 self.logger.warning('Duplicate manifest entry for %r', href)
                 continue
-            if not self.oeb.container.exists(href):
+            if href is None or not self.oeb.container.exists(href):
                 self.logger.warning('Manifest item %r not found', href)
                 continue
-            if id in manifest.ids:
+            if not id:
+                id = generate_id()
+            elif id in manifest.ids:
                 self.logger.warning('Duplicate manifest id %r', id)
                 id, href = manifest.generate(id, href)
             manifest.add(id, href, media_type, fallback)
@@ -362,7 +388,11 @@ class OEBReader(object):
         guide = self.oeb.guide
         manifest = self.oeb.manifest
         for elem in base.xpath(opf, '/o2:package/o2:guide/o2:reference'):
-            ref_href = elem.get('href')
+            ref_href, typ = elem.get('href'), elem.get('type')
+            if not ref_href or not typ:
+                self.logger.warning('Ignoring guide reference with no href '
+                                    'or type: %r, %r', ref_href, typ)
+                continue
             path = base.urlnormalize(urllib.parse.urldefrag(ref_href)[0])
             if path not in manifest.hrefs:
                 corrected_href = None
@@ -375,7 +405,6 @@ class OEBReader(object):
                                         ref_href)
                     continue
                 ref_href = corrected_href
-            typ = elem.get('type')
             if typ not in guide:
                 guide.add(typ, elem.get('title'), ref_href)
 

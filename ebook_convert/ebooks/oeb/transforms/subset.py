@@ -5,6 +5,10 @@ from ebook_convert.utils.fonts.sfnt.subset import subset, NoGlyphs, UnsupportedF
 from ebook_convert.tinycss.fonts3 import parse_font_family
 
 
+font_properties = ('font-family', 'src', 'font-weight', 'font-stretch',
+                   'font-style', 'text-transform')
+
+
 def get_font_properties(rule, default=None):
     '''
     Given a CSS rule, extract normalized font properties from
@@ -13,8 +17,7 @@ def get_font_properties(rule, default=None):
     '''
     props = {}
     s = rule.style
-    for q in ('font-family', 'src', 'font-weight', 'font-stretch',
-              'font-style'):
+    for q in font_properties:
         g = 'uri' if q == 'src' else 'value'
         try:
             val = s.getProperty(q).propertyValue[0]
@@ -181,7 +184,10 @@ class SubsetFonts(object):
         '''
         self.embedded_fonts = []
         for item in self.oeb.manifest:
-            if not hasattr(item.data, 'cssRules'):
+            try:
+                if not hasattr(item.data, 'cssRules'):
+                    continue
+            except FileNotFoundError:
                 continue
             self.embedded_fonts.extend(find_font_face_rules(item, self.oeb))
 
@@ -288,13 +294,24 @@ class SubsetFonts(object):
             if matches:
                 return matches[0]
 
-    def find_chars(self, elem):
+    def find_chars(self, elem, style):
         ans = set()
+
+        def transform(x):
+            return x
+        # Honour text-transform when collecting the characters a font must
+        # keep (1fbec2919f)
+        tt = style.get('text-transform')
+        if tt:
+            if tt in ('uppercase', 'capitalize'):
+                transform = str.upper
+            elif tt == 'lowercase':
+                transform = str.lower
         if elem.text:
-            ans |= set(elem.text)
+            ans |= set(transform(elem.text))
         for child in elem:
             if child.tail:
-                ans |= set(child.tail)
+                ans |= set(transform(child.tail))
         return ans
 
     def find_usage_in(self, elem, inherited_style):
@@ -303,6 +320,6 @@ class SubsetFonts(object):
             self.find_usage_in(child, style)
         font = self.used_font(style)
         if font:
-            chars = self.find_chars(elem)
+            chars = self.find_chars(elem, style)
             if chars:
                 font['chars'] |= chars

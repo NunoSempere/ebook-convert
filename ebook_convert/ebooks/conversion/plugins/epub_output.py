@@ -124,7 +124,20 @@ class EPUBOutput(OutputFormatPlugin):
             help='The version of the EPUB file to generate. EPUB 2 is the '
                  'most widely compatible, only use EPUB 3 if you know you '
                  'actually need it.'
-        )
+        ),
+
+        OptionRecommendation(name='epub_max_image_size', recommended_value='none',
+            help='The maximum image size (width x height). A value of '
+                 '"profile" means use the screen size from the output '
+                 'profile. A value of "none" means no maximum size is '
+                 'specified. For example, a value of "100x200" will cause all '
+                 'images to be resized so that their width is no more than '
+                 '100 pixels and their height is no more than 200 pixels. '
+                 'Note that this only affects the size of the actual image '
+                 'files themselves. Any given image may be rendered at a '
+                 'different size depending on the styling applied to it in '
+                 'the document.'
+        ),
         }
 
     recommendations = {('pretty_print', True, OptionRecommendation.HIGH)}
@@ -143,6 +156,23 @@ class EPUBOutput(OutputFormatPlugin):
                 if not pre.text and len(pre) == 0:
                     pre.tag = 'div'
     # }}}
+
+    def html_language(self):
+        from ebook_convert.ebooks.oeb.transforms.cover import CoverManager
+        return CoverManager.book_language(self.oeb)
+
+    def set_html_languages(self):
+        # Screen readers and text-to-speech need the language of the text.
+        # For EPUB 3 the lang attribute is added when upgrading.
+        book_lang = self.html_language()
+        if not book_lang:
+            return
+        for x in self.oeb.spine:
+            root = x.data
+            if not hasattr(root, 'xpath'):
+                continue
+            if not root.get(base.tag('xml', 'lang')) and not root.get('lang'):
+                root.set(base.tag('xml', 'lang'), book_lang)
 
     def upshift_markup(self):  # {{{
         'Upgrade markup to comply with XHTML 1.1 where possible'
@@ -195,8 +225,11 @@ class EPUBOutput(OutputFormatPlugin):
         self.workaround_ade_quirks()
         self.workaround_webkit_quirks()
         self.upshift_markup()
+        self.oeb.set_page_progression_direction_if_needed()
         from ebook_convert.ebooks.oeb.transforms.rescale import RescaleImages
-        RescaleImages(check_colorspaces=True)(oeb, opts)
+        RescaleImages(check_colorspaces=True)(
+            oeb, opts, max_size=getattr(self.opts, 'epub_max_image_size',
+                                        'none'))
 
         from ebook_convert.ebooks.oeb.transforms.split import Split
         split = Split(not self.opts.dont_split_on_page_breaks,
@@ -210,6 +243,7 @@ class EPUBOutput(OutputFormatPlugin):
                 no_svg_cover=self.opts.no_svg_cover,
                 preserve_aspect_ratio=self.opts.preserve_cover_aspect_ratio)
         cm(self.oeb, self.opts, self.log)
+        self.set_html_languages()
 
         self.workaround_sony_quirks()
 
@@ -222,7 +256,7 @@ class EPUBOutput(OutputFormatPlugin):
         identifiers = oeb.metadata['identifier']
         _uuid = None
         for x in identifiers:
-            if (x.get(base.tag('opf', 'scheme'), None).lower() == 'uuid' or
+            if ((x.get(base.tag('opf', 'scheme'), None) or '').lower() == 'uuid' or
                     str(x).startswith('urn:uuid:')):
                 _uuid = str(x).split(':')[-1]
                 break
@@ -255,11 +289,18 @@ class EPUBOutput(OutputFormatPlugin):
             opf = [x for x in os.listdir(tdir) if x.endswith('.opf')][0]
             self.condense_ncx([os.path.join(tdir, x) for x in os.listdir(tdir)
                     if x.endswith('.ncx')][0])
-            if self.opts.epub_version == '3':
-                self.upgrade_to_epub3(tdir, opf)
             encryption = None
             if encrypted_fonts:
                 encryption = self.encrypt_fonts(encrypted_fonts, tdir, _uuid)
+            if self.opts.epub_version == '3':
+                encryption = self.upgrade_to_epub3(tdir, opf, encryption)
+            else:
+                cb = getattr(self, 'container_callback', None)
+                if cb is not None:
+                    container, cxpath, encpath = self.create_container(
+                        tdir, opf, encryption)
+                    cb(container)
+                    encryption = self.end_container(cxpath, encpath)
 
             from ebook_convert.ebooks.epub import initialize_container
             with initialize_container(output_path, os.path.basename(opf),
@@ -283,30 +324,64 @@ class EPUBOutput(OutputFormatPlugin):
                     zf.extractall(path=opts.extract_to)
                 self.log.info('EPUB extracted to %s', opts.extract_to)
 
-    def upgrade_to_epub3(self, tdir, opf):
-        self.log.info('Upgrading to EPUB 3...')
+    def create_container(self, tdir, opf, encryption):
+        '''Create an EpubContainer over the OEB output in tdir, writing the
+        META-INF files it needs. Returns (container, container_xml_path,
+        encryption_xml_path); pass the paths to :meth:`end_container` when
+        done.'''
         from ebook_convert.ebooks.epub import simple_container_xml
-        from ebook_convert.ebooks.oeb.polish.cover import fix_conversion_titlepage_links_in_nav
         try:
             os.mkdir(os.path.join(tdir, 'META-INF'))
         except EnvironmentError:
             pass
         with open(os.path.join(tdir, 'META-INF', 'container.xml'), 'wb') as f:
             f.write(simple_container_xml(os.path.basename(opf)).encode('utf-8'))
+        enc_file_name = ''
+        if encryption is not None:
+            with open(os.path.join(tdir, 'META-INF', 'encryption.xml'), 'wb') as ef:
+                ef.write(polyglot.as_bytes(encryption))
+            enc_file_name = ef.name
         from ebook_convert.ebooks.oeb.polish.container import EpubContainer
         container = EpubContainer(tdir, self.log)
+        return container, f.name, enc_file_name
+
+    def end_container(self, cxpath, encpath):
+        os.remove(cxpath)
+        encryption = None
+        if encpath:
+            with open(encpath, 'rb') as f:
+                encryption = f.read()
+            os.remove(encpath)
+        return encryption
+
+    def upgrade_to_epub3(self, tdir, opf, encryption=None):
+        self.log.info('Upgrading to EPUB 3...')
+        from ebook_convert.ebooks.oeb.polish.cover import fix_conversion_titlepage_links_in_nav
+        from ebook_convert.ebooks.oeb.polish.opf import set_package_language
         from ebook_convert.ebooks.oeb.polish.upgrade import epub_2_to_3
         existing_nav = getattr(self.opts, 'epub3_nav_parsed', None)
         nav_href = getattr(self.opts, 'epub3_nav_href', None)
-        previous_nav = (nav_href, existing_nav) if existing_nav and nav_href else None
-        epub_2_to_3(container, self.log.info, previous_nav=previous_nav)
+        previous_nav = ((nav_href, existing_nav)
+                        if existing_nav is not None and nav_href else None)
+        container, cxpath, encpath = self.create_container(tdir, opf, encryption)
+        # The language of the book from the OPF may have been guessed from the
+        # interface language, which must not be used, see html_language()
+        epub_2_to_3(container, self.log.info, previous_nav=previous_nav,
+                    set_package_lang=False)
+        lang = self.html_language()
+        if lang:
+            set_package_language(container, lang)
         fix_conversion_titlepage_links_in_nav(container)
         container.commit()
-        os.remove(f.name)
+        cb = getattr(self, 'container_callback', None)
+        if cb is not None:
+            cb(container)
+        encryption = self.end_container(cxpath, encpath)
         try:
             os.rmdir(os.path.join(tdir, 'META-INF'))
         except EnvironmentError:
             pass
+        return encryption
 
     def encrypt_fonts(self, uris, tdir, _uuid):  # {{{
         key = re.sub(r'[^a-fA-F0-9]', '', _uuid)

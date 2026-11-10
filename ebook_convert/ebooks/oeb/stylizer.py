@@ -31,6 +31,45 @@ css_parser_log.setLevel(logging.WARN)
 _html_css_stylesheet = None
 
 
+def validate_color(col):
+    return cssprofiles.validateWithProfile(
+        'color', col, profiles=[profiles.Profiles.CSS_LEVEL_2])[1]
+
+
+class style_map(dict):
+    """A dict of CSS properties that also remembers which of them were
+    declared !important (cfe219018d)."""
+
+    def __init__(self):
+        super().__init__()
+        self.important_properties = set()
+
+
+def epub_prefix_properties():
+    ans = getattr(epub_prefix_properties, 'ans', None)
+    if ans is None:
+        ans = {}
+        for unprefixed in (
+            'writing-mode',
+            'text-emphasis',
+            'text-emphasis-color',
+            'text-emphasis-position',
+            'text-emphasis-style',
+        ):
+            ans['-epub-' + unprefixed] = '-webkit-' + unprefixed, unprefixed
+        epub_prefix_properties.ans = ans
+    return ans
+
+
+def cleanup_epub_prefixed_properties(style):
+    epub_prefixed = epub_prefix_properties()
+    for x in tuple(filter(epub_prefixed.__contains__, style)):
+        val = style.pop(x)
+        for key in epub_prefixed[x]:
+            if key not in style:
+                style[key] = val
+
+
 def html_css_stylesheet():
     global _html_css_stylesheet
     if _html_css_stylesheet is None:
@@ -144,16 +183,24 @@ class StylizerRules(object):
         return results
 
     def flatten_style(self, cssstyle):
-        style = {}
+        style = style_map()
         for prop in cssstyle:
             name = prop.name
             normalizer = normalizers.get(name, None)
+            is_important = prop.priority == 'important'
             if normalizer is not None:
-                style.update(normalizer(name, prop.cssValue))
+                for key, val in normalizer(name, prop.cssValue).items():
+                    style[key] = val
+                    if is_important:
+                        style.important_properties.add(key)
             elif name == 'text-align':
                 style['text-align'] = self._apply_text_align(prop.value)
+                if is_important:
+                    style.important_properties.add(name)
             else:
                 style[name] = prop.value
+                if is_important:
+                    style.important_properties.add(name)
         if 'font-size' in style:
             size = style['font-size']
             if size == 'normal':
@@ -162,9 +209,7 @@ class StylizerRules(object):
                 size = 'xx-small'
             if size in FONT_SIZE_NAMES:
                 style['font-size'] = "%.1frem" % (self.profile.fnames[size] / float(self.profile.fbase))
-        if '-epub-writing-mode' in style:
-            for x in ('-webkit-writing-mode', 'writing-mode'):
-                style[x] = style.get(x, style['-epub-writing-mode'])
+        cleanup_epub_prefixed_properties(style)
         return style
 
     def _apply_text_align(self, text):
@@ -224,7 +269,7 @@ class Stylizer(object):
         parser = CSSParser(fetcher=self._fetch_css_file,
                 log=logging.getLogger('calibre.css'))
         for elem in style_tags:
-            if (elem.tag == base.tag('xhtml', 'style') and elem.get('type', base.CSS_MIME) in base.OEB_STYLES and media_ok(elem.get('media'))):
+            if (elem.tag in (base.tag('xhtml', 'style'), base.tag('svg', 'style')) and elem.get('type', base.CSS_MIME) in base.OEB_STYLES and media_ok(elem.get('media'))):
                 text = elem.text if elem.text else ''
                 for x in elem:
                     t = getattr(x, 'text', None)
@@ -406,19 +451,40 @@ class Stylizer(object):
         return '\n'.join(rules)
 
 
+no_important_properties = frozenset()
+svg_text_tags = tuple(base.tag('svg', x)
+                      for x in ('text', 'textPath', 'tref', 'tspan'))
+
+
+def is_only_number(x):
+    try:
+        float(x)
+        return True
+    except Exception:
+        return False
+
+
+def is_svg_text_tag(x):
+    return getattr(x, 'tag', '') in svg_text_tags
+
+
 class Style(object):
     MS_PAT = re.compile(r'^\s*(mso-|panose-|text-underline|tab-interval)')
+    #: The font-size as specified for SVG text elements when it is relative
+    #: to the viewport (px or a plain number), see 5313a21464
+    viewport_relative_font_size = ''
 
     def __init__(self, element, stylizer):
         self._element = element
         self._profile = stylizer.profile
         self._stylizer = stylizer
-        self._style = {}
+        self._style = style_map()
         self._fontSize = None
         self._width = None
         self._height = None
         self._lineHeight = None
         self._bgcolor = None
+        self._fgcolor = None
         self._pseudo_classes = {}
         stylizer._styles[element] = self
 
@@ -429,7 +495,29 @@ class Style(object):
         return self._style.pop(prop, default)
 
     def _update_cssdict(self, cssdict):
-        self._style.update(cssdict)
+        self._update_style(cssdict)
+
+    def _update_style(self, cssdict):
+        # Properties declared !important are only overridden by other
+        # !important declarations (cfe219018d)
+        current_ip = getattr(self._style, 'important_properties',
+                             no_important_properties)
+        if current_ip is no_important_properties:
+            s = style_map()
+            s.update(self._style)
+            self._style = s
+            current_ip = self._style.important_properties
+        update_ip = getattr(cssdict, 'important_properties',
+                            no_important_properties)
+        for name, val in cssdict.items():
+            override = False
+            if name in update_ip:
+                current_ip.add(name)
+                override = True
+            elif name not in current_ip:
+                override = True
+            if override:
+                self._style[name] = val
 
     def _update_pseudo_class(self, name, cssdict):
         orig = self._pseudo_classes.get(name, {})
@@ -451,7 +539,7 @@ class Style(object):
             return
         if url_replacer is not None:
             replaceUrls(style, url_replacer, ignoreImportRules=True)
-        self._style.update(self._stylizer.flatten_style(style))
+        self._update_style(self._stylizer.flatten_style(style))
 
     def _has_parent(self):
         try:
@@ -472,9 +560,7 @@ class Style(object):
         return self._unit_convert(self._get(name))
 
     def _get(self, name):
-        result = None
-        if name in self._style:
-            result = self._style[name]
+        result = self._style.get(name, None)
         if (result == 'inherit' or (result is None and name in INHERITED and self._has_parent())):
             stylizer = self._stylizer
             result = stylizer.style(self._element.getparent())._get(name)
@@ -497,17 +583,22 @@ class Style(object):
         return (self._profile.dpi / 72) * value
 
     @property
+    def color(self):
+        if self._fgcolor is None:
+            val = self._get('color')
+            if val and validate_color(val):
+                self._fgcolor = val
+            else:
+                self._fgcolor = DEFAULTS['color']
+        return self._fgcolor
+
+    @property
     def backgroundColor(self):
         '''
         Return the background color by parsing both the background-color and
         background shortcut properties. Note that inheritance/default values
         are not used. None is returned if no background color is set.
         '''
-        def validate_color(col):
-            return cssprofiles.validateWithProfile('color',
-                        col,
-                        profiles=[profiles.Profiles.CSS_LEVEL_2])[1]
-
         if self._bgcolor is None:
             col = None
             val = self._style.get('background-color', None)
@@ -581,6 +672,9 @@ class Style(object):
                 base = self._profile.fbase
             if 'font-size' in self._style:
                 size = self._style['font-size']
+                if (is_svg_text_tag(self._element) and
+                        (size.endswith('px') or is_only_number(size))):
+                    self.viewport_relative_font_size = size
                 result = normalize_fontsize(size, base)
             else:
                 result = base

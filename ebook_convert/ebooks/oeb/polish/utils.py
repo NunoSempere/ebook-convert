@@ -14,12 +14,68 @@ def guess_type(x):
     return mimetypes.guess_type(x)[0] or 'application/octet-stream'
 
 
+# All font mimetypes seen in e-books
+OEB_FONTS = frozenset({
+    'font/otf',
+    'font/woff',
+    'font/woff2',
+    'font/ttf',
+    'application/x-font-ttf',
+    'application/x-font-otf',
+    'application/font-sfnt',
+    'application/vnd.ms-opentype',
+    'application/x-font-truetype',
+})
+
+
+def adjust_mime_for_epub(filename='', mime='', opf_version=(2, 0)):
+    mime = mime or guess_type(filename)
+    if mime == 'text/html':
+        # epubcheck complains if the mimetype for text documents is set to
+        # text/html in EPUB 2 books. Sigh.
+        return 'application/xhtml+xml'
+    if mime not in OEB_FONTS:
+        return mime
+    if 'ttf' in mime or 'truetype' in mime:
+        mime = 'font/ttf'
+    elif 'otf' in mime or 'opentype' in mime:
+        mime = 'font/otf'
+    elif mime == 'application/font-sfnt':
+        mime = 'font/otf' if filename.lower().endswith('.otf') else 'font/ttf'
+    elif 'woff2' in mime:
+        mime = 'font/woff2'
+    elif 'woff' in mime:
+        mime = 'font/woff'
+    opf_version = tuple(opf_version[:2])
+    if opf_version == (3, 0):
+        mime = {
+            # this is needed by the execrable epubchek
+            'font/ttf': 'application/vnd.ms-opentype',
+            'font/otf': 'application/vnd.ms-opentype',
+            'font/woff': 'application/font-woff',
+        }.get(mime, mime)
+    elif opf_version == (3, 1):
+        mime = {
+            'font/ttf': 'application/font-sfnt',
+            'font/otf': 'application/font-sfnt',
+            'font/woff': 'application/font-woff',
+        }.get(mime, mime)
+    elif opf_version < (3, 0):
+        mime = {
+            'font/ttf': 'application/x-font-truetype',
+            'font/otf': 'application/vnd.ms-opentype',
+            'font/woff': 'application/font-woff',
+        }.get(mime, mime)
+    return mime
+
+
 def setup_css_parser_serialization(tab_width=2):
     import css_parser
     prefs = css_parser.ser.prefs
     prefs.indent = tab_width * ' '
     prefs.indentClosingBrace = False
     prefs.omitLastSemicolon = False
+    prefs.formatUnknownAtRules = False  # True breaks @supports rules
 
 
 def actual_case_for_name(container, name):
@@ -237,3 +293,29 @@ def extract(elem):
                 p[idx-1].tail = (p[idx-1].tail or '') + elem.tail
             else:
                 p.text = (p.text or '') + elem.tail
+
+
+def insert_self_closing(parent, item, index=None):
+    """Insert item into parent (or append if index is None), fixing
+    indentation. Only works with self closing items."""
+    if index is None:
+        parent.append(item)
+    else:
+        parent.insert(index, item)
+    idx = parent.index(item)
+    if idx == 0:
+        item.tail = parent.text
+        # If this is the only child of this parent element, we need a
+        # little extra work as we have gone from a self-closing <foo />
+        # element to <foo><item /></foo>
+        if len(parent) == 1:
+            sibling = parent.getprevious()
+            if sibling is None:
+                # Give up!
+                return
+            parent.text = sibling.text
+            item.tail = sibling.tail
+    else:
+        item.tail = parent[idx - 1].tail
+        if idx == len(parent) - 1:
+            parent[idx - 1].tail = parent.text

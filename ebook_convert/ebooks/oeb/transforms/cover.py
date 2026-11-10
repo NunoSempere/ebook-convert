@@ -11,11 +11,11 @@ from ebook_convert import polyglot
 class CoverManager(object):
 
     SVG_TEMPLATE = textwrap.dedent('''\
-<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en">
+<html xmlns="http://www.w3.org/1999/xhtml"__lang__>
     <head>
         <meta http-equiv="Content-Type" content="text/html; charset=UTF-8" />
         <meta name="calibre:cover" content="true" />
-        <title>Cover</title>
+        <title>__title__</title>
         <style type="text/css" title="override_css">
             @page {padding: 0pt; margin:0pt}
             body { text-align: center; padding:0pt; margin: 0pt; }
@@ -27,6 +27,7 @@ class CoverManager(object):
                 xmlns:xlink="http://www.w3.org/1999/xlink"
                 width="100%%" height="100%%" viewBox="__viewbox__"
                 preserveAspectRatio="__ar__">
+                <title>__title__</title>
                 <image width="__width__" height="__height__" xlink:href="%s"/>
             </svg>
         </div>
@@ -34,11 +35,11 @@ class CoverManager(object):
 </html>''')
 
     NONSVG_TEMPLATE = textwrap.dedent('''\
-<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en">
+<html xmlns="http://www.w3.org/1999/xhtml"__lang__>
     <head>
         <meta http-equiv="Content-Type" content="text/html; charset=UTF-8" />
         <meta name="calibre:cover" content="true" />
-        <title>Cover</title>
+        <title>__title__</title>
         <style type="text/css" title="override_css">
             @page {padding: 0pt; margin:0pt}
             body { text-align: center; padding:0pt; margin: 0pt }
@@ -48,11 +49,39 @@ class CoverManager(object):
     </head>
     <body>
         <div>
-            <img src="%s" alt="cover" __style__ />
+            <img src="%s" alt="__title__" __style__ />
         </div>
     </body>
 </html>
     ''')
+
+    @staticmethod
+    def fill_metadata(template, title, lang):
+        # The title of the book is the text alternative of the cover image for
+        # screen readers, and the language of the book is the language of the
+        # page. The template is later used with %, so escape that too.
+        from ebook_convert.utils.entities import prepare_string_for_xml
+
+        def escape(x):
+            return prepare_string_for_xml(x, True).replace('%', '%%')
+
+        template = template.replace('__title__',
+                                    escape(title.strip() or 'Cover'))
+        return template.replace(
+            '__lang__', ' xml:lang="%s"' % escape(lang) if lang else '')
+
+    @staticmethod
+    def book_language(oeb):
+        # The language of the book as a BCP 47 language tag, for use in the
+        # lang attributes of HTML files. A language guessed from the calibre
+        # interface language is not used, as it is likely to be wrong.
+        from ebook_convert.utils.localization import lang_as_bcp47
+        for lang in oeb.metadata.language:
+            if not getattr(lang, 'is_fallback', False):
+                ans = lang_as_bcp47(str(lang))
+                if ans:
+                    return ans
+        return None
 
     def __init__(self, no_default_cover=False, no_svg_cover=False,
                  preserve_aspect_ratio=False, fixed_size=None):
@@ -113,6 +142,10 @@ class CoverManager(object):
             if href is not None:
                 templ = self.non_svg_template if self.no_svg_cover \
                         else self.svg_template
+                title = (str(self.oeb.metadata.title[0])
+                         if self.oeb.metadata.title else '')
+                templ = self.fill_metadata(templ, title,
+                                           self.book_language(self.oeb))
                 tp = templ % polyglot.unquote(href)
                 id, href = m.generate('titlepage', 'titlepage.xhtml')
                 item = m.add(id, href, mimetypes.guess_type('t.xhtml')[0],
@@ -121,6 +154,10 @@ class CoverManager(object):
             key = urllib.parse.urldefrag(self.oeb.guide['titlepage'].href)[0]
             item = self.oeb.manifest.hrefs[key]
         if item is not None:
+            if item in self.oeb.spine:
+                # The titlepage may already be in the spine, e.g. when the
+                # input book marked it and it got split (85ec0e6fbf)
+                self.oeb.spine.remove(item)
             self.oeb.spine.insert(0, item, True)
             if 'cover' not in self.oeb.guide.refs:
                 self.oeb.guide.add('cover', 'Title Page', 'a')

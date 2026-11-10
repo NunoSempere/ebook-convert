@@ -45,6 +45,7 @@ class OEBOutput(OutputFormatPlugin):
                                                'Pocketbook cover bug, '
                                                'ignoring')
                         self.migrate_lang_code(root)
+                        self.adjust_mime_types(root)
                     raw = etree.tostring(root, pretty_print=True,
                             encoding='utf-8', xml_declaration=True)
                     if key == OPF_MIME:
@@ -66,6 +67,17 @@ class OEBOutput(OutputFormatPlugin):
                 with open(path, 'wb') as f:
                     f.write(item.bytes_representation)
                 item.unload_data_from_memory(memory=path)
+
+    def adjust_mime_types(self, root):
+        # Use the font MIME types epubcheck expects for EPUB 2 (709f5343a0)
+        from ebook_convert.ebooks.oeb.polish.utils import adjust_mime_for_epub
+        for x in root.xpath('//*[local-name() = "manifest"]/*[local-name() = "item"]'):
+            mt = x.get('media-type')
+            if mt:
+                nmt = adjust_mime_for_epub(
+                    filename=os.path.basename(x.get('href') or ''), mime=mt)
+                if nmt != mt:
+                    x.set('media-type', nmt)
 
     def workaround_nook_cover_bug(self, root):  # {{{
         cov = root.xpath('//*[local-name() = "meta" and @name="cover" and'
