@@ -756,6 +756,19 @@ class KindleOasisOutput(KindlePaperWhite3Output):
     comic_screen_size = screen_size
 
 
+class KindleScribeOutput(KindlePaperWhite3Output):
+
+    name = 'Kindle Scribe'
+    short_name = 'kindle_scribe'
+    description = ('This profile is intended for the Amazon Kindle Scribe '
+                   '2022 and above')
+    # Screen size is currently just the spec size, actual renderable area will
+    # depend on someone with the device doing tests.
+    screen_size               = (1860, 2480)
+    dpi                       = 300.0
+    comic_screen_size = screen_size
+
+
 class KindleFireOutput(KindleDXOutput):
 
     name = 'Kindle Fire'
@@ -862,6 +875,45 @@ class PocketBookPro912Output(OutputProfile):
     comic_screen_size         = screen_size
 
 
+class PocketBookLuxOutput(OutputProfile):
+
+    author = 'William Ouwehand'
+    name = 'PocketBook Lux (1-5) and Basic 4'
+    short_name = 'pocketbook_lux'
+    description = ('This profile is intended for the PocketBook Lux (1-5) '
+                   'and Basic 4 series of devices.')
+
+    screen_size               = (758, 1024)
+    dpi                       = 212.0
+    comic_screen_size         = screen_size
+
+
+class PocketBookHDOutput(OutputProfile):
+
+    author = 'William Ouwehand'
+    name = 'PocketBook PocketBook HD Touch (1-3)'
+    short_name = 'pocketbook_hd'
+    description = ('This profile is intended for the PocketBook HD Touch '
+                   '(1-3) series of devices.')
+
+    screen_size               = (1072, 1448)
+    dpi                       = 300.0
+    comic_screen_size         = screen_size
+
+
+class PocketBookInkpad3Output(OutputProfile):
+
+    author = 'William Ouwehand'
+    name = 'PocketBook Inkpad 3 (Pro) and X'
+    short_name = 'pocketbook_inkpad3'
+    description = ('This profile is intended for the PocketBook Inkpad 3 '
+                   'and X series of devices.')
+
+    screen_size               = (1404, 1872)
+    dpi                       = 227.0
+    comic_screen_size         = screen_size
+
+
 output_profiles = [
     OutputProfile, SonyReaderOutput, SonyReader300Output, SonyReader900Output,
     SonyReaderT3Output, MSReaderOutput, MobipocketOutput, HanlinV3Output,
@@ -872,7 +924,8 @@ output_profiles = [
     NookColorOutput, PocketBook900Output,
     PocketBookPro912Output, GenericEink, GenericEinkLarge, GenericEinkHD,
     KindleFireOutput, KindlePaperWhiteOutput, KindleVoyageOutput,
-    KindlePaperWhite3Output, KindleOasisOutput
+    KindlePaperWhite3Output, KindleOasisOutput, KindleScribeOutput,
+    PocketBookLuxOutput, PocketBookHDOutput, PocketBookInkpad3Output,
 ]
 
 output_profiles.sort(key=lambda x: x.name.lower())

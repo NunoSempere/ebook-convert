@@ -39,6 +39,9 @@ def fit_image(width, height, pwidth, pheight):
     @return: scaled, new_width, new_height. scaled is True iff new_width
              and/or new_height is different from width or height.
     """
+    if height < 1 or width < 1:
+        # zero sized images cannot be scaled
+        return False, int(width), int(height)
     scaled = height > pheight or width > pwidth
     if height > pheight:
         corrf = pheight / float(height)
@@ -193,7 +196,12 @@ class AnimatedGIF(ValueError):
 
 def gif_data_to_png_data(data, discard_animation=False):
     img = PILImage.open(BytesIO(data))
-    if getattr(img, 'is_animated', False) and not discard_animation:
+    try:
+        # Calibre 1a87b70c12: PIL can raise when checking this
+        is_animated = img.is_animated
+    except Exception:
+        is_animated = False
+    if is_animated and not discard_animation:
         raise AnimatedGIF()
     buf = BytesIO()
     img.save(buf, 'png')
@@ -374,8 +382,12 @@ def save_cover_data_to(
         changed = True
         img = img.scaled(resize_to[0], resize_to[1])
     owidth, oheight = img.width(), img.height()
-    nwidth, nheight = (tweaks['maximum_cover_size'] if minify_to is None
-                       else minify_to)
+    if minify_to is None:
+        nwidth, nheight = tweaks['maximum_cover_size']
+        # Calibre 34743e4807: never minify to an empty image
+        nwidth, nheight = max(1, nwidth), max(1, nheight)
+    else:
+        nwidth, nheight = minify_to
     if letterbox:
         img = blend_on_canvas(img, nwidth, nheight, bgcolor='#000000')
         # Check if we were minified

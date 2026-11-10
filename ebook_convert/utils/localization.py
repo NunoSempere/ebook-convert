@@ -2,6 +2,33 @@ import importlib.resources
 import json
 
 
+default_envvars_for_langcode = ('LC_ALL', 'LC_CTYPE', 'LANG', 'LANGUAGE')
+
+
+def getlangcode_from_envvars(envvars=default_envvars_for_langcode):
+    '''Language code from the environment, replacing the removed
+    locale.getdefaultlocale() (Calibre 2026)'''
+    import locale
+    import os
+    lookup = os.environ.get
+    for k in envvars:
+        localename = lookup(k)
+        if localename:
+            if k == 'LANGUAGE':
+                localename = localename.split(':')[0]
+            break
+    else:
+        localename = 'C'
+    parse = getattr(locale, '_parse_localename', None)
+    if parse is not None:
+        try:
+            return parse(localename)[0]
+        except ValueError:
+            pass
+    localename = localename.split('.')[0].split('@')[0]
+    return None if localename in ('C', 'POSIX', '') else localename
+
+
 def get_lang():
     return 'en_US'
 
@@ -122,6 +149,25 @@ def lang_as_iso639_1(name_or_code):
 
 
 _udc = None
+
+
+def lang_as_bcp47(lang: str) -> str:
+    # Convert a language as found in book metadata to a BCP 47 language tag,
+    # for use in lang attributes. Returns '' for languages that are not
+    # actual languages, such as und.
+    primary, *subtags = (lang or '').strip().replace('_', '-').split('-')
+    # canonicalize_lang() also accepts language names, which are not valid in tags
+    code = canonicalize_lang(primary) if primary.isalpha() and len(primary) in (2, 3) else None
+    if code and code not in ('und', 'mul', 'zxx'):
+        # Three letter codes that have a two letter equivalent are not valid language tags
+        return '-'.join([lang_as_iso639_1(code) or code, *subtags])
+    return ''
+
+
+def is_rtl_lang(lang: str) -> bool:
+    lang = canonicalize_lang(lang)
+    # Aramaic, Arabic, Azeri, Hebrew, Dhivehi, Sorani, Urdu, Farsi
+    return bool(lang and lang in ('ara', 'heb', 'aze', 'div', 'arc', 'syc', 'myz', 'ckb', 'urd', 'fas'))
 
 
 def get_udc():

@@ -96,13 +96,34 @@ def substitute_entites(raw):
     return ENTITY_PATTERN.sub(entities.xml_entity_to_unicode, raw)
 
 
+substitute_entities = substitute_entites  # for plugins that might use this
+
+# Calibre afb2610676: python has no mac-centraleurope codec
 _CHARSET_ALIASES = {"macintosh" : "mac-roman",
-                        "x-sjis" : "shift-jis"}
+                    "x-sjis" : "shift-jis",
+                    "mac-centraleurope": "cp1250"}
 
 
-def detect(*args, **kwargs):
-    from chardet import detect
-    return detect(*args, **kwargs)
+def detect(bytestring):
+    # Calibre ad34b0ea3b / 5d126692f8: normalise the answer so callers can
+    # rely on a lower case encoding string and a numeric confidence
+    from chardet import detect as implementation
+    if isinstance(bytestring, str):
+        bytestring = bytestring.encode('utf-8', 'replace')
+    try:
+        ans = implementation(bytestring)
+    except Exception:
+        ans = {}
+    ans = dict(ans or {})
+    enc = ans.get('encoding')
+    if enc:
+        enc = enc.lower()
+        ans['encoding'] = _CHARSET_ALIASES.get(enc, enc)
+    else:
+        ans['encoding'] = ''
+    if ans.get('confidence') is None:
+        ans['confidence'] = 0
+    return ans
 
 
 def force_encoding(raw, verbose, assume_utf8=False):
@@ -113,11 +134,14 @@ def force_encoding(raw, verbose, assume_utf8=False):
     except:
         chardet = {'encoding':preferred_encoding, 'confidence':0}
     encoding = chardet['encoding']
-    if chardet['confidence'] < 1 and assume_utf8:
-        encoding = 'utf-8'
-    if chardet['confidence'] < 1 and verbose:
-        print('WARNING: Encoding detection confidence for %s is %d%%'%(
-            chardet['encoding'], chardet['confidence']*100))
+    if (chardet.get('confidence') or 0) < 1:
+        if verbose:
+            import sys
+            print('WARNING: Encoding detection confidence for %s is %d%%' % (
+                chardet['encoding'], (chardet.get('confidence') or 0) * 100),
+                file=sys.stderr)
+        if assume_utf8:
+            encoding = 'utf-8'
     if not encoding:
         encoding = preferred_encoding
     encoding = encoding.lower()
@@ -143,6 +167,13 @@ def detect_xml_encoding(raw, verbose=False, assume_utf8=False):
             encoding = encoding.decode('ascii', 'replace')
             break
     if encoding is None:
+        if assume_utf8:
+            # Calibre ad34b0ea3b: chardet confidence is unreliable, so try
+            # a strict utf-8 decode first
+            try:
+                return raw.decode('utf-8'), 'utf-8'
+            except UnicodeDecodeError:
+                pass
         encoding = force_encoding(raw, verbose, assume_utf8=assume_utf8)
     if encoding.lower().strip() == 'macintosh':
         encoding = 'mac-roman'

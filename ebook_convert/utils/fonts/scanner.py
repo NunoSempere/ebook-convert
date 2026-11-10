@@ -171,7 +171,8 @@ class FontScanner(Thread):
     CACHE_VERSION = 2
 
     def __init__(self, folders=[], allowed_extensions={'ttf', 'otf'}):
-        Thread.__init__(self)
+        # Calibre 0ca3b990dc: do not prevent interpreter shutdown
+        Thread.__init__(self, daemon=True)
         self.folders = folders + font_dirs()
         self.folders = [os.path.normcase(os.path.abspath(font)) for font in
                         self.folders]
