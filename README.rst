@@ -50,7 +50,7 @@ that need no Python at all are attached to each `GitHub release`_.
 Optional system tools:
 
 - ``pdftohtml``, ``pdfinfo`` and ``pdftoppm`` from `poppler`_ are needed in
-  ``$PATH`` for conversion *from* PDF.
+  ``$PATH`` for conversion *from* PDF, whichever PDF engine is used.
 - `Liberation fonts`_ are used when embedding fonts into LRF output.
 
 Markdown-formatted text input additionally needs the ``markdown`` package:
@@ -85,7 +85,12 @@ Input formats
 - FictionBook (``fb2``)
 - HTML (``html``, ``htm``, ``xhtml``, ``opf``) and zipped HTML (``htmlz``)
 - Plain text (``txt``, ``txtz``), Markdown (``md``) and Textile
-- PDF (``pdf``), via poppler
+- PDF (``pdf``), via poppler. The default engine (Calibre's current
+  ``calibre`` PDF engine, a pure Python reflow of ``pdftohtml -xml`` output)
+  removes repeated headers, footers and page numbers automatically, merges
+  paragraphs across page breaks, detects columns and builds the table of
+  contents from the PDF outline; the older ``pdftohtml`` engine remains as a
+  fallback. Right-to-left text is not reordered (Calibre uses ICU for that).
 - Broadband eBooks (BBeB) (``lrf``)
 - PalmOS databases (``pdb``, ``updb``): Plucker, eReader, zTXT, PalmDOC,
   Haodoo
