@@ -3,6 +3,7 @@ import re
 import urllib.parse
 import uuid
 
+from ebook_convert.ebooks.oeb.base import urlquote
 from ebook_convert.utils.filenames import ascii_text
 
 
@@ -94,38 +95,63 @@ class LinksManager(object):
         self.bmark_id += 1
         return self.bmark_id
 
-    def serialize_hyperlink(self, parent, link):
+    def link_target(self, link):
+        ''' Return (bookmark, False) for internal links, (rid, True) for
+        external links, None otherwise '''
         item, url, tooltip = link
         purl = urllib.parse.urlparse(url)
         href = purl.path
 
-        def make_link(parent, anchor=None, id=None, tooltip=None):
-            kw = {}
-            if anchor is not None:
-                kw['w_anchor'] = anchor
-            elif id is not None:
-                kw['r_id'] = id
-            if tooltip:
-                kw['w_tooltip'] = tooltip
-            return self.namespace.makeelement(parent, 'w:hyperlink', **kw)
-
         if not purl.scheme:
             href = item.abshref(href)
+            if href not in self.document_hrefs:
+                # Files with URL unsafe characters in their names
+                href = urlquote(href)
             if href in self.document_hrefs:
                 key = (href, purl.fragment or self.top_anchor)
                 if key in self.anchor_map:
                     bmark = self.anchor_map[key]
                 else:
                     bmark = self.anchor_map[(href, self.top_anchor)]
-                return make_link(parent, anchor=bmark, tooltip=tooltip)
+                return bmark, False
             else:
                 self.log.warning('Ignoring internal hyperlink with href (%s) '
                                  'pointing to unknown destination', url)
         if purl.scheme in {'http', 'https', 'ftp'}:
             if url not in self.external_links:
                 self.external_links[url] = self.document_relationships.add_relationship(url, self.namespace.names['LINKS'], target_mode='External')
-            return make_link(parent, id=self.external_links[url], tooltip=tooltip)
-        return parent
+            return self.external_links[url], True
+        if purl.scheme:
+            self.log.warning('Ignoring hyperlink with href (%s) with '
+                             'unsupported scheme', url)
+        return None
+
+    def serialize_hyperlink(self, parent, link):
+        target = self.link_target(link)
+        if target is None:
+            return parent
+        dest, is_external = target
+        kw = {'r_id': dest} if is_external else {'w_anchor': dest}
+        tooltip = link[2]
+        if tooltip:
+            kw['w_tooltip'] = tooltip
+        return self.namespace.makeelement(parent, 'w:hyperlink', **kw)
+
+    def serialize_drawing_link(self, drawing, link):
+        # Word ignores <w:hyperlink> around floating images, so link the image
+        # itself, the way Word does
+        target = self.link_target(link)
+        if target is None:
+            return
+        dest, is_external = target
+        rid = dest if is_external else self.document_relationships.add_relationship('#' + dest, self.namespace.names['LINKS'])
+        kw = {'r_id': rid}
+        tooltip = link[2]
+        if tooltip:
+            kw['tooltip'] = tooltip
+        # Word puts the link on both the drawing and the picture properties
+        for pr in self.namespace.XPath('descendant::wp:docPr | descendant::pic:cNvPr')(drawing):
+            pr.insert(0, self.namespace.makeelement(pr, 'a:hlinkClick', append=False, **kw))
 
     def process_toc_node(self, toc, level=0):
         href = toc.href

@@ -107,7 +107,22 @@ def read_underline(parent, dest, XPath, get):
     for col in XPath('./w:u[@w:val]')(parent):
         val = get(col, 'w:val')
         if val:
-            ans = val if val == 'none' else 'underline'
+            style = {
+                'dotted': 'dotted', 'dash': 'dashed',
+                'dashDotDotHeavy': 'dotted', 'dashDotHeavy': 'dashed',
+                'dashedHeavy': 'dashed', 'dashLong': 'dashed',
+                'dashLongHeavy': 'dashed', 'dotDash': 'dotted',
+                'dotDotDash': 'dotted', 'dottedHeavy': 'dotted',
+                'double': 'double', 'none': 'none', 'single': 'solid',
+                'thick': 'solid', 'wave': 'wavy', 'wavyDouble': 'wavy',
+                'wavyHeavy': 'wavy', 'words': 'solid'}.get(val, 'solid')
+            if style == 'none':
+                ans = 'none'
+            else:
+                ans = 'underline ' + style
+                color = get(col, 'w:color')
+                if color and color != 'auto':
+                    ans += ' #' + color
     setattr(dest, 'text_decoration', ans)
 
 
@@ -296,4 +311,9 @@ class RunStyle(object):
         return self._css
 
     def same_border(self, other):
-        return self.get_border_css({}) == other.get_border_css({})
+        # get_border_css() fills its argument and returns None, so the
+        # dicts must be compared, not the return values
+        a, b = {}, {}
+        self.get_border_css(a)
+        other.get_border_css(b)
+        return a == b

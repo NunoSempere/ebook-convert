@@ -7,7 +7,8 @@ import urllib.parse
 from lxml import etree
 
 from ebook_convert.ebooks.docx.images import pt_to_emu
-from ebook_convert.ebooks.oeb.base import urlnormalize
+from ebook_convert.ebooks.docx.names import SVG_BLIP_URI, USE_LOCAL_DPI_URI
+from ebook_convert.ebooks.oeb.base import urlnormalize, urlquote
 from ebook_convert.utils.filenames import ascii_filename
 from ebook_convert.utils import img as uimg
 from ebook_convert.utils.imghdr import identify
@@ -24,6 +25,15 @@ def as_num(x):
     return 0
 
 
+def blank_png():
+    # A 1x1 transparent PNG used to replace images that cannot be decoded
+    import io
+    from PIL import Image as PILImage
+    buf = io.BytesIO()
+    PILImage.new('RGBA', (1, 1), (0, 0, 0, 0)).save(buf, 'PNG')
+    return buf.getvalue()
+
+
 def get_image_margins(style):
     ans = {}
     for edge in 'Left Right Top Bottom'.split():
@@ -34,33 +44,58 @@ def get_image_margins(style):
 
 class ImagesManager(object):
 
-    def __init__(self, oeb, document_relationships, opts):
+    def __init__(self, oeb, document_relationships, opts, svg_rasterizer=None):
         self.oeb, self.log = oeb, oeb.log
+        self.svg_rasterizer = svg_rasterizer
         self.page_width, self.page_height = opts.output_profile.width_pts, opts.output_profile.height_pts
         self.images = {}
         self.seen_filenames = set()
         self.document_relationships = document_relationships
         self.count = 0
+        self.svg_images = {}
+
+    def abshref(self, x):
+        return x
+
+    def read_svg(self, href):
+        if href not in self.svg_images:
+            item = self.oeb.manifest.hrefs.get(href) or self.oeb.manifest.hrefs.get(urlquote(href))
+            if item is None:
+                self.log.warning('Failed to find image: %s', href)
+                return None
+            image_fname = 'media/' + self.create_filename(href, 'svg')
+            image_rid = self.document_relationships.add_image(image_fname)
+            self.svg_images[href] = Image(image_rid, image_fname, -1, -1, 'svg', item)
+        return self.svg_images[href]
 
     def read_image(self, href):
         if href not in self.images:
-            item = self.oeb.manifest.hrefs.get(href)
-            if item is None or not isinstance(item.data, bytes):
-                return
+            item = self.oeb.manifest.hrefs.get(href) or self.oeb.manifest.hrefs.get(urlquote(href))
+            try:
+                if item is None or not isinstance(item.data, bytes):
+                    self.log.warning('Failed to find image: %s', href)
+                    return None
+            except FileNotFoundError:
+                # The manifest item points to a file that does not exist
+                self.log.warning('Failed to find image: %s', href)
+                return None
             try:
                 fmt, width, height = identify(item.data)
+                if fmt is None:
+                    raise ValueError('Unknown image format')
             except Exception:
                 self.log.warning('Replacing corrupted image with blank: %s',
                                  href)
-                item.data = I('blank.png', data=True, allow_user_override=False)
-                fmt, width, height = identify(item.data)
+                item.data = blank = blank_png()
+                fmt, width, height = identify(blank)
+                fmt = fmt or 'png'
             image_fname = 'media/' + self.create_filename(href, fmt)
             image_rid = self.document_relationships.add_image(image_fname)
             self.images[href] = Image(image_rid, image_fname, width, height, fmt, item)
             item.unload_data_from_memory()
         return self.images[href]
 
-    def add_image(self, img, block, stylizer, bookmark=None, as_block=False):
+    def add_image(self, img, block, stylizer, bookmark=None, as_block=False, link=None):
         src = img.get('src')
         if not src:
             return
@@ -69,12 +104,21 @@ class ImagesManager(object):
             rid = self.read_image(href).rid
         except AttributeError:
             return
-        drawing = self.create_image_markup(img, stylizer, href, as_block=as_block)
-        block.add_image(drawing, bookmark=bookmark)
+        drawing, floating = self.create_image_markup(img, stylizer, href, as_block=as_block)
+        block.add_image(drawing, bookmark=bookmark, link=link, floating=floating)
         return rid
 
     def create_image_markup(self, html_img, stylizer, href, as_block=False):
-        # TODO: img inside a link (clickable image)
+        ''' Return the <w:drawing> for the image and whether it is floating '''
+        svg_rid = ''
+        # Embed the SVG original next to its rasterized form when the
+        # rasterizer tracks it, modern Word renders the SVG
+        svg_originals = getattr(self.svg_rasterizer, 'svg_originals', None) or {}
+        svghref = svg_originals.get(href)
+        if svghref:
+            si = self.read_svg(svghref)
+            if si:
+                svg_rid = si.rid
         style = stylizer.style(html_img)
         floating = style['float']
         if floating not in {'left', 'right'}:
@@ -135,10 +179,10 @@ class ImagesManager(object):
                 makeelement(parent, 'wp:wrapTopAndBottom')
             else:
                 makeelement(parent, 'wp:wrapSquare', wrapText='bothSides')
-        self.create_docx_image_markup(parent, name, html_img.get('alt') or name, img.rid, width, height)
-        return ans
+        self.create_docx_image_markup(parent, name, html_img.get('alt') or name, img.rid, width, height, svg_rid=svg_rid)
+        return ans, floating is not None
 
-    def create_docx_image_markup(self, parent, name, alt, img_rid, width, height):
+    def create_docx_image_markup(self, parent, name, alt, img_rid, width, height, svg_rid=''):
         makeelement, namespaces = self.document_relationships.namespace.makeelement, self.document_relationships.namespace.namespaces
         makeelement(parent, 'wp:docPr', id=str(self.count), name=name, descr=alt)
         makeelement(makeelement(parent, 'wp:cNvGraphicFramePr'), 'a:graphicFrameLocks', noChangeAspect="1")
@@ -149,7 +193,11 @@ class ImagesManager(object):
         makeelement(nvPicPr, 'pic:cNvPr', id='0', name=name, descr=alt)
         makeelement(nvPicPr, 'pic:cNvPicPr')
         bf = makeelement(pic, 'pic:blipFill')
-        makeelement(bf, 'a:blip', r_embed=img_rid)
+        blip = makeelement(bf, 'a:blip', r_embed=img_rid)
+        if svg_rid:
+            ext_list = makeelement(blip, 'a:extLst')
+            makeelement(makeelement(ext_list, 'a:ext', uri=USE_LOCAL_DPI_URI), 'a14:useLocalDpi', val='0')
+            makeelement(makeelement(ext_list, 'a:ext', uri=SVG_BLIP_URI), 'asvg:svgBlip', r_embed=svg_rid)
         makeelement(makeelement(bf, 'a:stretch'), 'a:fillRect')
         spPr = makeelement(pic, 'pic:spPr')
         xfrm = makeelement(spPr, 'a:xfrm')
@@ -173,6 +221,14 @@ class ImagesManager(object):
         for img in self.images.values():
             images_map['word/' + img.fname] = functools.partial(self.get_data,
                                                                 img.item)
+
+        def get_svg_data(img):
+            # Bind img per entry, a lambda would serialize the last SVG for
+            # every image (b3a19a0afc)
+            return img.item.bytes_representation
+
+        for img in self.svg_images.values():
+            images_map['word/' + img.fname] = functools.partial(get_svg_data, img)
 
     def get_data(self, item):
         try:

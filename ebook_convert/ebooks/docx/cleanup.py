@@ -109,10 +109,22 @@ def wrap_contents(tag_name, elem):
     elem.append(wrapper)
 
 
-def cleanup_markup(log, root, styles, dest_dir, detect_cover, XPath):
+def cleanup_markup(log, root, styles, dest_dir, detect_cover, XPath, uuid):
     # Apply vertical-align
     for span in root.xpath('//span[@data-docx-vert]'):
         wrap_contents(span.attrib.pop('data-docx-vert'), span)
+
+    # Keep adjacent footnote references apart with a non-breaking space
+    for span in root.xpath('//*[@data-noteref-container="%s"]' % uuid):
+        span.attrib.pop('data-noteref-container')
+        parent = span.getparent()
+        idx = parent.index(span)
+        if idx + 1 < len(parent):
+            ns = parent[idx + 1]
+            if (len(ns) and hasattr(ns, 'get') and
+                    ns.get('data-noteref-container')):
+                if len(span) and not span[-1].tail:
+                    span[-1].tail = NBSP
 
     # Move <hr>s outside paragraphs, if possible.
     pancestor = XPath('|'.join('ancestor::%s[1]' % x for x in ('p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6')))

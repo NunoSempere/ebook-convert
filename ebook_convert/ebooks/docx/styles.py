@@ -329,7 +329,7 @@ class Styles(object):
     def cascade(self, layers):
         self.body_font_family = 'serif'
         self.body_font_size = '10pt'
-        self.body_color = 'black'
+        self.body_color = 'currentColor'
 
         def promote_property(char_styles, block_style, prop):
             vals = {getattr(s, prop) for s in char_styles}
@@ -355,10 +355,13 @@ class Styles(object):
                     # The default text decoration is 'none'
                     s.text_decoration = inherit
 
-        def promote_most_common(block_styles, prop, default):
+        def promote_most_common(block_styles, prop, default,
+                                inherit_means=None):
             c = Counter()
             for s in block_styles:
                 val = getattr(s, prop)
+                if val is inherit and inherit_means is not None:
+                    val = inherit_means
                 if val is not inherit:
                     c[val] += 1
             val = None
@@ -366,6 +369,8 @@ class Styles(object):
                 val = c.most_common(1)[0][0]
                 for s in block_styles:
                     oval = getattr(s, prop)
+                    if oval is inherit and inherit_means is not None:
+                        oval = inherit_means
                     if oval is inherit:
                         if default != val:
                             setattr(s, prop, default)
@@ -383,7 +388,8 @@ class Styles(object):
         if fs is not None:
             self.body_font_size = '%.3gpt' % fs
 
-        color = promote_most_common(block_styles, 'color', self.body_color)
+        color = promote_most_common(block_styles, 'color', self.body_color,
+                                    inherit_means='currentColor')
         if color is not None:
             self.body_color = color
 
@@ -445,15 +451,14 @@ class Styles(object):
         ef = self.fonts.embed_fonts(dest_dir, docx)
 
         s = '''\
-            body { font-family: %s; font-size: %s; color: %s }
+            body { font-family: %s; font-size: %s; %s }
 
             /* In word all paragraphs have zero margins unless explicitly specified in a style */
             p, h1, h2, h3, h4, h5, h6, div { margin: 0; padding: 0 }
             /* In word headings only have bold font if explicitly specified,
                 similarly the font size is the body font size, unless explicitly set. */
             h1, h2, h3, h4, h5, h6 { font-weight: normal; font-size: 1rem }
-            /* Setting padding-left to zero breaks rendering of lists, so we only set the other values to zero and leave padding-left for the user-agent */
-            ul, ol { margin: 0; padding-top: 0; padding-bottom: 0; padding-right: 0 }
+            ul, ol { margin: 0; padding: 0; padding-inline-start: 0; padding-inline-end: 0; margin-block-start: 0; margin-block-end: 0 }
 
             /* The word hyperlink styling will set text-decoration to underline if needed */
             a { text-decoration: none }
@@ -488,7 +493,10 @@ class Styles(object):
                sub { vertical-align: bottom }
                '''
 
-        prefix = textwrap.dedent(s) % (self.body_font_family, self.body_font_size, self.body_color)
+        body_color = ''
+        if self.body_color.lower() not in ('currentcolor', 'inherit'):
+            body_color = 'color: %s;' % self.body_color
+        prefix = textwrap.dedent(s) % (self.body_font_family, self.body_font_size, body_color)
         if ef:
             prefix = ef + '\n' + prefix
 

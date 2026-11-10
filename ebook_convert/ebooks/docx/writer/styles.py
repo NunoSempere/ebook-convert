@@ -193,6 +193,30 @@ LINE_STYLES = {
 }
 
 
+def convert_underline(items):
+    ''' Map the tokens of a CSS text-decoration value to a DOCX underline,
+    returned as "<w:u val> <w:u color>" or '' when there is no underline '''
+    # ST_Underline has no "solid", the plain underline is "single"
+    style = 'single'
+    has_underline = False
+    color = 'auto'
+    for x in items:
+        if x in {'solid', 'double', 'dotted', 'dashed', 'wavy'}:
+            style = {'solid': 'single', 'wavy': 'wave', 'dashed': 'dash'}.get(x, x)
+        elif x in {'underline', 'overline', 'line-through', 'blink', 'none'}:
+            if x == 'underline':
+                has_underline = True
+            elif x == 'none':
+                has_underline = False
+        else:
+            c = convert_color(x)
+            if c is not None:
+                color = c
+    if has_underline:
+        return style + ' ' + color
+    return ''
+
+
 class TextStyle(DOCXStyle):
 
     ALL_PROPS = ('font_family', 'font_size', 'bold', 'italic', 'color',
@@ -214,7 +238,7 @@ class TextStyle(DOCXStyle):
         self.color = convert_color(css['color'])
         self.background_color = None if is_parent_style else convert_color(css.backgroundColor)
         td = set((css.effective_text_decoration or '').split())
-        self.underline = 'underline' in td
+        self.underline = convert_underline(td)
         self.dstrike = 'line-through' in td and 'overline' in td
         self.strike = not self.dstrike and 'line-through' in td
         self.text_transform = css['text-transform']  # TODO: If lowercase or capitalize, transform the actual text
@@ -304,7 +328,7 @@ class TextStyle(DOCXStyle):
     def serialize_properties(self, rPr, normal_style):
         makeelement = self.makeelement
         is_normal_style = self is normal_style
-        if is_normal_style or self.font_family != normal_style.font_family:
+        if self.font_family is not None and (is_normal_style or self.font_family != normal_style.font_family):
             rPr.append(makeelement(
                 rPr, 'rFonts', **{k:self.font_family for k in 'ascii cs eastAsia hAnsi'.split()}))
 
@@ -323,7 +347,11 @@ class TextStyle(DOCXStyle):
         if check_attr('background_color'):
             rPr.append(makeelement(rPr, 'shd', fill=self.background_color or 'auto'))
         if check_attr('underline'):
-            rPr.append(makeelement(rPr, 'u', val='single' if self.underline else 'none'))
+            style, color = self.underline.partition(' ')[::2] if self.underline else ('none', 'auto')
+            if color and color != 'auto':
+                rPr.append(makeelement(rPr, 'u', val=style, color=color))
+            else:
+                rPr.append(makeelement(rPr, 'u', val=style))
         if check_attr('dstrike'):
             rPr.append(makeelement(rPr, 'dstrike', val=bmap(self.dstrike)))
         if check_attr('strike'):
@@ -367,7 +395,7 @@ class DescendantTextStyle(object):
             pval, cval = vals(attr)
             return pval != cval
 
-        if parent_style.font_family != child_style.font_family:
+        if child_style.font_family is not None and parent_style.font_family != child_style.font_family:
             add('rFonts', **{k:child_style.font_family for k in 'ascii cs eastAsia hAnsi'.split()})
 
         for name, attr in (('sz', 'font_size'), ('b', 'bold'), ('i', 'italic')):
@@ -382,7 +410,11 @@ class DescendantTextStyle(object):
         if check('background_color'):
             add('shd', fill=child_style.background_color or 'auto')
         if check('underline'):
-            add('u', val='single' if child_style.underline else 'none')
+            if not child_style.underline:
+                add('u', val='none')
+            else:
+                style, color = child_style.underline.partition(' ')[::2]
+                add('u', val=style, color=color or 'auto')
         if check('dstrike'):
             add('dstrike', val=bmap(child_style.dstrike))
         if check('strike'):
@@ -505,12 +537,13 @@ class BlockStyle(DOCXStyle):
                 self.line_height = max(0, int(css.lineHeight * 20))
             except (TypeError, ValueError):
                 self.line_height = max(0, int(1.2 * css.fontSize * 20))
-            self.background_color = None if is_table_cell else convert_color(css['background-color'])
+            self.background_color = None if is_table_cell else convert_color(css.backgroundColor)
             if not is_table_cell and self.background_color is None:
                 self.background_color = parent_bg
             try:
-                ws = css['white-space'].lower()
-                preserve_whitespace = ws in {'pre', 'pre-wrap'}
+                ws = css['white-space']
+                # a non-str value has no lower() and so does not preserve whitespace
+                preserve_whitespace = isinstance(ws, str) and ws.lower() in {'pre', 'pre-wrap'}
             except Exception:
                 preserve_whitespace = False
             try:
