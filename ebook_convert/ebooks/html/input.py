@@ -76,6 +76,7 @@ class HTMLFile(object):
     '''
 
     HTML_PAT = re.compile(r'<\s*html', re.IGNORECASE)
+    HTML_PAT_BIN = re.compile(rb'<\s*html', re.IGNORECASE)
     TITLE_PAT = re.compile('<title>([^<>]+)</title>', re.IGNORECASE)
     LINK_PAT = re.compile(r'<\s*a\s+.*?href\s*=\s*(?:(?:"(?P<url1>[^"]+)")|'
                           r'(?:\'(?P<url2>[^\']+)\')|(?P<url3>[^\s>]+))',
@@ -101,12 +102,17 @@ class HTMLFile(object):
                 encoding = detect_xml_encoding(src)[1]
                 if encoding:
                     try:
-                        header = header.decode(encoding)
+                        # Calibre efee7be50d: the 4096 byte header may end
+                        # in the middle of a multibyte sequence
+                        header = header.decode(encoding, errors='replace')
                     except ValueError:
                         pass
-                self.is_binary = level > 0 and not bool(self
-                                                        .HTML_PAT
-                                                        .search(header))
+                self.is_binary = False
+                if level > 0:
+                    if isinstance(header, bytes):
+                        self.is_binary = not bool(self.HTML_PAT_BIN.search(header))
+                    else:
+                        self.is_binary = not bool(self.HTML_PAT.search(header))
                 if not self.is_binary:
                     src += f.read()
         except IOError as err:
@@ -167,25 +173,32 @@ class HTMLFile(object):
         return Link(url, self.base)
 
 
-def depth_first(root, flat, visited=None):
+def depth_first(root, flat):
+    # Calibre 4656e79cba: use a stack rather than recursion so that deeply
+    # nested input does not run out of stack space
     yield root
-    if visited is None:
-        visited = set()
+    visited = set()
     visited.add(root)
-    for link in root.links:
-        if link.path is not None and link not in visited:
-            try:
-                index = flat.index(link)
-            except ValueError:  # Can happen if max_levels is used
-                continue
-            hf = flat[index]
-            if hf not in visited:
-                yield hf
-                visited.add(hf)
-                for hf in depth_first(hf, flat, visited):
-                    if hf not in visited:
-                        yield hf
-                        visited.add(hf)
+    from collections import deque
+    stack = deque()
+
+    def add_links_from(item):
+        for link in reversed(item.links):
+            if link.path is not None and link not in visited:
+                stack.appendleft(link)
+
+    add_links_from(root)
+    while stack:
+        link = stack.popleft()
+        try:
+            index = flat.index(link)
+        except ValueError:  # Can happen if max_levels is used
+            continue
+        hf = flat[index]
+        if hf not in visited:
+            yield hf
+            visited.add(hf)
+            add_links_from(hf)
 
 
 def traverse(path_to_html_file, max_levels=sys.maxsize, verbose=0,
@@ -228,12 +241,7 @@ def traverse(path_to_html_file, max_levels=sys.maxsize, verbose=0,
                 hf.links.remove(link)
 
         next_level = list(nl)
-    orec = sys.getrecursionlimit()
-    sys.setrecursionlimit(500000)
-    try:
-        return flat, list(depth_first(flat[0], flat))
-    finally:
-        sys.setrecursionlimit(orec)
+    return flat, list(depth_first(flat[0], flat))
 
 
 def get_filelist(htmlfile, dir, opts, log):

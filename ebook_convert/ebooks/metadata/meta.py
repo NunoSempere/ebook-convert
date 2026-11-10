@@ -130,7 +130,12 @@ def metadata_from_filename(name, pat=None, fallback_pat=None):
     name = name.rpartition('.')[0]
     mi = MetaInformation(None, None)
     if pat is None:
-        pat = re.compile(prefs.get('filename_pattern'))
+        # Calibre 019f1c8fb2 / 8757d4e775: fall back to the default pattern
+        # when the configured one does not compile
+        try:
+            pat = re.compile(prefs.get('filename_pattern'))
+        except Exception:
+            pat = re.compile(r'(?P<title>.+) - (?P<author>[^_]+)')
     name = name.replace('_', ' ')
     match = pat.search(name)
     if match is None and fallback_pat is not None:
@@ -207,8 +212,12 @@ def opf_metadata(opfpath):
         if opf.application_id is not None:
             mi = opf.to_book_metadata()
             if hasattr(opf, 'cover') and opf.cover:
-                cpath = os.path.join(os.path.dirname(opfpath), opf.cover)
-                if os.access(cpath, os.R_OK):
+                from ebook_convert.utils.filenames import is_existing_subpath
+                base = os.path.dirname(opfpath)
+                cpath = os.path.join(base, opf.cover)
+                # Only read covers inside the OPF's directory, to prevent
+                # a malicious OPF from reading arbitrary files (ee11524b2e)
+                if is_existing_subpath(cpath, base) and os.access(cpath, os.R_OK):
                     fmt = cpath.rpartition('.')[-1]
                     with open(cpath, 'rb') as f:
                         data = f.read()

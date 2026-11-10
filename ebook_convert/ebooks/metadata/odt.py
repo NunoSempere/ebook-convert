@@ -55,6 +55,14 @@ fields = {
 }
 
 
+def uniq(vals):
+    ''' Remove all duplicates from vals, while preserving order.  '''
+    vals = vals or ()
+    seen = set()
+    seen_add = seen.add
+    return list(x for x in vals if x not in seen and not seen_add(x))
+
+
 def get_metadata(stream, extract_cover=True):
     whitespace = re.compile(r'\s+')
 
@@ -71,6 +79,11 @@ def get_metadata(stream, extract_cover=True):
             if ans:
                 return normalize(tostring(ans[0], method='text', encoding='unicode', with_tail=False)).strip()
 
+        def find_all(field):
+            ns, tag = fields[field]
+            for x in root.xpath('//ns0:{}'.format(tag), namespaces={'ns0': ns}):
+                yield normalize(tostring(x, method='text', encoding='unicode', with_tail=False)).strip()
+
         mi = MetaInformation(None, [])
         title = find('title')
         if title:
@@ -84,9 +97,12 @@ def get_metadata(stream, extract_cover=True):
         lang = find('language')
         if lang and canonicalize_lang(lang):
             mi.languages = [canonicalize_lang(lang)]
-        kw = find('keyword') or find('keywords')
-        if kw:
-            mi.tags = [x.strip() for x in kw.split(',') if x.strip()]
+        # Calibre 2b41671370: tags may be spread over several <keyword>s
+        keywords = []
+        for q in ('keyword', 'keywords'):
+            for kw in find_all(q):
+                keywords += [x.strip() for x in kw.split(',') if x.strip()]
+        mi.tags = uniq(keywords)
         data = {}
         for tag in root.xpath('//ns0:user-defined', namespaces={'ns0': fields['user-defined'][0]}):
             name = (tag.get('{%s}name' % METANS) or '').lower()

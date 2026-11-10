@@ -154,18 +154,40 @@ def get_title_sort_pat(lang=None):
     return ans
 
 
-_ignore_starts = '\'"'+''.join(chr(x) for x in
-                               list(range(0x2018, 0x201e))+[0x2032, 0x2033])
+quote_pairs = {
+    # https://en.wikipedia.org/wiki/Quotation_mark
+    '"': ('"',),
+    "'": ("'",),
+    '\u201c': ('\u201d', '\u201c'),
+    '\u201d': ('\u201d', '\u201d'),
+    '\u201e': ('\u201d', '\u201c'),
+    '\u201a': ('\u2019', '\u2018'),
+    '\u2019': ('\u2019', '\u2018'),
+    '\u2018': ('\u2019', '\u2018'),
+    '\u2039': ('\u203a',),
+    '\u203a': ('\u2039',),
+    '\u300a': ('\u300b',),
+    '\u3008': ('\u3009',),
+    '\xbb': ('\xab', '\xbb'),
+    '\xab': ('\xab', '\xbb'),
+    '\u300c': ('\u300d',),
+    '\u300e': ('\u300f',),
+}
 
 
 def title_sort(title, order=None, lang=None):
+    # Calibre 815cd507b9: strip leading and trailing quotes, not just
+    # leading quotes
     if order is None:
         order = tweaks['title_series_sorting']
     title = title.strip()
     if order == 'strictly_alphabetic':
         return title
-    if title and title[0] in _ignore_starts:
+    if title and title[0] in quote_pairs:
+        q = title[0]
         title = title[1:]
+        if title and title[-1] in quote_pairs[q]:
+            title = title[:-1]
     match = get_title_sort_pat(lang).search(title)
     if match:
         try:
@@ -173,9 +195,13 @@ def title_sort(title, order=None, lang=None):
         except IndexError:
             pass
         else:
-            title = title[len(prep):] + ', ' + prep
-            if title[0] in _ignore_starts:
-                title = title[1:]
+            if prep:
+                title = title[len(prep):] + ', ' + prep
+                if title[0] in quote_pairs:
+                    q = title[0]
+                    title = title[1:]
+                    if title and title[-1] in quote_pairs[q]:
+                        title = title[:-1]
     return title.strip()
 
 
@@ -383,18 +409,44 @@ def check_isbn13(isbn):
     return None
 
 
-def check_isbn(isbn):
+def check_digit_for_isbn13(isbn):
+    check = 10 - sum((1 if i % 2 == 0 else 3) * int(isbn[i]) for i in range(12)) % 10
+    if check == 10:
+        check = 0
+    return str(check)
+
+
+def check_isbn(isbn, simple_sanitize=False):
     if not isbn:
         return None
-    isbn = re.sub(r'[^0-9X]', '', isbn.upper())
+    if simple_sanitize:
+        isbn = isbn.upper().replace('-', '').strip().replace(' ', '')
+    else:
+        isbn = re.sub(r'[^0-9X]', '', isbn.upper())
+    il = len(isbn)
+    if il not in (10, 13):
+        return None
     all_same = re.match(r'(\d)\1{9,12}$', isbn)
     if all_same is not None:
         return None
-    if len(isbn) == 10:
-        return check_isbn10(isbn)
-    if len(isbn) == 13:
-        return check_isbn13(isbn)
+    if il == 10:
+        return isbn if check_isbn10(isbn) else None
+    if il == 13:
+        return isbn if check_isbn13(isbn) else None
     return None
+
+
+def normalize_isbn(isbn):
+    ''' Return the ISBN-13 form of a valid ISBN, or the input unchanged '''
+    if not isbn:
+        return isbn
+    ans = check_isbn(isbn)
+    if ans is None:
+        return isbn
+    if len(ans) == 10:
+        ans = '978' + ans[:9]
+        ans += check_digit_for_isbn13(ans)
+    return ans
 
 
 def check_issn(issn):

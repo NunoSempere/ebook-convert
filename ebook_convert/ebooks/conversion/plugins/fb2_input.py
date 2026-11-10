@@ -57,6 +57,15 @@ class FB2Input(InputFormatPlugin):
         doc = ensure_namespace(doc)
         try:
             fb_ns = doc.nsmap[doc.prefix]
+            # Calibre f1cc419090: only known namespaces may be injected
+            # into the stylesheet. Unknown ones (FB2.2, typos) are rewritten
+            # to the FB2 namespace so that the content still converts.
+            if fb_ns not in (FB2NS, FB21NS):
+                prefix = '{%s}' % fb_ns
+                for elem in doc.iter():
+                    if isinstance(elem.tag, str) and elem.tag.startswith(prefix):
+                        elem.tag = '{%s}%s' % (FB2NS, elem.tag[len(prefix):])
+                fb_ns = FB2NS
         except Exception:
             fb_ns = FB2NS
 
@@ -124,11 +133,18 @@ class FB2Input(InputFormatPlugin):
         for img in result.xpath('//img[@src]'):
             src = img.get('src')
             img.set('src', self.binary_map.get(src, src))
-        index = transform.tostring(result)
+
+        # make paragraphs <p> tags (Calibre 170a6fd64f, a9b4c3f4db)
+        has_block_elements = etree.XPath('descendant::*[name()="div" or name()="table"]')
+        for divp in result.xpath('//body/div[@class="paragraph"]'):
+            if not has_block_elements(divp):
+                divp.tag = 'p'
+
+        index = str(result)
         with open('index.xhtml', 'wb') as f:
             f.write(index.encode('utf-8'))
         with open('inline-styles.css', 'wb') as f:
-            f.write(css.encode('utf-8'))
+            f.write(css.encode('utf-8') or b' ')
         stream.seek(0)
         mi = get_metadata(stream, 'fb2')
         if not mi.title:
@@ -164,17 +180,24 @@ class FB2Input(InputFormatPlugin):
 
     def extract_embedded_content(self, doc):
         from ebook_convert.ebooks.fb2 import base64_decode
+        from ebook_convert.utils.filenames import sanitize_file_name
         self.binary_map = {}
         for elem in doc.xpath('./*'):
-            if elem.text and 'binary' in elem.tag and 'id' in elem.attrib:
-                ct = elem.get('content-type', '')
-                fname = elem.attrib['id']
-                ext = ct.rpartition('/')[-1].lower()
-                if ext in ('png', 'jpeg', 'jpg'):
-                    if fname.lower().rpartition('.')[-1] not in {'jpg', 'jpeg',
-                                                                 'png'}:
-                        fname += '.' + ext
-                    self.binary_map[elem.get('id')] = fname
+            if elem.text and 'binary' in elem.tag and elem.get('id', ''):
+                ct = elem.get('content-type', '').lower()
+                # Calibre c2a783c875: binaries are written beside the
+                # content with a sanitised name, never outside the directory
+                fname = sanitize_file_name(elem.get('id'))
+                if ct.startswith('image/'):
+                    ext = mimetypes.guess_extension(ct)
+                    if ext:
+                        if ext.lower() in ('.jpe', '.jpeg'):
+                            ext = '.jpg'
+                        known = (ext, '.jpeg') if ext == '.jpg' else (ext,)
+                        if not fname.lower().endswith(known):
+                            fname += ext
+                        fname = sanitize_file_name(fname)
+                        self.binary_map[elem.get('id')] = fname
                 raw = elem.text.strip()
                 try:
                     data = base64_decode(raw)

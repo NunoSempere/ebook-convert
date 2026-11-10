@@ -41,8 +41,13 @@ BOOK_EXTENSIONS = ['lrf', 'rar', 'zip', 'rtf', 'lit', 'txt', 'txtz', 'text',
                    'kpf']
 
 
-def return_raster_image(path):
+def return_raster_image(path, root=''):
+    from ebook_convert.utils.filenames import is_existing_subpath
     from ebook_convert.utils.imghdr import what
+    # Only read images inside root, to prevent malicious HTML from reading
+    # arbitrary files (Calibre ee11524b2e)
+    if root and not is_existing_subpath(path, root):
+        return None
     if os.access(path, os.R_OK):
         with open(path, 'rb') as f:
             raw = f.read()
@@ -50,20 +55,21 @@ def return_raster_image(path):
             return raw
 
 
-def extract_cover_from_embedded_svg(html, base, log):
+def extract_cover_from_embedded_svg(html, base, log, root=''):
     from ebook_convert.ebooks.oeb.base import XPath, SVG, XLINK
-    root = etree.fromstring(html)
+    from ebook_convert.utils.xml_parse import safe_xml_fromstring
+    doc = safe_xml_fromstring(html)
 
-    svg = XPath('//svg:svg')(root)
+    svg = XPath('//svg:svg')(doc)
     if len(svg) == 1 and len(svg[0]) == 1 and svg[0][0].tag == SVG('image'):
         image = svg[0][0]
         href = image.get(XLINK('href'), None)
         if href:
             path = os.path.join(base, *href.split('/'))
-            return return_raster_image(path)
+            return return_raster_image(path, root or base)
 
 
-def extract_calibre_cover(raw, base, log):
+def extract_calibre_cover(raw, base, log, root=''):
     from ebook_convert.ebooks.BeautifulSoup import BeautifulSoup
     soup = BeautifulSoup(raw)
     matches = soup.find(name=['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'span',
@@ -73,7 +79,7 @@ def extract_calibre_cover(raw, base, log):
             images[0].get('alt', '').lower() == 'cover'):
         img = images[0]
         img = os.path.join(base, *img['src'].split('/'))
-        q = return_raster_image(img)
+        q = return_raster_image(img, root or base)
         if q is not None:
             return q
 
@@ -88,10 +94,10 @@ def extract_calibre_cover(raw, base, log):
             images = body.findAll('img', src=True)
             if len(images) == 1:
                 img = os.path.join(base, *images[0]['src'].split('/'))
-                return return_raster_image(img)
+                return return_raster_image(img, root or base)
 
 
-def render_html_svg_workaround(path_to_html, log, width=590, height=750):
+def render_html_svg_workaround(path_to_html, log, width=590, height=750, root=''):
     from ebook_convert.ebooks.oeb.base import SVG_NS
     with open(path_to_html, 'rb') as f:
         raw = f.read()
@@ -100,18 +106,22 @@ def render_html_svg_workaround(path_to_html, log, width=590, height=750):
     if SVG_NS in raw:
         try:
             data = extract_cover_from_embedded_svg(
-                raw, os.path.dirname(path_to_html), log)
+                raw, os.path.dirname(path_to_html), log, root=root)
         except Exception:
             pass
     if data is None:
         try:
             data = extract_calibre_cover(raw, os.path.dirname(path_to_html),
-                                         log)
+                                         log, root=root)
         except Exception:
             pass
 
     if data is None:
-        data = render_html_data(path_to_html, width, height)
+        try:
+            data = render_html_data(path_to_html, width, height)
+        except ImportError:
+            # no Qt/worker based HTML renderer in this fork
+            data = None
     return data
 
 

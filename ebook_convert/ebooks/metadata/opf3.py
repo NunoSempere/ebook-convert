@@ -1,5 +1,6 @@
 import collections
 import functools
+from operator import attrgetter
 import json
 import re
 
@@ -237,11 +238,14 @@ def parse_identifier(ident, val, refines):
     scheme = None
     lval = val.lower()
 
-    def finalize(scheme, val):
+    def finalize(scheme, val, scheme_from_val=False):
         if not scheme or not val:
             return None, None
         scheme = scheme.lower()
         if scheme in ('http', 'https'):
+            if scheme_from_val:
+                # Calibre 9e19951df0: URL identifiers without the url: prefix
+                return 'url', scheme + ':' + val
             return None, None
         if scheme.startswith('isbn'):
             scheme = 'isbn'
@@ -269,7 +273,7 @@ def parse_identifier(ident, val, refines):
         val = val[4:]
 
     prefix, rest = val.partition(':')[::2]
-    return finalize(prefix, rest)
+    return finalize(prefix, rest, scheme_from_val=True)
 
 
 def read_identifiers(root, prefixes, refines):
@@ -363,10 +367,27 @@ def find_main_title(root, refines, remove_blanks=False):
     return main_title
 
 
+def find_subtitle(root, refines):
+    for title in XPath('./opf:metadata/dc:title')(root):
+        if not title.text or not title.text.strip():
+            continue
+        props = properties_for_id(title.get('id'), refines)
+        q = props.get('title-type') or ''
+        if 'subtitle' in q or 'sub-title' in q:
+            return title
+
+
 @simple_text
 def read_title(root, prefixes, refines):
     main_title = find_main_title(root, refines)
-    return None if main_title is None else main_title.text.strip()
+    if main_title is None:
+        return None
+    ans = main_title.text.strip()
+    # Calibre 61e2d4e175: append the subtitle to the main title
+    st = find_subtitle(root, refines)
+    if st is not None and st is not main_title:
+        ans += ': ' + st.text.strip()
+    return ans
 
 
 @simple_text
@@ -386,6 +407,9 @@ def read_title_sort(root, prefixes, refines):
 
 def set_title(root, prefixes, refines, title, title_sort=None):
     main_title = find_main_title(root, refines, remove_blanks=True)
+    st = find_subtitle(root, refines)
+    if st is not None:
+        remove_element(st, refines)
     if main_title is None:
         m = XPath('./opf:metadata')(root)[0]
         main_title = m.makeelement(oeb_base.tag('dc', 'title'))
@@ -433,7 +457,7 @@ def set_languages(root, prefixes, refines, languages):
 # Creator/Contributor {{{
 
 
-Author = collections.namedtuple('Author', 'name sort')
+Author = collections.namedtuple('Author', 'name sort seq')
 
 
 def is_relators_role(props, q):
@@ -450,6 +474,7 @@ def is_relators_role(props, q):
 
 def read_authors(root, prefixes, refines):
     roled_authors, unroled_authors = [], []
+    editors_map = {}
 
     def author(item, props, val):
         aus = None
@@ -457,8 +482,14 @@ def read_authors(root, prefixes, refines):
         if file_as:
             aus = file_as[0][-1]
         else:
-            aus = item.get(oeb_base.tag('opf', 'file_as')) or None
-        return Author(normalize_whitespace(val), normalize_whitespace(aus))
+            aus = item.get(oeb_base.tag('opf', 'file-as')) or None
+        seq = 0
+        ds = props.get('display-seq')
+        try:
+            seq = int(ds[0][-1])
+        except Exception:
+            pass
+        return Author(normalize_whitespace(val), normalize_whitespace(aus), seq)
 
     for item in XPath('./opf:metadata/dc:creator')(root):
         val = (item.text or '').strip()
@@ -470,24 +501,42 @@ def read_authors(root, prefixes, refines):
             if role:
                 if is_relators_role(props, 'aut'):
                     roled_authors.append(author(item, props, val))
+                if is_relators_role(props, 'edt'):
+                    # See https://bugs.launchpad.net/calibre/+bug/1950579
+                    a = author(item, props, val)
+                    editors_map[a.name] = a
             elif opf_role:
                 if opf_role.lower() == 'aut':
                     roled_authors.append(author(item, props, val))
             else:
                 unroled_authors.append(author(item, props, val))
 
-    return uniq(roled_authors or unroled_authors)
+    # Calibre eea263f744: editors are used when there are no authors, and
+    # the display-seq refinement orders them
+    if roled_authors or unroled_authors:
+        ans = uniq(roled_authors or unroled_authors)
+    else:
+        ans = uniq(editors_map.values())
+    ans.sort(key=attrgetter('seq'))
+    return ans
 
 
 def set_authors(root, prefixes, refines, authors):
     ensure_prefix(root, prefixes, 'marc')
-    for item in XPath('./opf:metadata/dc:creator')(root):
-        props = properties_for_id_with_scheme(item.get('id'), prefixes,
-                                              refines)
-        opf_role = item.get(oeb_base.tag('opf', 'role'))
-        if ((opf_role and opf_role.lower() != 'aut') or
-                (props.get('role') and not is_relators_role(props, 'aut'))):
-            continue
+    # Calibre 1e05b40f7a: when there are only editors, remove the editors
+    removals = []
+    for role in ('aut', 'edt'):
+        for item in XPath('./opf:metadata/dc:creator')(root):
+            props = properties_for_id_with_scheme(item.get('id'), prefixes,
+                                                  refines)
+            opf_role = item.get(oeb_base.tag('opf', 'role'))
+            if ((opf_role and opf_role.lower() != role) or
+                    (props.get('role') and not is_relators_role(props, role))):
+                continue
+            removals.append(item)
+        if removals:
+            break
+    for item in removals:
         remove_element(item, refines)
     metadata = XPath('./opf:metadata')(root)[0]
     for author in authors:
@@ -976,14 +1025,27 @@ def read_raster_cover(root, prefixes, refines):
         if href:
             return href
 
+    id_map = {item.get('id', ''): item for item in XPath(
+        './opf:manifest/opf:item[@id and @href and @media-type]')(root)}
+
     for item_id in XPath('./opf:metadata/opf:meta[@name="cover"]'
                          '/@content')(root):
-        for item in XPath('./opf:manifest/opf:item[@id and @href and '
-                          '@media-type]')(root):
-            if item.get('id') == item_id:
-                href = get_href(item)
-                if href:
-                    return href
+        item = id_map.get(item_id)
+        if item is not None:
+            href = get_href(item)
+            if href:
+                return href
+
+    # Calibre 03972f310f: "Open Manga Format" files have an image as the
+    # first item in the spine
+    images = ('image/jpeg', 'image/webp', 'image/png')
+    for item_id in XPath('./opf:spine/opf:itemref/@idref')(root):
+        item = id_map.get(item_id)
+        if item is not None and item.get('media-type') in images:
+            href = get_href(item)
+            if href:
+                return href
+        break
 
 
 def ensure_is_only_raster_cover(root, prefixes, refines,
@@ -1067,7 +1129,12 @@ def read_metadata(root, ver=None, return_extra_data=False):
                                                refines) or ans.user_categories
     for name, fm in (read_user_metadata(root, prefixes,
                                         refines) or {}).items():
-        ans.set_user_metadata(name, fm)
+        try:
+            ans.set_user_metadata(name, fm)
+        except Exception:
+            # Calibre a3c262cebe: invalid user metadata with empty keys
+            import traceback
+            traceback.print_exc()
     if return_extra_data:
         ans = (ans, ver, read_raster_cover(root, prefixes, refines),
                first_spine_item(root, prefixes, refines))
@@ -1102,7 +1169,7 @@ def apply_metadata(root, mi, cover_prefix='', cover_data=None,
     aus = string_to_authors(mi.author_sort or '')
     authors = []
     for i, aut in enumerate(mi.authors):
-        authors.append(Author(aut, aus[i] if i < len(aus) else None))
+        authors.append(Author(aut, aus[i] if i < len(aus) else None, 0))
     if authors or apply_null:
         set_authors(root, prefixes, refines, authors)
     if ok('pubdate'):
@@ -1115,10 +1182,12 @@ def apply_metadata(root, mi, cover_prefix='', cover_data=None,
         set_publisher(root, prefixes, refines, mi.publisher)
     if ok('tags'):
         set_tags(root, prefixes, refines, mi.tags)
-    if ok('rating') and mi.rating is not None and mi.rating > 0.1:
+    if ok('rating') and mi.rating is not None and float(mi.rating) > 0.1:
         set_rating(root, prefixes, refines, mi.rating)
     if ok('series'):
-        set_series(root, prefixes, refines, mi.series, mi.series_index or 1)
+        # Calibre 152af7ae51: a series index of zero must be kept
+        sidx = mi.series_index if isinstance(mi.series_index, (int, float)) else 1.0
+        set_series(root, prefixes, refines, mi.series, sidx)
     if ok('author_link_map'):
         set_author_link_map(root, prefixes, refines,
                             getattr(mi, 'author_link_map', None))

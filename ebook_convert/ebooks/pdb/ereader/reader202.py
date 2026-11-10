@@ -5,6 +5,7 @@ Makebook.
 import os
 import struct
 
+from ebook_convert.polyglot import as_unicode
 from ebook_convert.utils import directory
 from ebook_convert.ebooks.metadata.opf2 import OPFCreator
 from ebook_convert.ebooks.pdb.formatreader import FormatReader
@@ -66,6 +67,17 @@ class Reader202(FormatReader):
 
         return name, img
 
+    def image_dest(self, name, base):
+        # Calibre b6da1c3878: image names come from the file, keep them
+        # inside the images directory
+        base = os.path.abspath(base)
+        if not base.endswith(os.sep):
+            base += os.sep
+        ans = os.path.abspath(os.path.join(base, name))
+        if os.path.commonprefix([ans, base]) != base:
+            ans = ''
+        return ans
+
     def get_text_page(self, number):
         '''
         Only palmdoc compression is supported. The text is xored with 0xA5 and
@@ -105,12 +117,16 @@ class Reader202(FormatReader):
         if not os.path.exists(os.path.join(output_dir, 'images/')):
             os.makedirs(os.path.join(output_dir, 'images/'))
         images = []
-        with directory.CurrentDir(os.path.join(output_dir, 'images/')):
+        images_dir = os.path.join(output_dir, 'images')
+        with directory.CurrentDir(images_dir):
             for i in range(self.header_record.non_text_offset, len(self.sections)):
                 name, img = self.get_image(i)
-                if name:
+                # Calibre b7bb73e40e: the name is bytes in the file
+                name = as_unicode(name or b'')
+                dest = self.image_dest(name, images_dir) if name else ''
+                if dest:
                     images.append(name)
-                    with open(name, 'wb') as imgf:
+                    with open(dest, 'wb') as imgf:
                         self.log.debug('Writing image %s to images/', name)
                         imgf.write(img)
 
@@ -157,5 +173,8 @@ class Reader202(FormatReader):
         with directory.CurrentDir(output_dir):
             for i in range(0, self.header_record.num_image_pages):
                 name, img = self.get_image(self.header_record.image_data_offset + i)
-                with open(name, 'wb') as imgf:
-                    imgf.write(img)
+                name = as_unicode(name or b'')
+                dest = self.image_dest(name, output_dir) if name else ''
+                if dest:
+                    with open(dest, 'wb') as imgf:
+                        imgf.write(img)

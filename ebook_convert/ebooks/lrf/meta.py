@@ -19,6 +19,7 @@ from xml.dom import minidom
 import zlib
 
 from ebook_convert.ebooks.chardet import xml_to_unicode
+from ebook_convert.utils.cleantext import clean_xml_chars
 from ebook_convert.ebooks.metadata import MetaInformation, string_to_authors
 
 BYTE = "<B"  #: Unsigned char little endian encoded in 1 byte
@@ -404,7 +405,8 @@ class LRFMetaFile(object):
                 src = xml_to_unicode(src, strip_encoding_pats=True,
                                      resolve_entities=True,
                                      assume_utf8=True)[0]
-                return minidom.parseString(src)
+                # Calibre 8bc11e1d91: malformed meta blocks
+                return minidom.parseString(clean_xml_chars(src))
             except zlib.error:
                 raise LRFException("Unable to decompress document meta "
                                    "information")

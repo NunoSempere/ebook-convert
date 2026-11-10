@@ -162,10 +162,8 @@ def qt_to_dt(qdate_or_qdatetime, as_utc=True):
 
 
 def fromtimestamp(ctime, as_utc=True):
-    dt = datetime.datetime.utcfromtimestamp(ctime).replace(tzinfo=_utc_tz)
-    if not as_utc:
-        dt = dt.astimezone(_local_tz)
-    return dt
+    # datetime.utcfromtimestamp is deprecated since python 3.12
+    return datetime.datetime.fromtimestamp(ctime, _utc_tz if as_utc else _local_tz)
 
 
 def fromordinal(day, as_utc=True):
@@ -221,7 +219,9 @@ def w3cdtf(date_time, assume_utc=False):
         if date_time.tzinfo is None:
             date_time = date_time.replace(tzinfo=_utc_tz if assume_utc else
                                           _local_tz)
-        date_time = date_time.astimezone(_utc_tz if as_utc else _local_tz)
+        # w3cdtf is always written as UTC (the old code referenced an
+        # undefined as_utc name here)
+        date_time = date_time.astimezone(_utc_tz)
     return str(date_time.strftime('%Y-%m-%dT%H:%M:%SZ'))
 
 
@@ -250,17 +250,17 @@ def as_utc(date_time, assume_utc=True):
 
 
 def now():
-    return datetime.datetime.now().replace(tzinfo=_local_tz)
+    return datetime.datetime.now(_local_tz)
 
 
 def utcnow():
-    return datetime.datetime.utcnow().replace(tzinfo=_utc_tz)
+    # datetime.utcnow is deprecated since python 3.12
+    return datetime.datetime.now(_utc_tz)
 
 
 def utcfromtimestamp(stamp):
     try:
-        return (datetime.datetime.utcfromtimestamp(stamp)
-                .replace(tzinfo=_utc_tz))
+        return datetime.datetime.fromtimestamp(stamp, _utc_tz)
     except ValueError:
         # Raised if stamp is out of range for the platforms gmtime function
         # For example, this happens with negative values on windows

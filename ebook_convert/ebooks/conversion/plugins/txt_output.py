@@ -75,6 +75,11 @@ class TXTOutput(OutputFormatPlugin):
                  'only useful when paired with a txt-output-formatting option '
                  'that is not none because links are always removed with '
                  'plain text output.'),
+        OptionRecommendation(name='use_alt_text_for_images',
+            recommended_value=False, level=OptionRecommendation.LOW,
+            help='Replace images with the text from the alt attribute, if '
+                 'any. Ignored if the option to keep image references is '
+                 'specified.'),
         OptionRecommendation(name='keep_color',
             recommended_value=False, level=OptionRecommendation.LOW,
             help='Do not remove font color from output. This is only useful '
@@ -129,9 +134,13 @@ class TXTZOutput(TXTOutput):
     file_type = 'txtz'
 
     def convert(self, oeb_book, output_path, input_plugin, opts, log):
-        from ebook_convert.ebooks.oeb.base import OEB_IMAGES
+        from ebook_convert.ebooks.oeb.base import OEB_IMAGES, xml2str
         from ebook_convert.utils.zipfile import ZipFile
-        from lxml import etree
+
+        # Calibre 79db6e1f75: only keep images if the text format can
+        # reference them.
+        can_reference_images = opts.txt_output_formatting.lower() in ('markdown', 'textile')
+        can_reference_images = can_reference_images and opts.keep_image_references
 
         with TemporaryDirectory('_txtz_output') as tdir:
             # TXT
@@ -143,6 +152,11 @@ class TXTZOutput(TXTOutput):
                 shutil.copy(tf, os.path.join(tdir, txt_name))
 
             # Images
+            try:
+                cover_href = oeb_book.guide[oeb_book.metadata.cover[0].term].href
+            except Exception:
+                cover_href = None
+            cover_relhref = None
             for item in oeb_book.manifest:
                 if item.media_type in OEB_IMAGES:
                     if hasattr(self.writer, 'images'):
@@ -154,14 +168,27 @@ class TXTZOutput(TXTOutput):
                     else:
                         path = os.path.join(tdir, os.path.dirname(item.href))
                         href = os.path.basename(item.href)
-                    if not os.path.exists(path):
-                        os.makedirs(path)
-                    with open(os.path.join(path, href), 'wb') as imgf:
-                        imgf.write(item.data)
+                    ipath = os.path.join(path, href)
+                    is_cover = item.href == cover_href
+                    if can_reference_images or is_cover:
+                        os.makedirs(path, exist_ok=True)
+                        with open(ipath, 'wb') as imgf:
+                            imgf.write(item.data)
+                    if is_cover:
+                        cover_relhref = os.path.relpath(ipath, tdir).replace(os.sep, '/')
 
-            # Metadata
+            # Metadata (Calibre 17be87e85a, c86de09698: record the text
+            # formatting and the cover path so TXTZ input can use them)
             with open(os.path.join(tdir, 'metadata.opf'), 'wb') as mdataf:
-                mdataf.write(etree.tostring(oeb_book.metadata.to_opf1()))
+                root = oeb_book.metadata.to_opf1()
+                elem = root.makeelement('text-formatting')
+                elem.text = opts.txt_output_formatting
+                root.append(elem)
+                if cover_relhref:
+                    elem = root.makeelement('cover-relpath-from-base')
+                    elem.text = cover_relhref
+                    root.append(elem)
+                mdataf.write(xml2str(root, pretty_print=True))
 
             txtz = ZipFile(output_path, 'w')
             txtz.add_dir(tdir)

@@ -1142,7 +1142,12 @@ class ZipFile:
 
         if member.filename[-1] == '/':
             if not os.path.isdir(targetpath):
-                os.mkdir(targetpath)
+                try:
+                    os.mkdir(targetpath)
+                except Exception:  # Calibre 72b3993fca: invalid chars
+                    targetpath = os.path.join(base_target,
+                                              fms.sanitize_file_name(fname))
+                    os.mkdir(targetpath)
             self.extract_mapping[member.filename] = targetpath
             return targetpath
 

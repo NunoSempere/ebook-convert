@@ -79,7 +79,7 @@ class HTMLZOutput(OutputFormatPlugin):
             # CSS
             if opts.htmlz_css_type == 'class' and opts.htmlz_class_style == 'external':
                 with open(os.path.join(tdir, u'style.css'), 'wb') as tf:
-                    tf.write(htmlizer.get_css(oeb_book))
+                    tf.write(htmlizer.get_css(oeb_book).encode('utf-8'))
 
             # Images
             images = htmlizer.images
@@ -89,12 +89,21 @@ class HTMLZOutput(OutputFormatPlugin):
                 for item in oeb_book.manifest:
                     if item.media_type in OEB_IMAGES and item.href in images:
                         if item.media_type == SVG_MIME:
-                            data = etree.tostring(item.data, encoding='unicode')
+                            # Calibre 833c0db683: the file is opened in binary mode
+                            data = etree.tostring(item.data, encoding='unicode').encode('utf-8')
                         else:
                             data = item.data
                         fname = os.path.join(tdir, u'images', images[item.href])
                         with open(fname, 'wb') as img:
                             img.write(data)
+            # Fonts (Calibre 075e7e5a4b)
+            if htmlizer.fonts:
+                os.makedirs(os.path.join(tdir, 'fonts'), exist_ok=True)
+                for item in oeb_book.manifest:
+                    if item.href in htmlizer.fonts:
+                        fname = os.path.join(tdir, 'fonts', htmlizer.fonts[item.href])
+                        with open(fname, 'wb') as f:
+                            f.write(item.data)
 
             # Cover
             cover_path = None

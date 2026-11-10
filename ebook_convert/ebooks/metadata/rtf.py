@@ -202,7 +202,10 @@ def set_metadata(stream, options):
         def replace_or_create(src, name, val):
             val = encode(val)
             pat = re.compile(base_pat.replace('name', name), re.DOTALL)
-            src, num = pat.subn('{\\' + name + ' ' + val + '}', src)
+            # Calibre b7c61728ac: the replacement is a regex template, so
+            # backslashes in the value must be escaped
+            src, num = pat.subn(r'{\\' + name.replace('\\', r'\\') + ' ' +
+                                val.replace('\\', r'\\') + '}', src)
             if num == 0:
                 src = add_metadata_item(src, name, val)
             return src

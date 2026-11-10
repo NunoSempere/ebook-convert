@@ -984,7 +984,7 @@ class HTMLConverter(object):
     def process_image(self, path, tag_css, width=None, height=None,
                       dropcaps=False, rescale=False):
         def detect_encoding(im):
-            fmt = im.format
+            fmt = im.format or 'JPEG'
             if fmt == 'JPG':
                 fmt = 'JPEG'
             return fmt
@@ -1012,7 +1012,7 @@ class HTMLConverter(object):
             self.image_memory.append(pt)  # Neccessary, trust me ;-)
             try:
                 im.resize((int(width), int(height)),
-                          PILImage.LANCZOS).save(pt, encoding)
+                          PILImage.LANCZOS).save(pt.name, encoding)
                 pt.close()
                 self.scaled_images[path] = pt
                 return pt.name
@@ -1063,7 +1063,7 @@ class HTMLConverter(object):
                                          encoding.lower())
             try:
                 im = im.rotate(90)
-                im.save(pt, encoding)
+                im.save(pt.name, encoding)
                 path = pt.name
                 self.rotated_images[path] = pt
                 width, height = im.size

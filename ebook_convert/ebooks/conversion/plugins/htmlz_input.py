@@ -116,14 +116,15 @@ class HTMLZInput(InputFormatPlugin):
             opf = OPF(os.path.join(base_dir, opf), basedir=base_dir)
             cover_path = opf.raster_cover or opf.cover
         # Set the cover.
-        if cover_path and os.path.exists(os.path.join(base_dir, cover_path)):
-            cdata = None
-            with open(os.path.join(base_dir, cover_path), 'rb') as cf:
-                cdata = cf.read()
-            cover_name = os.path.basename(cover_path)
-            id, href = oeb.manifest.generate('cover', cover_name)
-            oeb.manifest.add(id, href, mimetypes.guess_type(cover_name)[0],
-                             data=cdata)
-            oeb.guide.add('cover', 'Cover', href)
+        if cover_path:
+            # the cover must live inside the extracted archive
+            from ebook_convert.utils.filenames import archive_file_data
+            cover_data = archive_file_data(base_dir, cover_path)
+            if cover_data is not None:
+                cover_name, cdata = cover_data
+                id, href = oeb.manifest.generate('cover', cover_name)
+                oeb.manifest.add(id, href, mimetypes.guess_type(cover_name)[0],
+                                 data=cdata)
+                oeb.guide.add('cover', 'Cover', href)
 
         return oeb

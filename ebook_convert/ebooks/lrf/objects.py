@@ -271,7 +271,7 @@ class EmptyPageElement(object):
             yield i
 
     def __str__(self):
-        return str(self)
+        return self.__class__.__name__
 
 
 class PageDiv(EmptyPageElement):
@@ -379,7 +379,7 @@ class Page(LRFStream):
             self.in_blockspace = True
 
         def do_pos(self, tag):
-            self.pos = tag.wordself.pos_map[tag.word]
+            self.pos = tag.word  # mapped to a name by Locate
             self.in_blockspace = True
 
         def ruled_line(self, tag):
@@ -808,8 +808,10 @@ class Text(LRFStream):
 
     def initialize(self):
         self.content = collections.deque()
-        stream = io.BytesIO(self.stream)
-        length = len(self.stream)
+        # Calibre d72a4a106f: the stream may be None for empty objects
+        s = self.stream or b''
+        stream = io.BytesIO(s)
+        length = len(s)
         style = self.style.as_dict()
         current_style = style.copy()
         text_tags = set(list(TextAttr.tag_map.keys()) +
@@ -822,7 +824,7 @@ class Text(LRFStream):
 
             # Is there some text before a tag?
             def find_first_tag(start):
-                pos = self.stream.find(b'\xf5', start)
+                pos = s.find(b'\xf5', start)
                 if pos == -1:
                     return -1
                 try:
@@ -839,10 +841,10 @@ class Text(LRFStream):
             tag_pos = find_first_tag(start_pos)
             if tag_pos >= start_pos:
                 if tag_pos > start_pos:
-                    self.add_text(self.stream[start_pos:tag_pos])
+                    self.add_text(s[start_pos:tag_pos])
                 stream.seek(tag_pos)
             else:  # No tags in this stream
-                self.add_text(self.stream)
+                self.add_text(s)
                 stream.seek(0, 2)
                 break
 
@@ -978,8 +980,9 @@ class Canvas(LRFStream):
             if hasattr(self, attr):
                 self.attrs[attr] = getattr(self, attr)
         self._contents = []
-        stream = io.BytesIO(self.stream)
-        while stream.tell() < len(self.stream):
+        s = self.stream or b''
+        stream = io.BytesIO(s)
+        while stream.tell() < len(s):
             tag = Tag(stream)
             try:
                 self._contents.append(
@@ -1212,7 +1215,7 @@ class TocLabel(object):
 class TOCObject(LRFStream):
 
     def initialize(self):
-        stream = io.BytesIO(self.stream)
+        stream = io.BytesIO(self.stream or b'')
         c = struct.unpack("<H", stream.read(2))[0]
         stream.seek(4*(c+1))
         self._contents = []

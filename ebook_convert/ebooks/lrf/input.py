@@ -313,9 +313,12 @@ class Styles(etree.XSLTExtension):
             self.block_style_map[input_node.get('objid')] = idx
 
     def px_to_pt(self, px):
+        # attribute values are strings, so convert before scaling
+        if px is None:
+            return None
         try:
-            return px * 72/166
-        except:
+            return float(px) * 72/166
+        except ValueError:
             return None
 
     def color(self, val):

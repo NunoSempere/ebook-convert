@@ -7,7 +7,8 @@ from functools import partial
 
 from ebook_convert import constants as const
 from ebook_convert.ebooks.htmlz.oeb2html import OEB2HTML
-from ebook_convert.ebooks.oeb.base import XHTML, barename, namespace, rewrite_links
+from ebook_convert.ebooks.oeb.base import XHTML, rewrite_links
+from ebook_convert.ebooks.oeb.parse_utils import barename, namespace
 from ebook_convert.ebooks.oeb.stylizer import Stylizer
 
 
@@ -195,6 +196,10 @@ class MarkdownMLizer(OEB2HTML):
                     self.remove_space_after_newline = remove_space
                 txt += '(' + attribs['src'] + ')'
                 text.append(txt)
+            elif getattr(self.opts, 'use_alt_text_for_images', False):
+                alt = attribs.get('alt')
+                if alt:
+                    text.append('![{}]()'.format(self.remove_newlines(alt)))
         elif tag in ('ol', 'ul'):
             tags.append(tag)
             # Add the list to our lists of lists so we can track

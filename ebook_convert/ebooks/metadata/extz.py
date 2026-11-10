@@ -35,6 +35,13 @@ def get_metadata(stream, extract_cover=True):
         mi = opf.to_book_metadata()
         if extract_cover:
             cover_href = opf.raster_cover or opf.cover
+            if not cover_href:
+                # TXTZ files use a special element for the cover
+                # (Calibre c86de09698)
+                for cpath in opf.root.xpath('//cover-relpath-from-base'):
+                    if cpath.text:
+                        cover_href = cpath.text.strip()
+                        break
             if cover_href:
                 cover_name = posixpath.normpath(posixpath.join(
                     posixpath.dirname(opf_name), cover_href))

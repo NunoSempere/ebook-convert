@@ -43,6 +43,12 @@ def as_bytes(x, encoding='utf-8'):
     return str(x).encode(encoding)
 
 
+def as_unicode(x, encoding='utf-8', errors='strict'):
+    if isinstance(x, bytes):
+        x = x.decode(encoding, errors)
+    return x
+
+
 def unquote(x, encoding='utf-8', errors='replace'):
     # TODO(gryf): this works like that: if x is a binary, convert it to
     # string using encoding and make unquote. After that make it binary again.

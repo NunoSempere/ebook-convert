@@ -9,11 +9,17 @@ from ebook_convert.customize.conversion import OptionRecommendation
 from ebook_convert.utils.localization import get_lang
 from ebook_convert.utils.filenames import ascii_filename
 from ebook_convert.utils.imghdr import what
+from ebook_convert import polyglot
 
 
 def sanitize_file_name(x):
-    ans = re.sub(r'\s+', ' ', re.sub(r'[?&=;#]', '_',
-                                     ascii_filename(x))).strip().rstrip('.')
+    # Calibre 73a8699e0a, 4955d632f3: also neutralise URL-quoted separators
+    ans = re.sub(r'\s+', ' ', ascii_filename(x))
+    for ch in '?&=;#/\\':
+        ans = ans.replace(ch, '_')
+        q = urllib.parse.quote(ch, safe='')
+        ans = re.sub('\\' + q, '_', ans, flags=re.I)
+    ans = ans.strip().rstrip('.')
     ans, ext = ans.rpartition('.')[::2]
     return (ans.strip() + '.' + ext.strip()).rstrip('.')
 
@@ -49,7 +55,24 @@ class HTMLInput(InputFormatPlugin):
                 'nasty side effects in the rest of the conversion pipeline.'
         ),
 
+        OptionRecommendation(name='allow_local_files_outside_root',
+            recommended_value=True, level=OptionRecommendation.LOW,
+            help='Allow including local files from any location on your '
+                 'computer. When disabled, resources linked to by the HTML '
+                 'file or its children are only allowed if they are in a '
+                 'sub-folder of the original HTML file. Including arbitrary '
+                 'local files can be a security risk if you are converting '
+                 'untrusted HTML and expecting to distribute the result of '
+                 'the conversion.'
+        ),
+
     }
+
+    def set_root_dir_of_input(self, basedir):
+        # Calibre bbbddd2bf4, 71547e8a11, 5a3a34a405: realpath so that
+        # /var and /private/var compare equal on macOS, normcase for Windows
+        self.root_dir_of_input = os.path.normcase(
+            os.path.realpath(os.path.abspath(basedir)).rstrip(os.sep) + os.sep)
 
     def convert(self, stream, opts, file_ext, log,
                 accelerators):
@@ -60,6 +83,7 @@ class HTMLInput(InputFormatPlugin):
         if hasattr(stream, 'name'):
             basedir = os.path.dirname(stream.name)
             fname = os.path.basename(stream.name)
+        self.set_root_dir_of_input(basedir)
 
         if file_ext != 'opf':
             if opts.dont_package:
@@ -147,6 +171,7 @@ class HTMLInput(InputFormatPlugin):
         self.urlnormalize, self.DirContainer = urlnormalize, DirContainer
         self.urldefrag = urllib.parse.urldefrag
         self.BINARY_MIME = BINARY_MIME
+        self.stylesheets_to_process = []
 
         self.log.info('Rewriting HTML links')
         for f in filelist:
@@ -161,15 +186,17 @@ class HTMLInput(InputFormatPlugin):
             rewrite_links(item.data,
                           functools.partial(self.resource_adder, base=dpath))
 
-        for item in oeb.manifest.values():
+        # Calibre 9040501684: rewrite the urls in every stylesheet (including
+        # the ones found via @import, which get appended while we go) and
+        # only then resolve the @import rules against the manifest.
+        while self.stylesheets_to_process:
+            sheet = self.stylesheets_to_process.pop()
+            css_parser.replaceUrls(sheet.data, functools.partial(
+                self.resource_adder, base=sheet.html_input_dirpath))
+        for item in list(oeb.manifest):
             if item.media_type in self.OEB_STYLES:
-                dpath = None
-                for path, href in self.added_resources.items():
-                    if href == item.href:
-                        dpath = os.path.dirname(path)
-                        break
-                css_parser.replaceUrls(item.data,
-                        functools.partial(self.resource_adder, base=dpath))
+                item.override_css_fetch = None
+                item.data = item._parse_css(polyglot.as_unicode(item.data.cssText))
 
         toc = self.oeb.toc
         self.oeb.auto_generated_toc = True
@@ -222,6 +249,14 @@ class HTMLInput(InputFormatPlugin):
         frag = l.fragment
         if not link:
             return None, None
+        link = os.path.abspath(os.path.realpath(link))
+        if not os.path.normcase(link).startswith(self.root_dir_of_input):
+            if not getattr(self.opts, 'allow_local_files_outside_root', True):
+                if os.path.exists(link):
+                    self.log.warning('Not adding %s as it is outside the '
+                                     'document root: %s', link,
+                                     self.root_dir_of_input)
+                return None, None
         return link, frag
 
     def resource_adder(self, link_, base=None):
@@ -240,10 +275,11 @@ class HTMLInput(InputFormatPlugin):
             self.log.warning('%s is a link to a directory. Ignoring.', link_)
             return link_
         if link not in self.added_resources:
+            guessed = mimetypes.guess_type(os.path.basename(link))[0]
+            media_type = guessed or self.BINARY_MIME
+            is_stylesheet = media_type in self.OEB_STYLES
             bhref = os.path.basename(link)
             id, href = self.oeb.manifest.generate(id='added', href=sanitize_file_name(bhref))
-            guessed = mimetypes.guess_type(href)[0]
-            media_type = guessed or self.BINARY_MIME
             if media_type == 'text/plain':
                 self.log.warning('Ignoring link to text file %r', link_)
                 return None
@@ -267,9 +303,13 @@ class HTMLInput(InputFormatPlugin):
             # file, therefore we quote it here.
             # XXX(gryf): why the heck it was changed to bytes?
             item.html_input_href = urllib.parse.quote(bhref)
-            if guessed in self.OEB_STYLES:
-                item.override_css_fetch = functools.partial(
-                        self.css_import_handler, os.path.dirname(link))
+            if is_stylesheet:
+                # Parse without resolving @import rules so that their urls
+                # can be rewritten first (see create_oebbook)
+                item.html_input_dirpath = os.path.dirname(link)
+                item.override_css_fetch = lambda url: (None, '')
+                item.data = self.parse_css_without_imports(item)
+                self.stylesheets_to_process.append(item)
             item.data
             self.added_resources[link] = href
 
@@ -278,15 +318,16 @@ class HTMLInput(InputFormatPlugin):
             nlink = '#'.join((nlink, frag))
         return nlink
 
-    def css_import_handler(self, base, href):
-        link, frag = self.link_to_local_path(href, base=base)
-        if link is None or not os.access(link, os.R_OK) or os.path.isdir(link):
-            return (None, None)
-        try:
-            with open(link, 'rb') as f:
-                raw = f.read().decode('utf-8', 'replace')
-            raw = self.oeb.css_preprocessor(raw, add_namespace=False)
-        except:
-            self.log.exception('Failed to read CSS file: %r', link)
-            return (None, None)
-        return (None, raw)
+    def parse_css_without_imports(self, item):
+        import logging
+        import css_parser
+        from css_parser.css import CSSRule
+        raw = self.oeb.container.read(item.html_input_href)
+        raw = self.oeb.decode(raw)
+        raw = self.oeb.css_preprocessor(raw, add_namespace=False)
+        parser = css_parser.CSSParser(loglevel=logging.WARNING,
+                                      fetcher=lambda url: (None, ''))
+        sheet = parser.parseString(raw, href=item.href, validate=False)
+        for rule in tuple(sheet.cssRules.rulesOfType(CSSRule.PAGE_RULE)):
+            sheet.cssRules.remove(rule)
+        return sheet

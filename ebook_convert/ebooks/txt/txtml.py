@@ -97,7 +97,14 @@ class TXTMLizer(object):
         if getattr(self.opts, 'inline_toc', None):
             self.log.debug('Generating table of contents...')
             toc.append('%s\n\n' % 'Table of Contents:')
+            unihandecoder = None
+            if getattr(self.opts, 'asciiize', False):
+                # Calibre ee6e7d8d71: the TOC must be transliterated too
+                from ebook_convert.utils.localization import get_udc
+                unihandecoder = get_udc()
             for item in self.toc_titles:
+                if unihandecoder is not None:
+                    item = unihandecoder.decode(item)
                 toc.append('* %s\n\n' % item)
         return ''.join(toc)
 
@@ -149,8 +156,9 @@ class TXTMLizer(object):
         text = re.sub(r'(?u)^[ \n]+', '', text)
 
         if self.opts.max_line_length:
-            max_length = self.opts.max_line_length
-            if (self.opts.max_line_length < 25 and not
+            # Calibre 9b46b4ab76: the option may arrive as a string
+            max_length = int(self.opts.max_line_length)
+            if (max_length < 25 and not
                     self.opts.force_max_line_length):
                 max_length = 25
             short_lines = []
@@ -184,6 +192,22 @@ class TXTMLizer(object):
             text = '\n'.join(short_lines)
 
         return text
+
+    def is_block(self, elem, stylizer):
+        if (not isinstance(elem.tag, str) or
+                parse_utils.namespace(elem.tag) != const.XHTML_NS):
+            return False
+        return (parse_utils.barename(elem.tag) in BLOCK_TAGS or
+                stylizer.style(elem)['display'] in BLOCK_STYLES)
+
+    def needs_block_separator(self, text):
+        # True if the text output so far ends with non-whitespace content
+        # that is not already terminated by a newline
+        for chunk in reversed(text):
+            stripped = chunk.rstrip(' \t')
+            if stripped:
+                return not stripped.endswith('\n')
+        return False
 
     def dump_text(self, elem, stylizer, page):
         '''
@@ -243,12 +267,21 @@ class TXTMLizer(object):
         except Exception:
             pass
 
+        if getattr(self.opts, 'use_alt_text_for_images', False) and tag == 'img':
+            alt = elem.get('alt')
+            if alt:
+                text.append('[Image: {}]'.format(alt))
         # Process tags that contain text.
         if hasattr(elem, 'text') and elem.text:
             text.append(elem.text)
 
         # Recurse down into tags within the tag we are in.
         for item in elem:
+            if self.is_block(item, stylizer) and self.needs_block_separator(text):
+                # Calibre 7dbcbab081: a block nested after inline content,
+                # for example <li>foo<ul><li>bar</li></ul></li>, must start
+                # on a new line
+                text.append('\n\n')
             text += self.dump_text(item, stylizer, page)
 
         if in_block:

@@ -23,10 +23,9 @@ class Reader(FormatReader):
 
         pdf = PersistentTemporaryFile('.pdf')
         pdf.close()
-        pdf = open(pdf, 'wb')
-        for x in range(self.header.section_count()):
-            pdf.write(self.header.section_data(x))
-        pdf.close()
+        with open(pdf.name, 'wb') as f:
+            for x in range(self.header.section_count()):
+                f.write(self.header.section_data(x))
 
         from ebook_convert.customize.ui import plugin_for_input_format
 
@@ -35,4 +34,5 @@ class Reader(FormatReader):
             if not hasattr(self.options, opt.option.name):
                 setattr(self.options, opt.option.name, opt.recommended_value)
 
-        return pdf_plugin.convert(open(pdf, 'rb'), self.options, 'pdf', self.log, {})
+        with open(pdf.name, 'rb') as f:
+            return pdf_plugin.convert(f, self.options, 'pdf', self.log, {})
