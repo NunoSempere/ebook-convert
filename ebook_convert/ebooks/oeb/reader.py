@@ -275,6 +275,18 @@ class OEBReader(object):
 
     def _manifest_from_opf(self, opf):
         manifest = self.oeb.manifest
+        # ids generated for <item> elements without one must not collide with
+        # ids used by later items (or referenced by the spine)
+        opf_ids = set(base.xpath(opf, '/o2:package/o2:manifest/o2:item/@id'))
+
+        def generate_id():
+            candidate, c = 'id', 0
+            while candidate in opf_ids or candidate in manifest.ids:
+                c += 1
+                candidate = 'id%d' % c
+            opf_ids.add(candidate)
+            return candidate
+
         for elem in base.xpath(opf, '/o2:package/o2:manifest/o2:item'):
             id = elem.get('id')
             href = elem.get('href')
@@ -295,7 +307,7 @@ class OEBReader(object):
                 self.logger.warning('Manifest item %r not found', href)
                 continue
             if not id:
-                id = manifest.generate('id')[0]
+                id = generate_id()
             elif id in manifest.ids:
                 self.logger.warning('Duplicate manifest id %r', id)
                 id, href = manifest.generate(id, href)
