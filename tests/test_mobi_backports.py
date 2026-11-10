@@ -423,3 +423,55 @@ def test_convert_margin_caps_percentages_at_kindle_width():
     assert convert_margin(style, 'margin-left') == 0.0
 
 # }}}
+
+
+# Right-to-left books and EXTH records (Calibre 4b00f39ef0, 7919f5e9f9 and
+# the writer8/exth.py snapshot changes) {{{
+
+@pytest.mark.parametrize('lang,rtl', [
+    ('he', True), ('ar', True), ('fa', True), ('ur', True), ('yi', True),
+    ('heb', True), ('he-IL', True), ('Hebrew', True),
+    ('en', False), ('de', False), ('ja', False), (None, False), ('', False),
+])
+def test_is_rtl_lang(lang, rtl):
+    from ebook_convert.utils.localization import is_rtl_lang
+    assert bool(is_rtl_lang(lang)) is rtl
+
+
+def test_hebrew_book_gets_rtl_page_progression(tmp_path):
+    src = tmp_path / 'src'
+    shutil.copytree(FIXTURES / 'epub3', src)
+    opf = src / 'OEBPS' / 'content.opf'
+    opf.write_text(opf.read_text().replace(
+        '<dc:language>en</dc:language>', '<dc:language>he</dc:language>'))
+    out = tmp_path / 'out.azw3'
+    convert(pack_epub(src, tmp_path / 'he.epub'), out)
+    data = out.read_bytes()
+    assert struct.pack('>II', 527, 8 + 3) + b'rtl' in data
+    pwm = b'horizontal-rl'
+    assert struct.pack('>II', 525, 8 + len(pwm)) + pwm in data
+
+
+def test_english_book_has_no_page_progression_record(epub3_path, tmp_path):
+    out = tmp_path / 'out.azw3'
+    convert(epub3_path, out)
+    assert struct.pack('>II', 527, 8 + 3) + b'rtl' not in out.read_bytes()
+
+
+def test_build_exth_start_offset_int_or_sequence():
+    import logging
+    from ebook_convert.ebooks.mobi.writer8.exth import build_exth
+    from ebook_convert.ebooks.oeb.base import OEBBook
+    mi = OEBBook(logging.getLogger('test'), html_preprocessor=None).metadata
+    mi.add('title', 'T')
+    # a missing date is reported properly (not as an UnboundLocalError)
+    with pytest.raises(ValueError):
+        build_exth(mi)
+    mi.add('date', '2024-01-01T00:00:00+00:00')
+    rec = lambda so: struct.pack('>III', 116, 12, so)
+    assert rec(5) in build_exth(mi, start_offset=5)
+    both = build_exth(mi, start_offset=[5, None, 7])
+    assert rec(5) in both and rec(7) in both
+    assert rec(5) not in build_exth(mi)
+
+# }}}

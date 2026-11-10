@@ -52,7 +52,7 @@ class KF8Writer:
         self.toc_adder = TOCAdder(oeb, opts)
         self.used_images = set()
         self.resources = resources
-        self.flows = [None]  # First flow item is reserved for the text
+        self.flows = [b'']  # First flow item is reserved for the text
         self.records = [None]  # Placeholder for zeroth record
 
         self.dup_data()
@@ -330,9 +330,12 @@ class KF8Writer:
         self.flows[0] = chunker.text
 
     def create_text_records(self):
-        self.flows = [x.encode('utf-8') if isinstance(x, str) else x for x
+        encoded_flows = [x.encode('utf-8') if isinstance(x, str) else x for x
                 in self.flows]
-        text = b''.join(self.flows)
+        # Rebuild in place so that anything holding a reference to the list
+        # sees the encoded flows
+        self.flows[:] = encoded_flows
+        text = b''.join(encoded_flows)
         self.text_length = len(text)
         text = BytesIO(text)
         nrecords = 0

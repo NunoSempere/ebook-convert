@@ -90,7 +90,9 @@ class Serializer(object):
                 articles = list(item)
                 if not articles:
                     continue
-                spine_item(item).is_section_start = True
+                si = spine_item(item)
+                if si is not None:
+                    si.is_section_start = True
                 for i, article in enumerate(articles):
                     si = spine_item(article)
                     if si is not None:

@@ -23,6 +23,7 @@ from ebook_convert.ebooks.conversion.preprocess import CSSPreProcessor
 from ebook_convert.ebooks.oeb import parse_utils
 from ebook_convert.utils.cleantext import clean_xml_chars
 from ebook_convert.utils import encoding as uenc
+from ebook_convert.utils.localization import is_rtl_lang
 from ebook_convert.utils.short_uuid import uuid4
 
 
@@ -1793,6 +1794,19 @@ class OEBBook(object):
         self.pages = PageList()
         self.auto_generated_toc = True
         self._temp_files = []
+
+    def set_page_progression_direction_if_needed(self):
+        '''
+        Books in a right-to-left language without an explicit page
+        progression direction are paged right to left (Calibre 4b00f39ef0).
+        '''
+        if not self.spine.page_progression_direction:
+            try:
+                lang = self.metadata.language[0].value
+                if is_rtl_lang(lang):
+                    self.spine.page_progression_direction = 'rtl'
+            except Exception:
+                pass
 
     def clean_temp_files(self):
         for path in self._temp_files:

@@ -1,4 +1,5 @@
 import re
+import sys
 from struct import pack
 from io import BytesIO
 
@@ -77,7 +78,7 @@ def build_exth(metadata, prefer_author_sort=False, is_periodical=False,
             if term == 'identifier':
                 if data.lower().startswith('urn:isbn:'):
                     data = data[9:]
-                elif item.scheme.lower() == 'isbn':
+                elif getattr(item, 'scheme', '').lower() == 'isbn':
                     pass
                 else:
                     continue
@@ -128,6 +129,7 @@ def build_exth(metadata, prefer_author_sort=False, is_periodical=False,
             nrecs += 1
 
     # Add a publication date entry
+    datestr = None
     if metadata['date']:
         datestr = str(metadata['date'][0])
     elif metadata['timestamp']:
@@ -154,7 +156,8 @@ def build_exth(metadata, prefer_author_sort=False, is_periodical=False,
         nrecs += 1
 
     if be_kindlegen2:
-        mv = 201
+        mv = (200 if sys.platform.startswith('win') else
+              202 if sys.platform == 'darwin' else 201)
         vals = {204: mv, 205: 2, 206: 9, 207: 0}
     elif is_periodical:
         # Pretend to be amazon's super secret periodical generator
@@ -187,11 +190,9 @@ def build_exth(metadata, prefer_author_sort=False, is_periodical=False,
         nrecs += 2
 
     if start_offset is not None:
-        try:
-            len(start_offset)
-        except TypeError:
-            start_offset = [start_offset]
-        for so in start_offset:
+        start_offsets = ((start_offset,) if isinstance(start_offset, int)
+                         else start_offset)
+        for so in start_offsets:
             if so is not None:
                 exth.write(pack(b'>III', EXTH_CODES['startreading'], 12, so))
                 nrecs += 1

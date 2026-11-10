@@ -114,6 +114,14 @@ def canonicalize_lang(raw):
     return iso639['name_map'].get(raw, None)
 
 
+def is_rtl_lang(lang):
+    '''Whether the language (a name or an ISO 639 code, optionally with a
+    region) is written right to left: Arabic, Hebrew, Farsi, Urdu and
+    Yiddish.'''
+    lang = canonicalize_lang(lang)
+    return bool(lang) and lang in ('ara', 'heb', 'fas', 'urd', 'yid')
+
+
 def lang_as_iso639_1(name_or_code):
     code = canonicalize_lang(name_or_code)
     if code is not None:
