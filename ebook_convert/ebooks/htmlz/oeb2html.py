@@ -22,6 +22,20 @@ SELF_CLOSING_TAGS = {'area', 'base', 'basefont', 'br', 'hr', 'input', 'img',
 LOG = logging.default_log
 
 
+def attributes_to_string(attribs):
+    """Serialize attributes for an HTML tag.
+
+    lxml reports namespaced attribute names in Clark notation
+    (``{uri}local``), which no HTML parser accepts.  Strip the namespace and
+    let a plain duplicate (``lang`` next to ``xml:lang``) win.
+    """
+    plain = {}
+    for key, value in attribs.items():
+        plain[parse_utils.barename(key)] = value
+    return ''.join(' %s="%s"' % (key, entities.prepare_string_for_xml(
+        value, attribute=True)) for key, value in plain.items())
+
+
 class OEB2HTML(object):
     """
     Base class. All subclasses should implement dump_text to actually
@@ -194,11 +208,7 @@ class OEB2HTMLNoCSSizer(OEB2HTML):
 
         # Turn the rest of the attributes into a string we can write with the
         # tag.
-        at = ''
-        for key, value in attribs.items():
-            at += (' %s="%s"' %
-                   (key, entities.prepare_string_for_xml(value,
-                                                         attribute=True)))
+        at = attributes_to_string(attribs)
 
         # Write the tag.
         text.append('<%s%s' % (tag, at))
@@ -295,10 +305,7 @@ class OEB2HTMLInlineCSSizer(OEB2HTML):
 
         # Turn the rest of the attributes into a string we can write with
         # the tag.
-        at = ''
-        for k, v in attribs.items():
-            at += ' %s="%s"' % (k, entities
-                                .prepare_string_for_xml(v, attribute=True))
+        at = attributes_to_string(attribs)
 
         # Turn style into strings for putting in the tag.
         style_t = ''
@@ -398,10 +405,7 @@ class OEB2HTMLClassCSSizer(OEB2HTML):
 
         # Turn the rest of the attributes into a string we can write with
         # the tag.
-        at = ''
-        for k, v in attribs.items():
-            at += ' %s="%s"' % (k, entities
-                                .prepare_string_for_xml(v, attribute=True))
+        at = attributes_to_string(attribs)
 
         # Write the tag.
         text.append('<%s%s' % (tag, at))

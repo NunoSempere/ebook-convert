@@ -459,7 +459,7 @@ class DummyHandler(logging.Handler):
             if record.levelno >= logging.ERROR:
                 f = self.log.error
             else:
-                self.log.warn
+                f = self.log.warning
             f(msg)
 
 
@@ -951,7 +951,11 @@ class Manifest(object):
                                self._fetch_css,
                                log=_css_logger)
             data = parser.parseString(data, href=self.href, validate=False)
-            data = resolveImports(data)
+            # Resolve into an explicit target sheet; the default would
+            # re-fetch any @import it could not resolve, possibly over the
+            # network.
+            data = resolveImports(data, target=parser.parseString(
+                '', href=self.href, validate=False))
             for rule in tuple(data.cssRules.rulesOfType(CSSRule.PAGE_RULE)):
                 data.cssRules.remove(rule)
             return data

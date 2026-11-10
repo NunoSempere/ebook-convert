@@ -92,3 +92,27 @@ def test_azw3_round_trip(epub3_path, tmp_path):
     assert b'HTML5 fallback' in html
     assert b'Chapter Two' in html
     assert 'Chapter One' in toc and 'Chapter Two' in toc
+
+
+@pytest.mark.parametrize('ext', ['htmlz', 'txtz'])
+def test_zip_containers_round_trip_metadata_and_cover(
+        epub3_with_cover_path, tmp_path, ext):
+    mid = tmp_path / ('mid.' + ext)
+    convert(epub3_with_cover_path, mid)
+    with zipfile.ZipFile(mid) as zf:
+        names = zf.namelist()
+        assert 'metadata.opf' in names
+        opf = zf.read('metadata.opf').decode('utf-8')
+    assert 'Broken Book' in opf
+    if ext == 'htmlz':
+        assert 'cover.jpg' in names
+    back = tmp_path / 'back.epub'
+    proc = convert(mid, back)
+    assert 'Traceback' not in proc.stderr
+    with zipfile.ZipFile(back) as zf:
+        names = zf.namelist()
+        opf = zf.read(next(n for n in names if n.endswith('.opf')))
+    assert b'Broken Book' in opf
+    assert b'Someone' in opf
+    if ext == 'htmlz':
+        assert any(n.endswith('cover.jpg') for n in names)

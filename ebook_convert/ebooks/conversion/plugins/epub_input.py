@@ -307,10 +307,18 @@ class EPUBInput(InputFormatPlugin):
         if len(parts) > 1 and parts[0]:
             path = os.path.join(parts[0])
 
+            hrefs = set()
             for elem in opf.itermanifest():
+                hrefs.add(elem.get('href'))
                 elem.set('href', os.path.join(path, elem.get('href')))
             for elem in opf.iterguide():
                 elem.set('href', os.path.join(path, elem.get('href')))
+            # Some publishers put the cover href, not its id, in
+            # <meta name="cover">; keep it pointing at the moved file.
+            for meta in opf.raster_cover_path(opf.metadata):
+                if meta.get('content') in hrefs:
+                    meta.set('content', os.path.join(path,
+                                                     meta.get('content')))
 
         if opf.package_version >= 3.0:
             f = self.rationalize_cover3

@@ -25,6 +25,9 @@ class HTMLZInput(InputFormatPlugin):
         # Extract content from zip archive.
         zf = ZipFile(stream)
         zf.extractall()
+        # The HTML input plugin run below changes the working directory, so
+        # remember where the archive was unpacked.
+        base_dir = os.getcwd()
 
         # Find the HTML file in the archive. It needs to be
         # top level.
@@ -110,12 +113,12 @@ class HTMLZInput(InputFormatPlugin):
                 opf = x
                 break
         if opf:
-            opf = OPF(opf, basedir=os.getcwd())
+            opf = OPF(os.path.join(base_dir, opf), basedir=base_dir)
             cover_path = opf.raster_cover or opf.cover
         # Set the cover.
-        if cover_path:
+        if cover_path and os.path.exists(os.path.join(base_dir, cover_path)):
             cdata = None
-            with open(os.path.join(os.getcwd(), cover_path), 'rb') as cf:
+            with open(os.path.join(base_dir, cover_path), 'rb') as cf:
                 cdata = cf.read()
             cover_name = os.path.basename(cover_path)
             id, href = oeb.manifest.generate('cover', cover_name)
