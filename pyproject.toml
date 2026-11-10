@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ebook-convert"
-version = "4.13.1"
+version = "4.14.0"
 requires-python = ">= 3.10"
 description = "Command-line ebook converter extracted from Calibre: epub, mobi, azw3, docx, fb2, lrf, pdf, rtf, txt, ..."
 readme = "README.rst"
