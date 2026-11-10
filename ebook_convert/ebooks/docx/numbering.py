@@ -104,7 +104,7 @@ class Level(object):
                 self.is_numbered = False
                 cs = self.character_style
                 if lt in {'\uf0a7', 'o'} or (
-                    cs is not None and cs.font_family is not inherit and cs.font_family.lower() in {'wingdings', 'symbol'}):
+                    cs is not None and cs.font_family is not inherit and isinstance(cs.font_family, str) and cs.font_family.lower() in {'wingdings', 'symbol'}):
                     self.fmt = {'\uf0a7':'square', 'o':'circle'}.get(lt, 'disc')
                 else:
                     self.bullet_template = lt
@@ -140,8 +140,11 @@ class Level(object):
         return ans
 
     def char_css(self):
+        character_style = self.character_style
+        if character_style is None:
+            return {}
         try:
-            css = self.character_style.css
+            css = character_style.css
         except AttributeError:
             css = {}
         css.pop('font-family', None)
@@ -215,17 +218,22 @@ class Numbering(object):
                     else:
                         start_overrides[ilvl] = start_override
                 for lvl in XPath('./w:lvl')(lo)[:1]:
-                    nilvl = get(lvl, 'w:ilvl')
-                    ilvl = nilvl if ilvl is None else ilvl
-                    alvl = nd.levels.get(ilvl, None)
+                    if ilvl is None:
+                        # levels are keyed by int, a str key never matches
+                        try:
+                            ilvl = int(get(lvl, 'w:ilvl'))
+                        except (ValueError, TypeError):
+                            pass
+                    alvl = nd.levels.get(ilvl, None) if ilvl is not None else None
                     if alvl is None:
                         alvl = Level(self.namespace)
+                        if ilvl is not None:
+                            nd.levels[ilvl] = alvl
                     alvl.read_from_xml(lvl, override=True)
             for ilvl, so in start_overrides.items():
-                try:
-                    nd.levels[ilvl].start = start_override
-                except KeyError:
-                    pass
+                # use the override for this level, not the last one read
+                if ilvl is not None and ilvl in nd.levels:
+                    nd.levels[ilvl].start = so
             return nd
 
         next_pass = {}

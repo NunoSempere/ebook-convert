@@ -1,9 +1,11 @@
 import os
+import re
 
 from lxml.html.builder import IMG, HR
 
-from ebook_convert.ebooks.docx.names import barename
+from ebook_convert.ebooks.docx.names import SVG_BLIP_URI, barename
 from ebook_convert.utils.filenames import ascii_filename
+from ebook_convert.utils.filenames import sanitize_file_name
 from ebook_convert.utils.img import resize_to_fit, image_to_data
 from ebook_convert.utils.imghdr import what
 
@@ -16,7 +18,9 @@ class LinkedImageNotFound(ValueError):
 
 
 def image_filename(x):
-    return ascii_filename(x).replace(' ', '_').replace('#', '_')
+    # Sanitize strictly, some EPUB software chokes on anything but
+    # alphanumerics in image names
+    return sanitize_file_name(re.sub(r'[^0-9a-zA-Z.-]', '_', ascii_filename(x)).lstrip('_').lstrip('.'))
 
 
 def emu_to_pt(x):
@@ -51,6 +55,26 @@ def get_image_properties(parent, XPath, get):
         title = docPr.get('title') or title
         if docPr.get('hidden', None) in {'true', 'on', '1'}:
             ans['display'] = 'none'
+    transforms = []
+    for graphic in XPath('./a:graphic')(parent):
+        for xfrm in XPath('descendant::a:xfrm')(graphic):
+            rot = xfrm.get('rot')
+            if rot:
+                try:
+                    rot = int(rot) / 60000
+                except Exception:
+                    rot = None
+            if rot:
+                transforms.append('rotate(%gdeg)' % rot)
+            fliph = xfrm.get('flipH')
+            if fliph in ('1', 'true'):
+                transforms.append('scaleX(-1)')
+            flipv = xfrm.get('flipV')
+            if flipv in ('1', 'true'):
+                transforms.append('scaleY(-1)')
+
+    if transforms:
+        ans['transform'] = ' '.join(transforms)
 
     return ans, alt, title
 
@@ -61,7 +85,7 @@ def get_image_margins(elem):
         val = elem.get('dist%s' % w, None)
         if val is not None:
             try:
-                val = emu_to_pt(val)
+                val = emu_to_pt(int(val))
             except (TypeError, ValueError):
                 continue
             ans['padding-%s' % css] = '%.3gpt' % val
@@ -92,7 +116,7 @@ def get_hpos(anchor, page_width, XPath, get, width_frac):
 
     for sp in XPath('./wp:simplePos')(anchor):
         try:
-            x = emu_to_pt(sp.get('x', None))
+            x = emu_to_pt(int(sp.get('x', None)))
         except (TypeError, ValueError):
             continue
         return x/page_width + width_frac
@@ -207,9 +231,13 @@ class Images(object):
                 name = image_filename(name)
             alt = pr.get('descr') or alt
             for a in XPath('descendant::a:blip[@r:embed or @r:link]')(pic):
-                rid = get(a, 'r:embed')
-                if not rid:
-                    rid = get(a, 'r:link')
+                rid = get(a, 'r:embed') or get(a, 'r:link')
+                # Prefer the SVG original over its raster fallback
+                for asvg in XPath('./a:extLst/a:ext[@uri="%s"]/asvg:svgBlip[@r:embed or @r:link]' % SVG_BLIP_URI)(a):
+                    svg_rid = get(asvg, 'r:embed') or get(asvg, 'r:link')
+                    if svg_rid and svg_rid in self.rid_map:
+                        rid = svg_rid
+                        break
                 if rid and rid in self.rid_map:
                     try:
                         src = self.generate_filename(rid, name)
@@ -279,9 +307,12 @@ class Images(object):
                     self.log.warning('Linked image: %s not found, ignoring',
                                      err.fname)
                     continue
-                img = IMG(src='images/%s' % src, style="display:block")
+                shape_style = get(imagedata.getparent(), 'style', '')
+                img = IMG(src='images/%s' % src)
                 alt = get(imagedata, 'o:title')
                 img.set('alt', alt or 'Image')
+                if 'position:absolute' in shape_style:
+                    img.set('style', 'display: block')
                 yield img
 
     def get_float_properties(self, anchor, style, page):
@@ -302,6 +333,8 @@ class Images(object):
         dofloat = False
 
         for child in reversed(anchor):
+            if not isinstance(child.tag, str):
+                continue  # comments and processing instructions
             bt = barename(child.tag)
             if bt in {'wrapNone', 'wrapSquare', 'wrapThrough', 'wrapTight', 'wrapTopAndBottom'}:
                 wrap_elem = child

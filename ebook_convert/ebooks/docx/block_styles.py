@@ -42,7 +42,7 @@ def binary_property(parent, name, XPath, get):
     return True if val in {'on', '1', 'true'} else False
 
 
-def simple_color(col, auto='black'):
+def simple_color(col, auto='currentColor'):
     if not col or col == 'auto' or len(col) != 6:
         return auto
     return '#'+col
@@ -53,6 +53,15 @@ def simple_float(val, mult=1.0):
         return float(val) * mult
     except (ValueError, TypeError, AttributeError, KeyError):
         pass
+
+
+def chars_or_none(chars, twips_val):
+    # Word (and calibre's DOCX output) writes, for example, w:leftChars="0"
+    # together with w:left to override a character based indent from a parent
+    # style, meaning the twips value should be used.
+    if chars is not None and twips_val is not None and simple_float(chars) == 0:
+        return None
+    return chars
 
 
 def twips(val, mult=0.05):
@@ -159,19 +168,31 @@ def border_to_css(edge, style, css):
 
 def read_indent(parent, dest, XPath, get):
     padding_left = padding_right = text_indent = inherit
+    is_rtl = getattr(dest, 'bidi', False)
     for indent in XPath('./w:ind')(parent):
-        l, lc = get(indent, 'w:left'), get(indent, 'w:leftChars')
+        start = get(indent, 'w:start')
+        end = get(indent, 'w:end')
+        startChars = get(indent, 'w:startChars')
+        endChars = get(indent, 'w:endChars')
+        left, leftChars, right, rightChars = start, startChars, end, endChars
+        if is_rtl and is_rtl is not inherit:
+            # TODO: For inherit we should be using textDirection from sectPr
+            left, leftChars, right, rightChars = end, endChars, start, startChars
+        l, lc = left or get(indent, 'w:left'), leftChars or get(indent, 'w:leftChars')
+        lc = chars_or_none(lc, l)
         pl = simple_float(lc, 0.01) if lc is not None else simple_float(l, 0.05) if l is not None else None
         if pl is not None:
             padding_left = '%.3g%s' % (pl, 'em' if lc is not None else 'pt')
 
-        r, rc = get(indent, 'w:right'), get(indent, 'w:rightChars')
+        r, rc = right or get(indent, 'w:right'), rightChars or get(indent, 'w:rightChars')
+        rc = chars_or_none(rc, r)
         pr = simple_float(rc, 0.01) if rc is not None else simple_float(r, 0.05) if r is not None else None
         if pr is not None:
             padding_right = '%.3g%s' % (pr, 'em' if rc is not None else 'pt')
 
         h, hc = get(indent, 'w:hanging'), get(indent, 'w:hangingChars')
         fl, flc = get(indent, 'w:firstLine'), get(indent, 'w:firstLineChars')
+        hc, flc = chars_or_none(hc, h), chars_or_none(flc, fl)
         h = h if h is None else '-'+h
         hc = hc if hc is None else '-'+hc
         ti = (simple_float(hc, 0.01) if hc is not None else simple_float(h, 0.05) if h is not None else

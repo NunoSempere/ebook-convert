@@ -163,10 +163,16 @@ class Fonts(object):
                 fname = self.write(name, dest_dir, docx, variant)
                 if fname is not None:
                     d = {'font-family':'"%s"' % name.replace('"', ''), 'src': 'url("fonts/%s")' % fname}
+                    # The Kindle renderer needs font-weight/style normal
+                    # for non bold/italic fonts
                     if 'Bold' in variant:
                         d['font-weight'] = 'bold'
+                    else:
+                        d['font-weight'] = 'normal'
                     if 'Italic' in variant:
                         d['font-style'] = 'italic'
+                    else:
+                        d['font-style'] = 'normal'
                     d = ['%s: %s' % (k, v) for k, v in d.items()]
                     d = ';\n\t'.join(d)
                     defs.append('@font-face {\n\t%s\n}\n' % d)
@@ -185,7 +191,7 @@ class Fonts(object):
         if not is_truetype_font(prefix):
             return None
         ext = 'otf' if prefix.startswith(b'OTTO') else 'ttf'
-        fname = ascii_filename('%s - %s.%s' % (name, variant, ext))
+        fname = ascii_filename('%s - %s.%s' % (name, variant, ext)).replace(' ', '_').replace('&', '_')
         with open(os.path.join(dest_dir, fname), 'wb') as dest:
             dest.write(prefix)
             dest.write(raw[32:])
