@@ -81,7 +81,9 @@ class FB2MLizer(object):
                       r'(\s*)</\1>', r'\2', text)
 
         # Clean up paragraphs endings.
-        text = re.sub(r'(?mu)\s+</p>', '</p>', text)
+        # Calibre 1c24a53865: ASCII whitespace only, so that paragraphs made
+        # of non-breaking spaces survive
+        text = re.sub(r'(?ma)\s+</p>', '</p>', text)
         # Condense empty paragraphs into a line break.
         text = re.sub(r'(?mu)(?:<p></p>\s*){3,}', '<empty-line/>', text)
         # Remove empty paragraphs.
@@ -183,7 +185,7 @@ class FB2MLizer(object):
         year = publisher = isbn = ''
         identifiers = self.oeb_book.metadata['identifier']
         for x in identifiers:
-            if (x.get(base.tag('opf', 'scheme'), None).lower() == 'uuid' or
+            if ((x.get(base.tag('opf', 'scheme')) or '').lower() == 'uuid' or
                     str(x).startswith('urn:uuid:')):
                 metadata['id'] = str(x).split(':')[-1]
                 break
@@ -209,7 +211,7 @@ class FB2MLizer(object):
                          entities.prepare_string_for_xml(publisher.value))
 
         for x in identifiers:
-            if x.get(base.tag('opf', 'scheme'), None).lower() == 'isbn':
+            if (x.get(base.tag('opf', 'scheme')) or '').lower() == 'isbn':
                 isbn = ('<isbn>%s</isbn>' %
                         entities.prepare_string_for_xml(x.value))
 
@@ -287,15 +289,18 @@ class FB2MLizer(object):
             if page_name:
                 key = self.oeb_book.guide[page_name].href
                 cover_item = self.oeb_book.manifest.hrefs[key]
-                # Get the first image in the page
-                for img in cover_item.xpath('//img'):
-                    cover_href = cover_item.abshref(img.get('src'))
-                    break
+                root = cover_item.data
+                # the guide can also point directly to an image
+                if isinstance(root, etree._Element):
+                    # Get the first image in the page
+                    for img in base.xpath(root, '//h:img[@src]'):
+                        cover_href = cover_item.abshref(
+                            base.urlnormalize(img.attrib['src']))
+                        break
 
-        if cover_href:
-            # Only write the image tag if it is in the manifest.
-            if (cover_href in self.oeb_book.manifest.hrefs and
-                    cover_href not in self.image_hrefs):
+        # Only write the image tag if it is in the manifest.
+        if cover_href and cover_href in self.oeb_book.manifest.hrefs:
+            if cover_href not in self.image_hrefs:
                 self.image_hrefs[cover_href] = 'img_%s' % len(self.image_hrefs)
             return ('<coverpage><image l:href="#%s"/></coverpage>' %
                     self.image_hrefs[cover_href])
@@ -374,6 +379,9 @@ class FB2MLizer(object):
 
     def create_flat_toc(self, nodes, level):
         for item in nodes:
+            if item.href is None:
+                self.create_flat_toc(item.nodes, level + 1)
+                continue
             href, mid, id = item.href.partition('#')
             if not id:
                 self.toc[href] = {None: 'page'}

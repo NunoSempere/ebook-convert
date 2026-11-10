@@ -9,13 +9,14 @@ import string
 
 from lxml import etree
 
-from ebook_convert.utils.date import parse_only_date
+from ebook_convert.utils.date import parse_only_date, strftime
 from ebook_convert.utils.img import save_cover_data_to
 from ebook_convert.utils.imghdr import identify
 from ebook_convert.ebooks.metadata import MetaInformation, check_isbn
 from ebook_convert.ebooks.chardet import xml_to_unicode
 from ebook_convert import polyglot
 from ebook_convert.utils import encoding as uenc
+from ebook_convert.utils.xml_parse import safe_xml_fromstring
 
 
 NAMESPACES = {'fb2': 'http://www.gribuser.ru/xml/fictionbook/2.0',
@@ -191,7 +192,7 @@ def _parse_author(elm_author, ctx):
         if nname:
             author = nname
 
-    return author
+    return str(author)
 
 
 def _parse_book_title(root, ctx):
@@ -319,7 +320,7 @@ def _parse_language(root, mi, ctx):
 
 def _get_fbroot(raw):
     raw = xml_to_unicode(raw, strip_encoding_pats=True)[0]
-    root = etree.fromstring(raw)
+    root = safe_xml_fromstring(raw)
     return ensure_namespace(root)
 
 
@@ -330,8 +331,11 @@ def _set_title(title_info, mi, ctx):
         title.text = mi.title
 
 
-def _set_comments(title_info, mi, ctx):
-    if not mi.is_null('comments'):
+def _set_comments(title_info, mi, ctx, apply_null=False):
+    if mi.is_null('comments'):
+        if apply_null:
+            ctx.clear_meta_tags(title_info, 'annotation')
+    else:
         from ebook_convert.utils.html2text import html2text
         ctx.clear_meta_tags(title_info, 'annotation')
         title = ctx.get_or_create(title_info, 'annotation')
@@ -360,16 +364,44 @@ def _set_authors(title_info, mi, ctx):
                     ctx.create_tag(atag, 'last-name', at_start=False).text = a
 
 
-def _set_tags(title_info, mi, ctx):
-    if not mi.is_null('tags'):
+def _set_publisher(publish_info, mi, ctx, apply_null=False):
+    if mi.is_null('publisher'):
+        if apply_null:
+            ctx.clear_meta_tags(publish_info, 'publisher')
+        return
+    ctx.clear_meta_tags(publish_info, 'publisher')
+    tag = ctx.create_tag(publish_info, 'publisher')
+    tag.text = mi.publisher
+
+
+def _set_pubdate(publish_info, mi, ctx, apply_null=False):
+    if mi.is_null('pubdate'):
+        if apply_null:
+            ctx.clear_meta_tags(publish_info, 'year')
+        return
+    ctx.clear_meta_tags(publish_info, 'year')
+    tag = ctx.create_tag(publish_info, 'year')
+    tag.text = strftime('%Y', mi.pubdate)
+
+
+def _set_tags(title_info, mi, ctx, apply_null=False):
+    if mi.is_null('tags'):
+        if apply_null:
+            ctx.clear_meta_tags(title_info, 'genre')
+    else:
         ctx.clear_meta_tags(title_info, 'genre')
         for t in mi.tags:
             tag = ctx.create_tag(title_info, 'genre')
             tag.text = t
 
 
-def _set_series(title_info, mi, ctx):
-    if not mi.is_null('series'):
+def _set_series(title_info, mi, ctx, apply_null=False):
+    if mi.is_null('series'):
+        # An explicitly empty series (as from ebook-meta --series "") also
+        # clears the series, matching the behavior of the OPF writer
+        if apply_null or mi.series is not None:
+            ctx.clear_meta_tags(title_info, 'sequence')
+    else:
         ctx.clear_meta_tags(title_info, 'sequence')
         seq = ctx.get_or_create(title_info, 'sequence')
         seq.set('name', mi.series)
@@ -416,14 +448,19 @@ def set_metadata(stream, mi, apply_null=False, update_timestamp=False):
     ctx = Context(root)
     desc = ctx.get_or_create(root, 'description')
     ti = ctx.get_or_create(desc, 'title-info')
+    pi = ctx.get_or_create(desc, 'publish-info')
 
     indent = ti.text
 
-    _set_comments(ti, mi, ctx)
-    _set_series(ti, mi, ctx)
-    _set_tags(ti, mi, ctx)
+    # Calibre 6b9b298594, ff6747d0a4, 1f7a80cdd3, eb080693c1: honour
+    # apply_null and also write publisher/pubdate
+    _set_comments(ti, mi, ctx, apply_null)
+    _set_series(ti, mi, ctx, apply_null)
+    _set_tags(ti, mi, ctx, apply_null)
     _set_authors(ti, mi, ctx)
     _set_title(ti, mi, ctx)
+    _set_publisher(pi, mi, ctx, apply_null)
+    _set_pubdate(pi, mi, ctx, apply_null)
     _set_cover(ti, mi, ctx)
 
     for child in ti:
@@ -451,8 +488,8 @@ def ensure_namespace(doc):
     # https://bugs.launchpad.net/bugs/1404701
     bare_tags = False
     for x in ('description', 'body'):
-        for x in doc.findall(x):
-            if '{' not in x.tag:
+        for z in doc.findall(x):
+            if '{' not in z.tag:
                 bare_tags = True
                 break
     if bare_tags:
@@ -460,5 +497,5 @@ def ensure_namespace(doc):
         raw = etree.tostring(doc, encoding='unicode')
         raw = re.sub(r'''<(description|body)\s+xmlns=['"]['"]>''', r'<\1>',
                      raw)
-        doc = etree.fromstring(raw)
+        doc = safe_xml_fromstring(raw)
     return doc
