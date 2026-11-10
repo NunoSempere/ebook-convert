@@ -152,6 +152,31 @@ your ``$PATH`` wins; ``uvx ebook-convert`` always runs this one.
 There is no Python 2 support and there will not be.
 
 
+Related projects
+----------------
+
+Tools that get books *into* a format this converter understands, or that
+cover ground it does not:
+
+- `FicHub`_: paste a fanfiction URL, get an EPUB (also MOBI, PDF or zipped
+  HTML). Covers FanFiction.net, FictionPress, SpaceBattles,
+  SufficientVelocity, QuestionableQuesting and more. `Source`_ is on GitHub.
+- `WebToEpub`_: browser extension (Chrome, Firefox) that turns the web novel
+  or serial you are reading into an EPUB for offline reading; supports
+  Archive of Our Own, FanFiction.net, Royal Road, Baka-Tsuki and many others.
+  `Code`_ is on GitHub.
+- `FanFicFare`_: command-line tool and Calibre plugin that downloads
+  fanfiction from a long list of sites into EPUB, with metadata.
+- `Calibre`_ itself: the full application this converter was extracted from,
+  with the complete ``ebook-convert`` including the formats not ported here
+  (AZW3 output, PDF output, LIT, SVG rasterization, ...).
+- `pandoc`_: universal document converter; the usual choice for turning
+  Markdown, LaTeX or Word documents into EPUB.
+- `kepubify`_: converts EPUB to Kobo's KEPUB flavour.
+- `Kindle Comic Converter`_: comics and manga (CBZ, CBR, images) to
+  Kindle- and Kobo-friendly files.
+
+
 License
 -------
 
@@ -165,3 +190,12 @@ This work is licensed under GPL3, like the original. See LICENSE for details.
 .. _Liberation fonts: https://github.com/liberationfonts/liberation-fonts
 .. _html5lib: https://github.com/html5lib/html5lib-python
 .. _the original project: https://github.com/gryf/ebook-converter
+.. _FicHub: https://fichub.net/
+.. _Source: https://github.com/FicHub/fichub.net
+.. _WebToEpub: https://chromewebstore.google.com/detail/webtoepub/akiljllkbielkidmammnifcnibaigelm
+.. _Code: https://github.com/dteviot/WebToEpub
+.. _FanFicFare: https://github.com/JimmXinu/FanFicFare
+.. _Calibre: https://calibre-ebook.com/
+.. _pandoc: https://pandoc.org/
+.. _kepubify: https://pgaskin.net/kepubify/
+.. _Kindle Comic Converter: https://github.com/ciromattia/kcc
