@@ -10,8 +10,9 @@ from ebook_convert.ebooks.txt.processor import opf_writer, HTML_TEMPLATE
 from ebook_convert.utils import entities
 
 
-BPDB_IDENT = b'BOOKMTIT'
-UPDB_IDENT = b'BOOKMTIU'
+# header.ident is text (Calibre 5c5ac6e2a5)
+BPDB_IDENT = 'BOOKMTIT'
+UPDB_IDENT = 'BOOKMTIU'
 
 punct_table = {
     u"︵": u"（",

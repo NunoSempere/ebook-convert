@@ -144,8 +144,8 @@ class SectionHeader(object):
         self.uid, = struct.unpack('>H', raw[0:2])
         self.paragraphs, = struct.unpack('>H', raw[2:4])
         self.size, = struct.unpack('>H', raw[4:6])
-        self.type, = struct.unpack('>B', raw[6])
-        self.flags, = struct.unpack('>B', raw[7])
+        self.type, = struct.unpack('>B', raw[6:7])
+        self.flags, = struct.unpack('>B', raw[7:8])
 
 
 class SectionHeaderText(object):
@@ -190,7 +190,6 @@ class SectionMetadata(object):
 
     def __init__(self, raw):
         self.default_encoding = 'latin-1'
-        self.exceptional_uid_encodings = {}
         self.owner_id = None
 
         record_count, = struct.unpack('>H', raw[0:2])
@@ -208,12 +207,9 @@ class SectionMetadata(object):
                 self.default_encoding = MIBNUM_TO_NAME.get(val, 'latin-1')
             # ExceptionalCharSets
             elif type == 2:
-                ii_adv = 0
-                for ii in range(length / 2):
-                    uid, = struct.unpack('>H', raw[6+adv+ii_adv:8+adv+ii_adv])
-                    mib, = struct.unpack('>H', raw[8+adv+ii_adv:10+adv+ii_adv])
-                    self.exceptional_uid_encodings[uid] = MIBNUM_TO_NAME.get(mib, 'latin-1')
-                    ii_adv += 4
+                # Calibre d1ec4a2b91: malformed headers used to crash the
+                # conversion and the data was never used anyway
+                pass
             # OwnerID
             elif type == 3:
                 self.owner_id = struct.unpack('>I', raw[6+adv:10+adv])
@@ -228,7 +224,8 @@ class SectionMetadata(object):
             elif type == 7:
                 pass
 
-            adv += 2*length
+            # each record is a 4 byte header plus `length` words
+            adv += 4 + 2*length
 
 
 class SectionText(object):
@@ -298,7 +295,6 @@ class Reader(FormatReader):
         # list of sections.
         self.uid_section_number = OrderedDict()
         self.uid_text_secion_number = OrderedDict()
-        self.uid_text_secion_encoding = {}
         self.uid_image_section_number = {}
         self.uid_composite_image_section_number = {}
         self.metadata_section_number = None
@@ -343,8 +339,6 @@ class Reader(FormatReader):
         # to make access easier.
         if self.metadata_section_number:
             mdata_section = self.sections[self.metadata_section_number][1]
-            for k, v in mdata_section.exceptional_uid_encodings.items():
-                self.uid_text_secion_encoding[k] = v
             self.default_encoding = mdata_section.default_encoding
             self.owner_id = mdata_section.owner_id
 
@@ -369,7 +363,7 @@ class Reader(FormatReader):
                         html += self.process_phtml(section_data.data, section_data.header.paragraph_offsets)
                     elif section_header.type == DATATYPE_PHTML_COMPRESSED:
                         d = self.decompress_phtml(section_data.data)
-                        html += self.process_phtml(d, section_data.header.paragraph_offsets).decode(self.get_text_uid_encoding(section_header.uid), 'replace')
+                        html += self.process_phtml(d, section_data.header.paragraph_offsets)
                     html += '</body></html>'
                     htmlf.write(html.encode('utf-8'))
 
@@ -479,7 +473,7 @@ class Reader(FormatReader):
             from ebook_convert.ebooks.compression.palmdoc import decompress_doc
             return decompress_doc(data)
 
-    def process_phtml(self, d, paragraph_offsets=[]):
+    def process_phtml(self, d, paragraph_offsets=()):
         html = u'<p id="p0">'
         offset = 0
         paragraph_open = True
@@ -731,9 +725,3 @@ class Reader(FormatReader):
             html += u'</p>'
 
         return html
-
-    def get_text_uid_encoding(self, uid):
-        # Return the user sepcified input encoding,
-        # otherwise return the alternate encoding specified for the uid,
-        # otherwise retur the default encoding for the document.
-        return self.options.input_encoding if self.options.input_encoding else self.uid_text_secion_encoding.get(uid, self.default_encoding)

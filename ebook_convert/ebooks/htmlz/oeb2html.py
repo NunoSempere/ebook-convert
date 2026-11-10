@@ -6,6 +6,9 @@ import re
 import urllib.parse
 
 from functools import partial
+from operator import attrgetter
+
+from css_parser import replaceUrls
 from lxml import html
 
 from ebook_convert import constants as const
@@ -16,6 +19,12 @@ from ebook_convert.utils import entities
 from ebook_convert import logging
 from ebook_convert import polyglot
 
+
+OEB_FONTS = {'font/ttf', 'font/otf', 'font/woff', 'font/woff2',
+             'application/x-font-ttf', 'application/x-font-otf',
+             'application/x-font-truetype', 'application/x-font-opentype',
+             'application/font-sfnt', 'application/vnd.ms-opentype',
+             'application/font-woff', 'application/font-woff2'}
 
 SELF_CLOSING_TAGS = {'area', 'base', 'basefont', 'br', 'hr', 'input', 'img',
                      'link', 'meta'}
@@ -52,6 +61,7 @@ class OEB2HTML(object):
         self.log = LOG if log is None else log
         self.links = {}
         self.images = {}
+        self.fonts = {}
 
     def oeb2html(self, oeb_book, opts):
         self.log.info('Converting OEB book to HTML...')
@@ -62,6 +72,7 @@ class OEB2HTML(object):
             self.book_title = 'Unknown'
         self.links = {}
         self.images = {}
+        self.fonts = {}
         self.base_hrefs = [item.href for item in oeb_book.spine]
         self.map_resources(oeb_book)
 
@@ -95,31 +106,44 @@ class OEB2HTML(object):
         return self.links[href]
 
     def map_resources(self, oeb_book):
-        for item in oeb_book.manifest:
-            if item.media_type in base.OEB_IMAGES:
-                if item.href not in self.images:
-                    ext = os.path.splitext(item.href)[1]
-                    fname = '%s%s' % (len(self.images), ext)
-                    fname = fname.zfill(10)
-                    self.images[item.href] = fname
-            if item in oeb_book.spine:
-                self.get_link_id(item.href)
-                root = item.data.find(base.tag('xhtml', 'body'))
-                link_attrs = set(html.defs.link_attrs)
-                link_attrs.add(base.tag('xlink', 'href'))
-                for el in root.iter():
-                    attribs = el.attrib
-                    try:
-                        if not isinstance(el.tag, (str, bytes)):
-                            continue
-                    except:
+        # Calibre 4175ef18ad: rename images in filename order so that the
+        # numbering is deterministic
+        images = sorted((item for item in oeb_book.manifest
+                         if item.media_type in base.OEB_IMAGES),
+                        key=attrgetter('href'))
+        for item in images:
+            if item.href not in self.images:
+                ext = os.path.splitext(item.href)[1]
+                fname = '%06d%s' % (len(self.images), ext)
+                self.images[item.href] = fname
+        # Calibre 075e7e5a4b: embedded fonts go into fonts/
+        fonts = sorted((item for item in oeb_book.manifest
+                        if item.media_type in OEB_FONTS),
+                       key=attrgetter('href'))
+        for item in fonts:
+            if item.href not in self.fonts:
+                ext = os.path.splitext(item.href)[1]
+                fname = '%06d%s' % (len(self.fonts), ext)
+                self.fonts[item.href] = fname
+
+        for item in oeb_book.spine:
+            self.get_link_id(item.href)
+            root = item.data.find(base.tag('xhtml', 'body'))
+            link_attrs = set(html.defs.link_attrs)
+            link_attrs.add(base.tag('xlink', 'href'))
+            for el in root.iter():
+                attribs = el.attrib
+                try:
+                    if not isinstance(el.tag, (str, bytes)):
                         continue
-                    for attr in attribs:
-                        if attr in link_attrs:
-                            href = item.abshref(attribs[attr])
-                            href, id = urllib.parse.urldefrag(href)
-                            if href in self.base_hrefs:
-                                self.get_link_id(href, id)
+                except Exception:
+                    continue
+                for attr in attribs:
+                    if attr in link_attrs:
+                        href = item.abshref(attribs[attr])
+                        href, id = urllib.parse.urldefrag(href)
+                        if href in self.base_hrefs:
+                            self.get_link_id(href, id)
 
     def rewrite_link(self, url, page=None):
         if not page:
@@ -129,6 +153,8 @@ class OEB2HTML(object):
             return 'images/%s' % self.images[abs_url]
         if abs_url in self.links:
             return self.links[abs_url]
+        if abs_url in self.fonts:
+            return 'fonts/%s' % self.fonts[abs_url]
         return url
 
     def rewrite_ids(self, root, page):
@@ -145,10 +171,13 @@ class OEB2HTML(object):
                                                    el.attrib['id'])[1:]
 
     def get_css(self, oeb_book):
-        css = b''
+        css = ''
         for item in oeb_book.manifest:
-            if item.media_type == 'text/css':
-                css += polyglot.as_bytes(item.data.cssText) + b'\n\n'
+            if hasattr(item.data, 'cssText'):
+                # Calibre 8ad001a64d: url() references in stylesheets must
+                # point to the renamed images/fonts
+                replaceUrls(item.data, partial(self.rewrite_link, page=item))
+                css += polyglot.as_unicode(item.data.cssText) + '\n\n'
         return css
 
     def prepare_string_for_html(self, raw):

@@ -163,6 +163,9 @@ class TXTInput(InputFormatPlugin):
         length = 0
         base_dir = self.output_dir = os.getcwd()
         cover_path = None
+        # file_ext may be changed to that of the text inside a TXTZ, keep
+        # the container's extension for the metadata reader
+        container_ext = file_ext
 
         # Extract content from zip archive.
         if file_ext == 'txtz':
@@ -354,7 +357,7 @@ class TXTInput(InputFormatPlugin):
         # Set metadata from file.
         if input_mi is None:
             from ebook_convert.customize.ui import get_file_type_metadata
-            input_mi = get_file_type_metadata(stream, file_ext)
+            input_mi = get_file_type_metadata(stream, container_ext)
         from ebook_convert.ebooks.oeb.transforms.metadata import meta_info_to_oeb_metadata
         meta_info_to_oeb_metadata(input_mi, oeb.metadata, log)
         self.html_postprocess_title = input_mi.title
