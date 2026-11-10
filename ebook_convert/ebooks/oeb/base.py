@@ -269,6 +269,10 @@ GIF_MIME = mimetypes.types_map['.gif']
 JPEG_MIME = mimetypes.types_map['.jpeg']
 PNG_MIME = mimetypes.types_map['.png']
 SVG_MIME = mimetypes.types_map['.svg']
+# Not all Python versions know these extensions, so spell the types out
+WEBP_MIME = 'image/webp'
+AVIF_MIME = 'image/avif'
+JXL_MIME = 'image/jxl'
 BINARY_MIME = 'application/octet-stream'
 
 XHTML_NS = const.XHTML_NS
@@ -277,7 +281,8 @@ XHTML_CSS_NAMESPACE = '@namespace "%s";\n' % const.XHTML_NS
 
 OEB_STYLES = {CSS_MIME, OEB_CSS_MIME, 'text/x-oeb-css', 'xhtml/css'}
 OEB_DOCS = {XHTML_MIME, 'text/html', OEB_DOC_MIME, 'text/x-oeb-document'}
-OEB_RASTER_IMAGES = {GIF_MIME, JPEG_MIME, PNG_MIME}
+OEB_RASTER_IMAGES = {GIF_MIME, JPEG_MIME, PNG_MIME, WEBP_MIME, AVIF_MIME,
+                     JXL_MIME}
 OEB_IMAGES = {GIF_MIME, JPEG_MIME, PNG_MIME, SVG_MIME}
 
 MS_COVER_TYPE = 'other.ms-coverimage-standard'
