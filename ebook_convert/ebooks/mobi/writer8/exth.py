@@ -23,6 +23,7 @@ EXTH_CODES = {
     'versionnumber': 114,
     'startreading': 116,
     'kf8_header_index': 121,
+    'override_kindle_fonts': 528,
     'num_of_resources': 125,
     'kf8_thumbnail_uri': 129,
     'kf8_unknown_count': 131,
@@ -92,7 +93,7 @@ def build_exth(metadata, prefer_author_sort=False, is_periodical=False,
     # Write UUID as ASIN
     uuid = None
     for x in metadata['identifier']:
-        if (x.get(base.tag('opf', 'scheme'), None).lower() == 'uuid' or
+        if ((x.get(base.tag('opf', 'scheme')) or '').lower() == 'uuid' or
                 str(x).startswith('urn:uuid:')):
             uuid = str(x).split(':')[-1]
             break
@@ -138,6 +139,13 @@ def build_exth(metadata, prefer_author_sort=False, is_periodical=False,
     datestr = datestr.encode('utf-8')
     exth.write(pack(b'>II', EXTH_CODES['pubdate'], len(datestr) + 8))
     exth.write(datestr)
+    nrecs += 1
+
+    # Kindle firmware >= 5.13.5 hides the "Publisher font" option unless this
+    # record is present, making embedded fonts unusable (Calibre 1387cfc39f).
+    exth.write(pack(b'>II', EXTH_CODES['override_kindle_fonts'],
+                    len(b'true') + 8))
+    exth.write(b'true')
     nrecs += 1
     if is_periodical:
         exth.write(pack(b'>II', EXTH_CODES['lastupdatetime'],

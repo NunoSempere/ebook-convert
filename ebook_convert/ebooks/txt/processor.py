@@ -56,16 +56,16 @@ def split_txt(txt, epub_split_size_kb=0):
     if epub_split_size_kb > 0:
         if isinstance(txt, str):
             txt = txt.encode('utf-8')
-        length_byte = len(txt)
-        # Calculating the average chunk value for easy splitting as EPUB (+2 as a safe margin)
-        chunk_size = int(length_byte / (int(length_byte / (epub_split_size_kb * 1024)) + 2))
-        # if there are chunks with a superior size then go and break
-        parts = txt.split(b'\n\n')
-        lengths = tuple(map(len, parts))
-        if lengths and max(lengths) > chunk_size:
-            txt = b'\n\n'.join([
-                split_string_separator(line, chunk_size) for line in parts
-            ])
+        # Only split when the text is actually over the limit, and split into
+        # chunks a little under the limit (Calibre 9ec29bb548: the previous
+        # average-chunk computation dropped text).
+        if len(txt) > epub_split_size_kb * 1024:
+            chunk_size = max(16, epub_split_size_kb - 32) * 1024
+            parts = txt.split(b'\n\n')
+            if parts and max(map(len, parts)) > chunk_size:
+                txt = b'\n\n'.join(
+                    split_string_separator(line, chunk_size) for line in parts
+                )
     if isinstance(txt, bytes):
         txt = txt.decode('utf-8')
 
@@ -239,15 +239,15 @@ def split_string_separator(txt, size):
     '''
     if len(txt) > size and size > 2:
         size -= 2
-        txt = []
+        ans = []
         for part in (txt[i * size: (i + 1) * size] for i in range(0, len(txt), size)):
             idx = part.rfind(b'.')
             if idx == -1:
                 part += b'\n\n'
             else:
                 part = part[:idx + 1] + b'\n\n' + part[idx:]
-            txt.append(part)
-        txt = b''.join(txt)
+            ans.append(part)
+        txt = b''.join(ans)
     return txt
 
 
