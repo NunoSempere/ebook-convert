@@ -108,7 +108,8 @@ def itercsslinks(raw):
         yield match.group(1), match.start(1)
 
 
-_link_attrs = set(html.defs.link_attrs) | {tag('xlink', 'href'), 'poster'}
+_link_attrs = set(html.defs.link_attrs) | {tag('xlink', 'href'), 'poster',
+                                           'altimg'}
 
 
 def iterlinks(root, find_links_in_css=True):
@@ -179,10 +180,23 @@ def resolve_base_href(root):
                           namespaces=const.XPNSMAP)
     for b in basetags:
         base_href = b.get('href')
-        b.drop_tree()
+        # lxml.etree elements have no drop_tree(), so remove b, preserving
+        # its tail
+        parent = b.getparent()
+        if parent is not None:
+            if b.tail:
+                prev = b.getprevious()
+                if prev is None:
+                    parent.text = (parent.text or '') + b.tail
+                else:
+                    prev.tail = (prev.tail or '') + b.tail
+            parent.remove(b)
     if not base_href:
         return
-    make_links_absolute(root, base_href, resolve_base_href=False)
+    make_links_absolute(root, base_href)
+
+
+_resolve_base_href = resolve_base_href  # the resolve_base_href parameter of rewrite_links() shadows this function
 
 
 def rewrite_links(root, link_repl_func, resolve_base_href=False):
@@ -204,7 +218,7 @@ def rewrite_links(root, link_repl_func, resolve_base_href=False):
     log.raiseExceptions = False
 
     if resolve_base_href:
-        resolve_base_href(root)
+        _resolve_base_href(root)
     for el, attrib, link, pos in iterlinks(root, find_links_in_css=False):
         new_link = link_repl_func(link.strip())
         if new_link == link:
@@ -256,6 +270,67 @@ def rewrite_links(root, link_repl_func, resolve_base_href=False):
             el.set('style', repl)
 
 
+# Attributes whose values are space separated lists of ids of elements in the
+# same document
+IDREF_ATTRS = frozenset((
+    'aria-activedescendant',
+    'aria-controls',
+    'aria-describedby',
+    'aria-details',
+    'aria-errormessage',
+    'aria-flowto',
+    'aria-labelledby',
+    'aria-owns',
+))
+# Attributes that are lists of ids only on specific tags
+TAG_IDREF_ATTRS = {
+    'label': frozenset(('for',)),
+    'output': frozenset(('for',)),
+    'td': frozenset(('headers',)),
+    'th': frozenset(('headers',)),
+}
+
+
+def iteridrefs(root):
+    """
+    Iterate over all attributes in the document that refer to other elements
+    in the same document by id, such as aria-labelledby. Yields tuples of the
+    form (element, attribute name, list of ids).
+    """
+    for el in root.iter('*'):
+        attribs = el.attrib
+        attrs = IDREF_ATTRS.intersection(attribs)
+        etag = el.tag
+        extra = (TAG_IDREF_ATTRS.get(parse_utils.barename(etag).lower())
+                 if isinstance(etag, str) else None)
+        if extra:
+            attrs |= extra.intersection(attribs)
+        for attr in sorted(attrs):
+            ids = attribs[attr].split()
+            if ids:
+                yield el, attr, ids
+
+
+def rewrite_idrefs(root, id_repl_func):
+    """
+    Rewrite all ids in attributes that refer to other elements in the same
+    document by id, such as aria-labelledby. For each id
+    ``id_repl_func(id)`` is called and the return value replaces the id. If
+    it returns None or the empty string, the id is removed and if no ids
+    remain, so is the attribute. Returns True iff something was changed.
+    """
+    changed = False
+    for el, attr, ids in iteridrefs(root):
+        new_ids = [x for x in map(id_repl_func, ids) if x]
+        if new_ids != ids:
+            changed = True
+            if new_ids:
+                el.set(attr, ' '.join(new_ids))
+            else:
+                del el.attrib[attr]
+    return changed
+
+
 EPUB_MIME = mimetypes.types_map['.epub']
 XHTML_MIME = mimetypes.types_map['.xhtml']
 CSS_MIME = mimetypes.types_map['.css']
@@ -278,11 +353,13 @@ XHTML_CSS_NAMESPACE = '@namespace "%s";\n' % const.XHTML_NS
 OEB_STYLES = {CSS_MIME, OEB_CSS_MIME, 'text/x-oeb-css', 'xhtml/css'}
 OEB_DOCS = {XHTML_MIME, 'text/html', OEB_DOC_MIME, 'text/x-oeb-document'}
 OEB_RASTER_IMAGES = {GIF_MIME, JPEG_MIME, PNG_MIME}
-OEB_IMAGES = {GIF_MIME, JPEG_MIME, PNG_MIME, SVG_MIME}
+# Modern raster formats (2d68fbabb0); kept as a separate, idempotent update
+OEB_RASTER_IMAGES |= {'image/webp', 'image/avif', 'image/jxl'}
+OEB_IMAGES = {GIF_MIME, JPEG_MIME, PNG_MIME, SVG_MIME} | OEB_RASTER_IMAGES
 
 MS_COVER_TYPE = 'other.ms-coverimage-standard'
 
-ENTITY_RE = re.compile(r'&([a-zA-Z_:][a-zA-Z0-9.-_:]+);')
+ENTITY_RE = re.compile(r'&([a-zA-Z_:][a-zA-Z0-9._:-]+);')
 COLLAPSE_RE = re.compile(r'[ \t\r\n\v]+')
 QNAME_RE = re.compile(r'^[{][^{}]+[}][^{}]+$')
 PREFIXNAME_RE = re.compile(r'^[^:]+[:][^:]+')
@@ -376,11 +453,14 @@ def serialize(data, media_type, pretty_print=False):
     if isinstance(data, str):
         return data.encode('utf-8')
     if hasattr(data, 'cssText'):
+        from ebook_convert.ebooks.oeb.polish.utils import \
+            setup_css_parser_serialization
+        setup_css_parser_serialization()
         data = data.cssText
         if isinstance(data, str):
             data = data.encode('utf-8')
         return data + b'\n'
-    return bytes(data)
+    return b'' if data is None else bytes(data)
 
 
 ASCII_CHARS = frozenset(chr(x) for x in range(128))
@@ -517,15 +597,34 @@ class DirContainer(object):
                     self.opfname = path
                     return
 
+    @property
+    def rootdir(self):
+        return self._rootdir
+
+    @rootdir.setter
+    def rootdir(self, val):
+        self._rootdir = os.path.abspath(val)
+        self._in_root_dir_check = self._rootdir + os.sep
+
+    def _abspath(self, path):
+        # Resolve a (possibly quoted) path relative to the root directory,
+        # refusing paths that escape it (e.g. via ../ or an absolute path)
+        path = os.path.abspath(os.path.join(self.rootdir,
+                                            urllib.parse.unquote(path)))
+        if not path.startswith(self._in_root_dir_check):
+            raise ValueError('Path %r is not inside %r' % (path,
+                                                           self.rootdir))
+        return path
+
     def read(self, path):
         if path is None:
             path = self.opfname
-        path = os.path.join(self.rootdir, urllib.parse.unquote(path))
+        path = self._abspath(path)
         with open(path, 'rb') as f:
             return f.read()
 
     def write(self, path, data):
-        path = os.path.join(self.rootdir, urllib.parse.unquote(path))
+        path = self._abspath(path)
         dir = os.path.dirname(path)
         if not os.path.isdir(dir):
             os.makedirs(dir)
@@ -536,8 +635,10 @@ class DirContainer(object):
         if not path:
             return False
         try:
-            path = os.path.join(self.rootdir, urllib.parse.unquote(path))
-        except ValueError:  # Happens if path contains quoted special chars
+            path = self._abspath(path)
+        except ValueError:
+            # Happens if path contains quoted special chars or is outside
+            # the root directory
             return False
         try:
             return os.path.isfile(path)
@@ -940,7 +1041,11 @@ class Manifest(object):
             else:
                 title = 'Unknown'
 
-            return self._parse_xhtml(convert_markdown(data, title=title))
+            return self._parse_xhtml(convert_markdown(self.oeb.decode(data),
+                                                      title=title))
+
+        #: Set to False to keep @import rules instead of inlining them
+        resolve_css_imports = True
 
         def _parse_css(self, data):
             from css_parser import CSSParser, log, resolveImports
@@ -955,11 +1060,12 @@ class Manifest(object):
                                self._fetch_css,
                                log=_css_logger)
             data = parser.parseString(data, href=self.href, validate=False)
-            # Resolve into an explicit target sheet; the default would
-            # re-fetch any @import it could not resolve, possibly over the
-            # network.
-            data = resolveImports(data, target=parser.parseString(
-                '', href=self.href, validate=False))
+            if getattr(self, 'resolve_css_imports', True):
+                # Resolve into an explicit target sheet; the default would
+                # re-fetch any @import it could not resolve, possibly over
+                # the network.
+                data = resolveImports(data, target=parser.parseString(
+                    '', href=self.href, validate=False))
             for rule in tuple(data.cssRules.rulesOfType(CSSRule.PAGE_RULE)):
                 data.cssRules.remove(rule)
             return data
@@ -995,10 +1101,7 @@ class Manifest(object):
             """
             data = self._data
             if data is None:
-                if self._loader is None:
-                    return None
-                data = self._loader(getattr(self, 'html_input_href',
-                                            self.href))
+                data = self.data_as_bytes_or_none
             try:
                 mt = self.media_type.lower()
             except Exception:
@@ -1026,6 +1129,15 @@ class Manifest(object):
         @data.deleter
         def data(self):
             self._data = None
+
+        @property
+        def data_as_bytes_or_none(self):
+            if self._loader is None:
+                return None
+            return self._loader(getattr(self, 'html_input_href', self.href))
+
+        def reparse_css(self):
+            self._data = self._parse_css(str(self))
 
         def unload_data_from_memory(self, memory=None):
             if isinstance(self._data, bytes):
@@ -1836,7 +1948,7 @@ class OEBBook(object):
             data = data[4:]
         elif data[:2] in (b'\xff\xfe', b'\xfe\xff'):
             bom_enc = {b'\xff\xfe': 'utf-16-le',
-                       'b\xfe\xff': 'utf-16-be'}[data[:2]]
+                       b'\xfe\xff': 'utf-16-be'}[data[:2]]
             data = data[2:]
         elif data[:3] == b'\xef\xbb\xbf':
             bom_enc = 'utf-8'
@@ -1907,7 +2019,10 @@ class OEBBook(object):
         return
 
     def _to_ncx(self):
-        lang = str(self.metadata.language[0])
+        try:
+            lang = str(self.metadata.language[0])
+        except IndexError:
+            lang = 'en'
         lang = lang.replace('_', '-')
         ncx = etree.Element(tag('ncx', 'ncx'),
                             attrib={'version': '2005-1',

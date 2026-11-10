@@ -60,8 +60,24 @@ class Split(object):
                       'any...')
         self.opts = opts
         self.map = {}
+        self.nav_href = getattr(opts, 'epub3_nav_href', '')
+        self.existing_nav = getattr(opts, 'epub3_nav_parsed', None)
+        output_supports_nav = False
+        try:
+            output_supports_nav = int(opts.epub_version) >= 3
+        except Exception:
+            pass
+
+        def is_nav(item):
+            ans = item.href == self.nav_href and output_supports_nav
+            if ans:
+                self.log.info('Not splitting %s as it is the EPUB3 nav '
+                              'document', self.nav_href)
+            return ans
+
         for item in list(self.oeb.manifest.items):
-            if item.spine_position is not None and etree.iselement(item.data):
+            if (item.spine_position is not None and
+                    etree.iselement(item.data) and not is_nav(item)):
                 self.split_item(item)
 
         self.fix_links()
@@ -80,6 +96,7 @@ class Split(object):
 
     def find_page_breaks(self, item):
         if self.page_break_selectors is None:
+            ignored = {'avoid', 'auto', 'inherit', 'never'}
             self.page_break_selectors = set()
             stylesheets = [x.data for x in self.oeb.manifest if x.media_type in
                            base.OEB_STYLES]
@@ -91,7 +108,7 @@ class Split(object):
                     getattr(rule.style.getPropertyCSSValue(
                         'page-break-after'), 'cssText', '').strip().lower())
                 try:
-                    if before and before not in {'avoid', 'auto', 'inherit'}:
+                    if before and before not in ignored:
                         self.page_break_selectors.add((rule.selectorText,
                                                        True))
                         if self.remove_css_pagebreaks:
@@ -99,7 +116,7 @@ class Split(object):
                 except Exception:
                     pass
                 try:
-                    if after and after not in {'avoid', 'auto', 'inherit'}:
+                    if after and after not in ignored:
                         self.page_break_selectors.add((rule.selectorText,
                                                        False))
                         if self.remove_css_pagebreaks:
@@ -118,7 +135,9 @@ class Split(object):
         _tags = {'html', 'body', 'head', 'style', 'script', 'meta', 'link'}
         for selector, before in self.page_break_selectors:
             try:
-                for elem in select(selector):
+                matches = (select(selector) if isinstance(selector, str)
+                           else selector(item.data))
+                for elem in matches:
                     if (elem in descendants and
                             elem.tag.rpartition('}')[2].lower() not in _tags):
                         elem.set('pb_before', '1' if before else '0')
@@ -164,10 +183,36 @@ class Split(object):
         '''
         Fix references to the split files in other content files.
         '''
+        seen = set()
         for item in self.oeb.manifest:
             if etree.iselement(item.data):
                 self.current_item = item
                 base.rewrite_links(item.data, self.rewrite_links)
+                seen.add(item.data)
+        if self.existing_nav is not None and self.existing_nav not in seen:
+            # The EPUB 3 nav of the input book is not in the manifest (it
+            # was converted to an NCX), but is re-used for EPUB 3 output, so
+            # its links must point to the split files too
+            seen.add(self.existing_nav)
+            nav_href = self.nav_href
+
+            class FakeManifestItem(object):
+                href = nav_href
+
+                def abshref(self, href):
+                    try:
+                        purl = urllib.parse.urlparse(href)
+                    except ValueError:
+                        return href
+                    if purl.scheme and purl.scheme != 'file':
+                        return href
+                    return urllib.parse.urljoin(self.href, href)
+
+                def relhref(self, href):
+                    return base.rel_href(self.href, href)
+
+            self.current_item = FakeManifestItem()
+            base.rewrite_links(self.existing_nav, self.rewrite_links)
 
     def rewrite_links(self, url):
         href, frag = urllib.parse.urldefrag(url)
@@ -309,7 +354,7 @@ class FlowSplitter(object):
             return False
         txt = re.sub(r'\s+|\xa0', '',
                      etree.tostring(body, method='text', encoding='unicode'))
-        if len(txt) > 1:
+        if len(txt):
             return False
         for img in root.xpath('//h:img', namespaces=const.XPNSMAP):
             if img.get('style', '') != 'display:none':

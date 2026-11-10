@@ -76,6 +76,10 @@ class OEBReader(object):
                 elem.tag = base.tag('opf', parse_utils.barename(elem.tag))
         nsmap.update(const.OPF2_NSMAP)
         attrib = dict(opf.attrib)
+        # Handle invalid xmlns:= (671d5cec4b)
+        xmlns = attrib.pop('xmlns:', None)
+        if xmlns:
+            attrib['xmlns'] = xmlns
         nroot = etree.Element(base.tag('opf', 'package'),
                               nsmap={None: const.OPF2_NS}, attrib=attrib)
         metadata = etree.SubElement(nroot, base.tag('opf', 'metadata'),
@@ -287,10 +291,12 @@ class OEBReader(object):
             if href in manifest.hrefs:
                 self.logger.warning('Duplicate manifest entry for %r', href)
                 continue
-            if not self.oeb.container.exists(href):
+            if href is None or not self.oeb.container.exists(href):
                 self.logger.warning('Manifest item %r not found', href)
                 continue
-            if id in manifest.ids:
+            if not id:
+                id = manifest.generate('id')[0]
+            elif id in manifest.ids:
                 self.logger.warning('Duplicate manifest id %r', id)
                 id, href = manifest.generate(id, href)
             manifest.add(id, href, media_type, fallback)
@@ -370,7 +376,11 @@ class OEBReader(object):
         guide = self.oeb.guide
         manifest = self.oeb.manifest
         for elem in base.xpath(opf, '/o2:package/o2:guide/o2:reference'):
-            ref_href = elem.get('href')
+            ref_href, typ = elem.get('href'), elem.get('type')
+            if not ref_href or not typ:
+                self.logger.warning('Ignoring guide reference with no href '
+                                    'or type: %r, %r', ref_href, typ)
+                continue
             path = base.urlnormalize(urllib.parse.urldefrag(ref_href)[0])
             if path not in manifest.hrefs:
                 corrected_href = None
@@ -383,7 +393,6 @@ class OEBReader(object):
                                         ref_href)
                     continue
                 ref_href = corrected_href
-            typ = elem.get('type')
             if typ not in guide:
                 guide.add(typ, elem.get('title'), ref_href)
 

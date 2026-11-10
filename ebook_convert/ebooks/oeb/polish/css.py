@@ -314,6 +314,7 @@ def _classes_in_selector(selector, classes):
         classes.add(cn)
 
 
+@functools.lru_cache(maxsize=4096)
 def classes_in_selector(text):
     classes = set()
     try:

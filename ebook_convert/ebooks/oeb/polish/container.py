@@ -540,9 +540,20 @@ class Container(ContainerBase):  # {{{
         return bool(name) and name in self.name_path_map
 
     def has_name_and_is_not_empty(self, name):
-        if not self.has_name(name):
+        path = self.name_path_map.get(name)
+        if not path:
             return False
-        return os.path.getsize(self.name_path_map[name]) > 0
+        try:
+            sz = os.path.getsize(path)
+            if sz == 0:
+                # this can happen when the directory entry is not flushed
+                # (which happens during fast EPUB extraction), so open the
+                # file and check to be sure.
+                with open(path) as f:
+                    sz = f.seek(0, os.SEEK_END)
+            return sz > 0
+        except OSError:
+            return False
 
     def has_name_case_insensitive(self, name):
         if not name:
@@ -1432,6 +1443,30 @@ def opf_to_azw3(opf, outpath, container):
 
 def epub_to_azw3(epub, outpath=None):
     container = get_container(epub, tweak_mode=True)
+    # The MOBI writer only knows about the guide cover reference, so create
+    # one from the EPUB 3 cover-image property and drop the calibre
+    # title-page marker (1daa020a4f)
+    changed = False
+    for item in container.opf_xpath('//opf:manifest/opf:item[@properties and @href]'):
+        p = item.get('properties').split()
+        if 'cover-image' in p:
+            guides = container.opf_xpath('//opf:guide')
+            if not guides:
+                guides = (container.opf.makeelement(oeb_base.tag('opf', 'guide')),)
+                container.opf.append(guides[0])
+            for guide in guides:
+                for child in guide:
+                    if child.get('type') == 'cover':
+                        break
+                else:
+                    guide.append(guide.makeelement(oeb_base.tag('opf', 'reference'), type='cover', href=item.get('href')))
+                    changed = True
+            break
+        elif 'calibre:title-page' in p:
+            item.getparent().remove(item)
+    if changed:
+        container.dirty(container.opf_name)
+        container.commit_item(container.opf_name)
     outpath = outpath or (epub.rpartition('.')[0] + '.azw3')
     opf_to_azw3(container.name_to_abspath(container.opf_name), outpath, container)
 
