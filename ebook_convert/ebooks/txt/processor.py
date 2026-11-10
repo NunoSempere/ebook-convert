@@ -222,7 +222,9 @@ def remove_indents(txt):
     '''
     Remove whitespace at the beginning of each line.
     '''
-    return '\n'.join([l.lstrip() for l in txt.splitlines()])
+    # Calibre 4225ab51a5 / 79006c3460: a single regex is much faster and
+    # must not eat the newlines themselves.
+    return re.sub(r'^[\r\t\f\v ]+', '', txt, flags=re.MULTILINE)
 
 
 def opf_writer(path, opf_name, manifest, spine, mi):
@@ -233,14 +235,30 @@ def opf_writer(path, opf_name, manifest, spine, mi):
         opf.render(opffile)
 
 
+def split_utf8(s, n):
+    '''Split UTF-8 s into chunks of maximum length n, never inside a
+    multibyte sequence (Calibre 57fe3de98e).'''
+    if n < 3:
+        raise ValueError(
+            'Cannot split into chunks of less than {} < 4 bytes'.format(n))
+    view = memoryview(s)
+    while len(view) > n:
+        k = n
+        while (view[k] & 0xC0) == 0x80:
+            k -= 1
+        yield bytes(view[:k])
+        view = view[k:]
+    yield bytes(view)
+
+
 def split_string_separator(txt, size):
     '''
     Splits the text by putting \n\n at the point size.
     '''
-    if len(txt) > size and size > 2:
+    if len(txt) > size > 3:
         size -= 2
         ans = []
-        for part in (txt[i * size: (i + 1) * size] for i in range(0, len(txt), size)):
+        for part in split_utf8(txt, size):
             idx = part.rfind(b'.')
             if idx == -1:
                 part += b'\n\n'

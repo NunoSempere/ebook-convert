@@ -26,6 +26,17 @@ MD_EXTENSIONS = {
 }
 
 
+TXTZ_FORMATTING_FOR_EXTENSION = {'md': 'markdown', 'markdown': 'markdown', 'textile': 'textile'}
+
+
+def txtz_file_ext(path):
+    return os.path.splitext(path)[1].lower().lstrip('.')
+
+
+def txtz_formatting_for_extension(file_ext):
+    return TXTZ_FORMATTING_FOR_EXTENSION.get(file_ext.lower().lstrip('.'))
+
+
 class TXTInput(InputFormatPlugin):
 
     name        = 'TXT Input'
@@ -115,12 +126,15 @@ class TXTInput(InputFormatPlugin):
         from ebook_convert.utils.html5 import parse
         root = parse(html)
         changed = False
+        # Calibre 9efcc37f16/c43f347837/71547e8a11: only pick up images that
+        # live inside the book's own directory.
+        base_dir = os.path.normcase(os.path.abspath(base_dir)) + os.sep
         for img in root.xpath('//img[@src]'):
             src = img.get('src')
             prefix = src.split(':', 1)[0].lower()
-            if prefix not in ('file', 'http', 'https', 'ftp') and not os.path.isabs(src):
-                src = os.path.join(base_dir, src)
-                if os.access(src, os.R_OK):
+            if src and prefix not in ('file', 'http', 'https', 'ftp') and not os.path.isabs(src):
+                src = os.path.abspath(os.path.join(base_dir, src))
+                if os.path.normcase(src).startswith(base_dir) and os.path.isfile(src) and os.access(src, os.R_OK):
                     with open(src, 'rb') as f:
                         data = f.read()
                     f = self.shift_file(os.path.basename(src), data)
@@ -148,18 +162,51 @@ class TXTInput(InputFormatPlugin):
         log.debug('Reading text from file...')
         length = 0
         base_dir = self.output_dir = os.getcwd()
+        cover_path = None
 
         # Extract content from zip archive.
         if file_ext == 'txtz':
+            options.input_encoding = 'utf-8'
             zf = ZipFile(stream)
             zf.extractall('.')
 
+            # Calibre 2eec10786e: honour .md/.markdown/.textile inside TXTZ
             for root, _, fnames in os.walk('.'):
                 for x in fnames:
                     x = os.path.join(root, x)
-                    if os.path.splitext(x)[1].lower() in ('.txt', '.text'):
+                    ext = txtz_file_ext(x)
+                    if ext in {'txt', 'text', 'textile', 'md', 'markdown'}:
+                        file_ext = ext
                         with open(x, 'rb') as tf:
                             txt += tf.read() + b'\n\n'
+            # Calibre 17be87e85a / c86de09698: use the text formatting and
+            # cover recorded in metadata.opf by TXTZ output
+            if os.path.exists('metadata.opf'):
+                from ebook_convert.utils.xml_parse import safe_xml_fromstring
+                with open('metadata.opf', 'rb') as mf:
+                    raw = mf.read()
+                try:
+                    root = safe_xml_fromstring(raw)
+                except Exception:
+                    pass
+                else:
+                    txt_formatting = root.find('text-formatting')
+                    if txt_formatting is not None and txt_formatting.text:
+                        txt_formatting = txt_formatting.text.strip()
+                        if txt_formatting in ('plain', 'textile', 'markdown') and options.formatting_type == 'auto':
+                            log.info('Using metadata from TXTZ archive to set text formatting type to: %s', txt_formatting)
+                            options.formatting_type = txt_formatting
+                            if txt_formatting != 'plain':
+                                options.paragraph_type = 'off'
+                    crelpath = root.find('cover-relpath-from-base')
+                    if crelpath is not None and crelpath.text:
+                        cover_path = crelpath.text
+
+            if options.formatting_type == 'auto':
+                formatting_type = txtz_formatting_for_extension(file_ext)
+                if formatting_type:
+                    options.formatting_type = formatting_type
+                    options.paragraph_type = 'off'
         else:
             if getattr(stream, 'name', None):
                 base_dir = os.path.dirname(stream.name)
@@ -187,7 +234,9 @@ class TXTInput(InputFormatPlugin):
             ienc = det_encoding
             log.debug('Detected input encoding as %s with a confidence of '
                       '%s%%', ienc, confidence * 100)
-        if not ienc:
+        if not ienc or ienc == 'ascii':
+            # Calibre fb66fe243b: ascii is a subset of utf-8, so a detected
+            # ascii encoding should not mangle stray non-ascii bytes
             ienc = 'utf-8'
             log.debug('No input encoding specified and could not auto detect '
                       'using %s', ienc)
@@ -309,6 +358,15 @@ class TXTInput(InputFormatPlugin):
         from ebook_convert.ebooks.oeb.transforms.metadata import meta_info_to_oeb_metadata
         meta_info_to_oeb_metadata(input_mi, oeb.metadata, log)
         self.html_postprocess_title = input_mi.title
+        if cover_path:
+            import mimetypes
+            from ebook_convert.utils.filenames import archive_file_data
+            cover_data = archive_file_data(base_dir, cover_path)
+            if cover_data is not None:
+                cover_name, cdata = cover_data
+                id, href = oeb.manifest.generate('cover', cover_name)
+                oeb.manifest.add(id, href, mimetypes.guess_type(cover_name)[0], data=cdata)
+                oeb.guide.add('cover', 'Cover', href)
 
         return oeb
 

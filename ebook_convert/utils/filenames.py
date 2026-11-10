@@ -3,6 +3,7 @@ Make strings safe for use as ASCII filenames, while trying to preserve as much
 meaning as possible.
 """
 import errno
+import ntpath
 import os
 import re
 import shutil
@@ -383,3 +384,71 @@ def copytree_using_links(path, dest, dest_is_parent=True, filecopyfunc=copyfile)
                 hardlink(src, df)
             except Exception:
                 filecopyfunc(src, df)
+
+
+def _normalize_path_for_containment(path, case_sensitive=True):
+    ans = os.path.abspath(path)
+    return ans if case_sensitive else os.path.normcase(ans).lower()
+
+
+def is_path_inside(parent, child, allow_parent=False, case_sensitive=True):
+    """Check if child is under parent, using lexical path component
+    boundaries (Calibre 2026)."""
+    parent = _normalize_path_for_containment(parent, case_sensitive=case_sensitive)
+    child = _normalize_path_for_containment(child, case_sensitive=case_sensitive)
+    try:
+        if os.path.commonpath((parent, child)) != parent:
+            return False
+    except ValueError:
+        return False
+    return allow_parent or child != parent
+
+
+def path_from_root(root, path, allow_root=False, reject_colon=False,
+                   case_sensitive=True):
+    """
+    Resolve a relative path under root. Raises ValueError for absolute paths,
+    drive-qualified paths, traversal components, or paths outside root.
+    """
+    if not isinstance(path, str):
+        raise ValueError('path must be text')
+    if reject_colon and ':' in path:
+        raise ValueError('colon not allowed in path')
+    if not path:
+        if allow_root:
+            return os.path.abspath(root)
+        raise ValueError('empty path not allowed')
+    if (os.path.isabs(path) or ntpath.isabs(path) or
+            os.path.splitdrive(path)[0] or ntpath.splitdrive(path)[0]):
+        raise ValueError('absolute paths are not allowed')
+    parts = path.replace('\\', '/').split('/')
+    if any(x in ('', '.', '..') for x in parts):
+        raise ValueError('invalid path component')
+    ans = os.path.abspath(os.path.join(root, *parts))
+    if not is_path_inside(root, ans, allow_parent=allow_root,
+                          case_sensitive=case_sensitive):
+        raise ValueError('path is outside root')
+    return ans
+
+
+def path_in_archive_root(root, path):
+    """Resolve a path from archive metadata, returning None if it leaves
+    root (Calibre archive_input.path_in_archive_root)."""
+    if isinstance(path, str) and os.path.isabs(path):
+        if is_path_inside(root, path):
+            return os.path.abspath(path)
+    else:
+        try:
+            return path_from_root(root, path)
+        except ValueError:
+            pass
+    return None
+
+
+def archive_file_data(root, path):
+    """Return ``(basename, data)`` for ``path`` inside ``root`` or None."""
+    resolved = path_in_archive_root(root, path)
+    if resolved is not None and os.path.isfile(resolved):
+        with open(resolved, 'rb') as f:
+            return os.path.basename(resolved), f.read()
+    return None

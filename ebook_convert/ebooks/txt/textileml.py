@@ -7,8 +7,8 @@ from functools import partial
 
 from ebook_convert import constants as const
 from ebook_convert.ebooks.htmlz.oeb2html import OEB2HTML
-from ebook_convert.ebooks.oeb.base import XHTML, barename, namespace, \
-        rewrite_links
+from ebook_convert.ebooks.oeb.base import XHTML, rewrite_links
+from ebook_convert.ebooks.oeb.parse_utils import barename, namespace
 from ebook_convert.ebooks.oeb.stylizer import Stylizer
 from ebook_convert.ebooks import unit_convert
 from ebook_convert.ebooks.textile.unsmarten import unsmarten
@@ -169,24 +169,34 @@ class TextileMLizer(OEB2HTML):
         return ''
 
     def check_padding(self, style, stylizer):
+        # Calibre 3d71e15a65: use the resolved numeric values, unit_convert
+        # may return strings for unparsable lengths
         txt = ''
         left_padding_pts = 0
         left_margin_pts = 0
+
+        def add(x, y):
+            if isinstance(x, str):
+                x = 0
+            if isinstance(y, str):
+                y = 0
+            return x + y
+
         if 'padding-left' in style.cssdict() and style['padding-left'] != 'auto':
-            left_padding_pts = unit_convert(style['padding-left'], style.width, style.fontSize, stylizer.profile.dpi)
+            left_padding_pts = unit_convert(style.paddingLeft, style.width, style.fontSize, stylizer.profile.dpi)
         if 'margin-left' in style.cssdict() and style['margin-left'] != 'auto':
-            left_margin_pts = unit_convert(style['margin-left'], style.width, style.fontSize, stylizer.profile.dpi)
-        left = left_margin_pts + left_padding_pts
+            left_margin_pts = unit_convert(style.marginLeft, style.width, style.fontSize, stylizer.profile.dpi)
+        left = add(left_margin_pts, left_padding_pts)
         emleft = min(int(round(left / stylizer.profile.fbase)), self.MAX_EM)
         if emleft >= 1:
             txt += '(' * emleft
         right_padding_pts = 0
         right_margin_pts = 0
         if 'padding-right' in style.cssdict() and style['padding-right'] != 'auto':
-            right_padding_pts = unit_convert(style['padding-right'], style.width, style.fontSize, stylizer.profile.dpi)
+            right_padding_pts = unit_convert(style.paddingRight, style.width, style.fontSize, stylizer.profile.dpi)
         if 'margin-right' in style.cssdict() and style['margin-right'] != 'auto':
-            right_margin_pts = unit_convert(style['margin-right'], style.width, style.fontSize, stylizer.profile.dpi)
-        right = right_margin_pts + right_padding_pts
+            right_margin_pts = unit_convert(style.marginRight, style.width, style.fontSize, stylizer.profile.dpi)
+        right = add(right_margin_pts, right_padding_pts)
         emright = min(int(round(right / stylizer.profile.fbase)), self.MAX_EM)
         if emright >= 1:
             txt += ')' * emright
@@ -354,6 +364,14 @@ class TextileMLizer(OEB2HTML):
                     if txt != '':
                         text.append('(' + txt + ')')
                 tags.append('!')
+            elif getattr(self.opts, 'use_alt_text_for_images', False):
+                alt = attribs.get('alt')
+                if alt:
+                    txt = '!' + self.check_halign(style)
+                    txt += self.check_valign(style)
+                    txt += '(' + alt + ')'
+                    text.append(txt)
+                    tags.append('!')
         elif tag in ('ol', 'ul'):
             self.list.append({'name': tag, 'num': 0})
             text.append('')

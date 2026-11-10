@@ -366,13 +366,16 @@ class CSSPreProcessor(object):
 def accent_regex(accent_maps, letter_before=False):
     accent_cat = set()
     letters = set()
+    # Do not mutate the caller's mapping (Calibre 2026): the rule tables
+    # are built from literal dicts that may be reused.
+    lmaps = {}
 
     for accent in tuple(accent_maps):
         accent_cat.add(accent)
         k, v = accent_maps[accent].split(':', 1)
         if len(k) != len(v):
             raise ValueError('Invalid mapping for: {} -> {}'.format(k, v))
-        accent_maps[accent] = lmap = dict(zip(k, v))
+        lmaps[accent] = lmap = dict(zip(k, v))
         letters |= set(lmap)
 
     if letter_before:
@@ -386,7 +389,7 @@ def accent_regex(accent_maps, letter_before=False):
                      re.UNICODE)
 
     def sub(m):
-        lmap = accent_maps[m.group(accent_group)]
+        lmap = lmaps[m.group(accent_group)]
         return lmap.get(m.group(letter_group)) or m.group()
 
     return pat, sub
@@ -485,7 +488,9 @@ def book_designer_rules():
                 lambda match: '<h3 class="subtitle">%s</h3>' %
                 (match.group(1),))]
         book_designer_rules.ans = ans
-    return None
+    # Calibre c5320420a9: this used to return None, breaking BookDesigner
+    # input
+    return ans
 
 
 class HTMLPreProcessor(object):
