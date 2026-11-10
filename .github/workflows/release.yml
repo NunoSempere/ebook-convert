@@ -27,6 +27,7 @@ jobs:
       - run: uv sync --all-extras
       - run: uv run pytest
       - run: uv build
+      - run: uvx twine check --strict dist/*
       - uses: actions/upload-artifact@v4
         with:
           name: dist

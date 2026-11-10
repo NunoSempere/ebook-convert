@@ -13,7 +13,7 @@ drivers. Just:
 The package is pure Python and every dependency ships binary wheels, so it
 installs anywhere with a stock Python 3.10+ and no compiler.
 
-This is a packaging-focused fork of `gryf's ebook-convert`_, which did the
+This is a packaging-focused fork of `gryf's ebook-converter`_, which did the
 hard work of extracting the converter from Calibre and removing Qt. All
 credit for that goes to gryf and, of course, to Kovid Goyal and the Calibre
 contributors. The fork exists to publish the tool on PyPI under the name

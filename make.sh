@@ -21,6 +21,8 @@ test() {
 build() {
 	rm -rf dist
 	uv build
+	# Same check PyPI applies to the README on upload.
+	uvx twine check --strict dist/*
 }
 
 binary() {

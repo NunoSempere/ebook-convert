@@ -27,6 +27,8 @@ jobs:
         run: uv run pytest -v
       - name: Build sdist and wheel
         run: uv build
+      - name: Check the README renders on PyPI
+        run: uvx twine check --strict dist/*
       - name: Smoke-test the wheel with uvx
         run: |
           uvx --isolated --from dist/*.whl ebook-convert tests/fixtures/sample.txt out.epub
