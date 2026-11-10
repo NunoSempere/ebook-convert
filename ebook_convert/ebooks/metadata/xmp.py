@@ -9,7 +9,7 @@ import traceback
 from lxml import etree
 from lxml.builder import ElementMaker
 
-from ebook_convert.ebooks.metadata import check_isbn, check_doi
+from ebook_convert.ebooks.metadata import check_isbn, check_doi, string_to_authors
 from ebook_convert.ebooks.metadata.book.base import Metadata
 from ebook_convert.ebooks.metadata.opf2 import dump_dict
 from ebook_convert.utils.date import parse_date, isoformat, now
@@ -255,7 +255,7 @@ def metadata_from_xmp_packet(raw_bytes):
         mi.title = title
     authors = multiple_sequences('//dc:creator', root)
     if authors:
-        mi.authors = authors
+        mi.authors = [au for aus in authors for au in string_to_authors(aus)]
     tags = multiple_sequences('//dc:subject',
                               root) or multiple_sequences('//pdf:Keywords',
                                                           root)
@@ -337,7 +337,7 @@ def metadata_from_xmp_packet(raw_bytes):
         if scheme not in identifiers:
             val = check_func(first_simple('//dc:identifier', root))
             if val:
-                identifiers['doi'] = val
+                identifiers[scheme] = val
 
     if identifiers:
         mi.set_identifiers(identifiers)

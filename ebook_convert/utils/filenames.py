@@ -431,6 +431,16 @@ def path_from_root(root, path, allow_root=False, reject_colon=False,
     return ans
 
 
+def is_existing_subpath(child, parent):
+    "Check if child is under parent. If either does not exist, returns False."
+    try:
+        parent = os.path.realpath(parent, strict=True)
+        child = os.path.realpath(child, strict=True)
+    except OSError:
+        return False
+    return is_path_inside(parent, child)
+
+
 def path_in_archive_root(root, path):
     """Resolve a path from archive metadata, returning None if it leaves
     root (Calibre archive_input.path_in_archive_root)."""

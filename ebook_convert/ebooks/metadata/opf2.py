@@ -239,7 +239,10 @@ class ManifestItem(Resource):  # {{{
 class Manifest(ResourceCollection):  # {{{
 
     def append_from_opf_manifest_item(self, item, dir):
-        self.append(ManifestItem.from_opf_manifest_item(item, dir))
+        mi = ManifestItem.from_opf_manifest_item(item, dir)
+        if mi is None:  # item has no href
+            return
+        self.append(mi)
         id = item.get('id', '')
         if not id:
             id = 'id%d' % self.next_id
@@ -557,6 +560,8 @@ class OPF(object):  # {{{
     authors_path = XPath('descendant::*[re:match(name(), "creator", "i") '
                          'and (@role="aut" or @opf:role="aut" or (not(@role) '
                          'and not(@opf:role)))]')
+    editors_path = XPath('descendant::*[re:match(name(), "creator", "i") '
+                         'and (@role="edt" or @opf:role="edt")]')
     bkp_path = XPath('descendant::*[re:match(name(), "contributor", "i") and '
                      '(@role="bkp" or @opf:role="bkp")]')
     tags_path = XPath('descendant::*[re:match(name(), "subject", "i")]')
@@ -679,11 +684,19 @@ class OPF(object):  # {{{
         if self.package_version >= 3.0:
             from ebook_convert.ebooks.metadata.opf3 import read_metadata
             return read_metadata(self.root)
-        ans = MetaInformation(self)
+        # avoid deepcopy of non-metadata items (Calibre a700b3f19c)
+        manifest, spine, guide, toc = self.manifest, self.spine, self.guide, self.toc
+        self.manifest = self.spine = self.guide = self.toc = None
+        try:
+            ans = MetaInformation(self)
+        finally:
+            self.manifest, self.spine, self.guide, self.toc = manifest, spine, guide, toc
         for n, v in self._user_metadata_.items():
             ans.set_user_metadata(n, v)
 
         ans.set_identifiers(self.get_identifiers())
+        # needed because we nuke the guide while creating ans (6c2df51d36)
+        ans.cover = self.cover
 
         return ans
 
@@ -878,11 +891,15 @@ class OPF(object):  # {{{
         ans = []
         for elem in self.authors_path(self.metadata):
             ans.extend(string_to_authors(self.get_text(elem)))
+        if not ans:
+            # Calibre 5ca15b9175: use editors when there are no authors
+            for elem in self.editors_path(self.metadata):
+                ans.extend(string_to_authors(self.get_text(elem)))
         return ans
 
     @authors.setter
     def authors(self, val):
-        remove = list(self.authors_path(self.metadata))
+        remove = list(self.authors_path(self.metadata)) or list(self.editors_path(self.metadata))
         for elem in remove:
             elem.getparent().remove(elem)
         # Ensure new author element is at the top of the list
@@ -899,7 +916,7 @@ class OPF(object):  # {{{
 
     @property
     def author_sort(self):
-        matches = self.authors_path(self.metadata)
+        matches = self.authors_path(self.metadata) or self.editors_path(self.metadata)
         if matches:
             for match in matches:
                 ans = match.get('{%s}file-as' % self.NAMESPACES['opf'], None)
@@ -910,7 +927,7 @@ class OPF(object):  # {{{
 
     @author_sort.setter
     def author_sort(self, val):
-        matches = self.authors_path(self.metadata)
+        matches = self.authors_path(self.metadata) or self.editors_path(self.metadata)
         if matches:
             for key in matches[0].attrib:
                 if key.endswith('file-as'):
@@ -1005,6 +1022,7 @@ class OPF(object):  # {{{
 
     def get_identifiers(self):
         identifiers = {}
+        schemeless = []
         for x in OPF.XPath(
             'descendant::*[local-name() = "identifier" and text()]')(
                     self.metadata):
@@ -1029,6 +1047,17 @@ class OPF(object):  # {{{
                     val = check_isbn(val.split(':')[-1])
                     if val is not None:
                         identifiers['isbn'] = val
+                else:
+                    schemeless.append(val)
+
+        # Calibre 1b03cd029a: identifiers without a scheme that are valid
+        # ISBNs, when no properly identified ISBN is present
+        if schemeless and 'isbn' not in identifiers:
+            for val in schemeless:
+                if check_isbn(val, simple_sanitize=True) is not None:
+                    identifiers['isbn'] = check_isbn(val)
+                    break
+
         return identifiers
 
     def set_identifiers(self, identifiers):
@@ -1123,9 +1152,16 @@ class OPF(object):  # {{{
         for x in matches:
             x.getparent().remove(x)
 
+        num_done = 0
         for lang in val:
             cl = self.create_metadata_element('language')
             self.set_text(cl, str(lang))
+            num_done += 1
+        if num_done == 0:
+            # Calibre 3b9fd595b4: epubcheck complains about a missing
+            # dc:language, so write "und" rather than nothing
+            cl = self.create_metadata_element('language')
+            self.set_text(cl, 'und')
 
     @property
     def raw_languages(self):
@@ -1214,12 +1250,23 @@ class OPF(object):  # {{{
 
     @property
     def epub3_raster_cover(self):
+        id_map = {}
         for item in self.itermanifest():
             props = set((item.get('properties') or '').lower().split())
+            id_map[item.get('id', '')] = item
             if 'cover-image' in props:
                 mt = item.get('media-type', '')
                 if mt and 'xml' not in mt and 'html' not in mt:
                     return item.get('href', None)
+        # "Open" Manga Format files have the cover as the first item in the
+        # spine (Calibre abc81de373)
+        for spine_item in self.iterspine():
+            man_item = id_map.get(spine_item.get('idref', ''))
+            if man_item is not None:
+                mt = man_item.get('media-type')
+                if mt and mt.lower() in {'image/jpeg', 'image/jpg', 'image/png', 'image/webp'}:
+                    return man_item.get('href', None)
+            break
 
     @property
     def raster_cover(self):
@@ -1367,9 +1414,12 @@ class OPF(object):  # {{{
                      'isbn', 'tags', 'category', 'comments', 'book_producer',
                      'pubdate', 'user_categories', 'author_link_map'):
             val = getattr(mi, attr, None)
+            if attr == 'rating' and val:
+                # Calibre b0e276435f: the rating may arrive as a string
+                val = float(val)
             is_null = val is None or val in ((), [], (None, None),
                                              {}) or (attr == 'rating' and
-                                                     val < 0.1)
+                                                     (not val or val < 0.1))
             if is_null:
                 if apply_null and attr in {'series', 'tags', 'isbn',
                                            'comments', 'publisher', 'rating'}:
@@ -1670,14 +1720,21 @@ def metadata_to_opf(mi, as_string=True, default_lang=None):
     '''
     <package xmlns="http://www.idpf.org/2007/opf" unique-identifier="uuid_id" version="2.0">
         <metadata xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:opf="http://www.idpf.org/2007/opf">
-            <dc:identifier opf:scheme="%(a)s" id="%(a)s_id">%(id)s</dc:identifier>
-            <dc:identifier opf:scheme="uuid" id="uuid_id">%(uuid)s</dc:identifier>
+            <dc:identifier opf:scheme="%(a)s" id="%(a)s_id"></dc:identifier>
+            <dc:identifier opf:scheme="uuid" id="uuid_id"></dc:identifier>
             </metadata>
         <guide/>
     </package>
-    ''' % dict(a=__appname__, id=mi.application_id, uuid=mi.uuid)))
+    ''' % dict(a=__appname__)))
     metadata = root[0]
     guide = root[1]
+    # Set the identifier values via lxml rather than string interpolation so
+    # that they are properly escaped (Calibre ee11524b2e)
+    for elem, val in zip(metadata, (mi.application_id, mi.uuid)):
+        try:
+            elem.text = str(val)
+        except ValueError:
+            elem.text = clean_xml_chars(str(val))
     metadata[0].tail = '\n'+(' '*8)
 
     def factory(tag, text=None, sort=None, role=None, scheme=None, name=None,
