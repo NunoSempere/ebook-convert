@@ -688,8 +688,12 @@ class Convert(object):
                 ctext = child.text
                 if space != 'preserve':
                     # Remove leading and trailing whitespace. Word ignores
-                    # leading and trailing whitespace without preserve
-                    ctext = ctext.strip(' \n\r\t')
+                    # leading and trailing whitespace without preserve unless
+                    # the element is only whitespace (a lone space between
+                    # two runs must survive, or words run together).
+                    stripped = ctext.strip(' \n\r\t')
+                    if stripped:
+                        ctext = stripped
                 # Only use a <span> with white-space:pre-wrap if this element
                 # actually needs it, i.e. if it has more than one
                 # consecutive space or it has newlines or tabs.

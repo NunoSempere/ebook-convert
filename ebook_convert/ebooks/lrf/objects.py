@@ -36,7 +36,7 @@ class LRFObject(object):
             a[i] ^= xorKey
             i += 1
             l -= 1
-        return a.tostring()
+        return a.tobytes()
 
     @classmethod
     def parse_empdots(self, tag, f):

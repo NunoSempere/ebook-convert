@@ -8,6 +8,7 @@ from lxml import etree
 from ebook_convert import constants as const
 from ebook_convert.ebooks.metadata import authors_to_string
 from ebook_convert.ebooks.metadata import check_isbn
+from ebook_convert.ebooks.metadata import fmt_sidx
 from ebook_convert.ebooks.metadata import string_to_authors
 from ebook_convert.ebooks.oeb import base as oeb_base
 from ebook_convert.ebooks.metadata.book import base
@@ -776,7 +777,7 @@ def set_rating(root, prefixes, refines, val):
         if prop.lower() == pq:
             remove_element(meta, refines)
     if val:
-        create_rating(root, prefixes, '%.2g' % val)
+        create_rating(root, prefixes, '%.2g' % float(val))
 # }}}
 
 # Series {{{
@@ -828,7 +829,7 @@ def set_series(root, prefixes, refines, series, series_index):
                       'belongs-to-collection"]')(root):
         remove_element(meta, refines)
     if series:
-        create_series(root, refines, series, '%.2g' % series_index)
+        create_series(root, refines, series, fmt_sidx(series_index))
 # }}}
 
 # User metadata {{{

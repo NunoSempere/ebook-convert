@@ -111,7 +111,7 @@ wheels = [
 
 [[package]]
 name = "ebook-convert"
-version = "4.14.1"
+version = "4.14.2"
 source = { editable = "." }
 dependencies = [
     { name = "beautifulsoup4" },

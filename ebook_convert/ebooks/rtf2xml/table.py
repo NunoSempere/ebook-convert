@@ -219,7 +219,7 @@ class Table:
         Logic:
             ?
         """
-        self.__close_table(self, line)
+        self.__close_table(line)
 
     def __end_row_def_func(self, line):
         """

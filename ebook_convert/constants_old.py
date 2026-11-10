@@ -9,7 +9,7 @@ import tempfile
 
 
 __appname__ = 'ebook-convert'
-numeric_version = (4, 14, 1)
+numeric_version = (4, 14, 2)
 __version__ = '.'.join([str(x) for x in numeric_version])
 __author__ = "foobar"
 

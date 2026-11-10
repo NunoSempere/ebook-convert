@@ -116,3 +116,15 @@ def test_zip_containers_round_trip_metadata_and_cover(
     assert b'Someone' in opf
     if ext == 'htmlz':
         assert any(n.endswith('cover.jpg') for n in names)
+
+
+def test_rtf_with_date_field_border_and_emoji(tmp_path):
+    """Regressions from Calibre: DATE fields with a format, bordered
+    paragraphs and astral-plane characters (UTF-16 surrogate pairs) used to
+    crash or produce invalid XML."""
+    out = tmp_path / 'out.txt'
+    convert(FIXTURES / 'tricky.rtf', out)
+    text = out.read_text(encoding='utf-8')
+    assert 'Bordered paragraph' in text
+    assert '1 January 2024' in text
+    assert '\U0001F600' in text

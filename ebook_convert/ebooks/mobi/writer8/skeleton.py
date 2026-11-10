@@ -272,9 +272,13 @@ class Chunker:
         for child in list(tag):
             raw = tostring(child, with_tail=False)
             if child.tag == etree.Entity:
-                chunks.append(raw)
+                # Wrap as a Chunk (not raw bytes) and take the entity out of
+                # the skeleton, otherwise its text is duplicated and the
+                # chunk table is corrupted.
+                chunks.append(Chunk(raw, self.chunk_selector))
                 if child.tail:
                     chunks.extend(self.chunk_up_text(child.tail))
+                tag.remove(child)
                 continue
             raw = close_self_closing_tags(raw)
             if len(raw) > CHUNK_SIZE and child.get('aid', None):

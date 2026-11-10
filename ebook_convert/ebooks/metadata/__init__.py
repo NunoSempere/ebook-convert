@@ -201,11 +201,14 @@ def fmt_sidx(i, fmt='%.2f', use_roman=False):
         i = 1
     try:
         i = float(i)
-    except TypeError:
+    except Exception:
         return str(i)
-    if int(i) == float(i):
-        return roman(int(i)) if use_roman else '%d'%int(i)
-    return fmt%i
+    if int(i) == i:
+        return roman(int(i)) if use_roman else str(int(i))
+    ans = fmt % i
+    if '.' in ans:
+        ans = ans.rstrip('0')
+    return ans
 
 
 class Resource(object):

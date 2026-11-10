@@ -165,7 +165,7 @@ class GroupBorders:
     def __close_pard_(self, line):
         self.__write_obj.write(self.__list_chunk)
         self.__write_obj.write('mi<tg<close_____<paragraph-definition\n')
-        self.__write_end_wrap()
+        self.__write_end_border_tag()
         self.__list_chunk = ''
         self.__state = 'default'
 

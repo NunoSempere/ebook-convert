@@ -89,7 +89,7 @@ def find_declared_encoding(raw, limit=50*1024):
             ans = m.group(1)
             if is_binary:
                 ans = ans.decode('ascii', 'replace')
-                return ans
+            return ans
 
 
 def substitute_entites(raw):

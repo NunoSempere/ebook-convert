@@ -374,7 +374,7 @@ class HTMLConverter(object):
         if self.book_designer:
             nmassage.extend(BOOK_DESIGNER)
         if isinstance(raw, bytes):
-            raw = xml_to_unicode(raw, replace_entities=True)[0]
+            raw = xml_to_unicode(raw, resolve_entities=True)[0]
         for pat, repl in nmassage:
             raw = pat.sub(repl, raw)
 

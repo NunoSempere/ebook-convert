@@ -87,7 +87,7 @@ class OverrideTable:
         """
         override_dict = self.__override_list[-1]
         list_id = override_dict.get('list-id')
-        if list_id is None and self.__level > 3:
+        if list_id is None and self.__run_level > 3:
             msg = 'This override does not appear to have a list-id\n'
             raise self.__bug_handler(msg)
         current_table_id = override_dict.get('list-table-id')
