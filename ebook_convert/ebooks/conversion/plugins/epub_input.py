@@ -379,9 +379,20 @@ class EPUBInput(InputFormatPlugin):
         return os.path.abspath('content.opf')
 
     def unkepubify(self, path: str, opf: str, log: Log) -> None:
-        # ebook-convert: the kepubifier is not included; the Kobo <span> markup
-        # is harmless for conversion and is left in place.
-        log.warn('KEPUB input is converted as a plain EPUB (Kobo markup is not removed)')
+        from ebook_convert.ebooks.oeb.polish.container import Container
+        from ebook_convert.ebooks.oeb.polish.errors import drm_message
+        from ebook_convert.ebooks.oeb.polish.kepubify import check_for_kobo_drm, unkepubify_container
+
+        container = Container(os.getcwd(), opf, log)
+        if self.for_viewer:
+            log('Checking for Kobo DRM...')
+            with drm_message(_('The file {} is locked with DRM. It cannot be viewed').format(path)):
+                check_for_kobo_drm(container)
+        else:
+            log('Removing Kobo markup...')
+            with drm_message(_('The file {} is locked with DRM. It cannot be converted').format(path)):
+                unkepubify_container(container)
+                container.commit()
 
     def landmarks_to_guide(self, root: _Element, nav_path: str, opf: OPF, log: Log) -> None:
         # The rest of the conversion pipeline uses only the OPF guide, so

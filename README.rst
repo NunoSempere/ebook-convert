@@ -91,15 +91,18 @@ checked to survive).
 ``lrf``, ``md``/``markdown`` (needs the ``markdown`` extra), ``mobi``,
 ``prc``, ``pobi``, ``odt``, ``opf``, ``pdb``, ``updb``, ``pdf`` (needs
 poppler), ``pml``, ``pmlz``, ``rb``, ``rtf``, ``snb``, ``tcr``, ``txt``,
-``text``, ``textile``, ``txtz``, ``zip`` (of HTML), ``kepub``.
+``text``, ``textile``, ``txtz``, ``zip`` (of HTML), ``kepub`` (also as
+``.kepub.epub``; the Kobo markup is stripped).
 
-**Output:** ``azw3``, ``docx``, ``epub``, ``fb2``, ``htmlz``, ``lrf``,
-``mobi``, ``oeb`` (a folder), ``pdb``, ``pmlz``, ``rb``, ``rtf``, ``snb``,
+**Output:** ``azw3``, ``docx``, ``epub``, ``fb2``, ``htmlz``, ``kepub`` (or
+``.kepub.epub``, Kobo's own naming), ``lrf``, ``mobi``, ``oeb`` (a folder),
+``pdb``, ``pmlz``, ``rb``, ``rtf``, ``snb``,
 ``tcr``, ``txt``, ``txtz``, ``zip`` (Calibre's "HTML output": a zip of HTML
 files with an index).
 
 Compared with the 4.x line this adds HTML/zip, PDB, PMLZ, RB, RTF, SNB and
-TCR output and PML, RB, SNB, TCR, AZW4 and KEPUB input, plus everything
+TCR output, KEPUB input and output, and PML, RB, SNB, TCR and AZW4 input,
+plus everything
 Calibre changed in the converters between 2020 and 2026 (EPUB 3 navigation,
 KF8 fixes, DOCX tables and footnotes, the new CSS parser, ...).
 
@@ -111,9 +114,6 @@ Not included, and why:
 - **Comic (CBZ/CBR)** input: image processing with Qt, ``unrar``.
 - **News download (recipes)**: needs Calibre's web framework.
 - **RAR** archives anywhere: need ``unrardll``.
-- **KEPUB output**: Calibre's kepubifier depends on its server-side book
-  renderer and an ICU sentence iterator. KEPUB *input* is accepted (it is an
-  EPUB), but the Kobo spans are not stripped.
 - Metadata download, library, devices, viewer, editor, server, AI features:
   not conversion.
 
@@ -125,6 +125,11 @@ A handful of Calibre's building blocks are C/C++ or Qt and have been replaced
 by pure-Python equivalents. These are the places where behaviour can differ
 from running ``ebook-convert`` inside a Calibre install:
 
+- **Sentence splitting** (``calibre.spell.break_iterator``): the Kobo
+  ``<span>`` per sentence in KEPUB output is placed by ICU's sentence
+  iterator in Calibre. Here it follows `kepubify`_'s rule instead (a
+  sentence ends at ``.``, ``!`` or ``?``, an optional closing quote or
+  ellipsis, and whitespace), which is what Kobo's own tooling produces.
 - **ICU** (``calibre.utils.icu``): sorting, case changes and case-insensitive
   searches are done with Unicode normalisation and case folding from the
   standard library. Results are locale independent (no Swedish ``v``/``w``
@@ -297,7 +302,8 @@ cover ground it does not:
   format. Use it if you can install it.
 - `pandoc`_: converts between document formats including EPUB and DOCX, from
   Markdown and LaTeX; no MOBI/AZW3/LRF.
-- `kepubify`_: EPUB to Kobo KEPUB.
+- `kepubify`_: EPUB to Kobo KEPUB, in Go; the sentence rule for Kobo spans
+  here is taken from it.
 - `KCC`_: comics to e-reader formats.
 
 

@@ -1,5 +1,6 @@
 """End-to-end smoke tests: run the CLI over small fixtures."""
 import pathlib
+import re
 import subprocess
 import sys
 import zipfile
@@ -128,3 +129,42 @@ def test_rtf_with_date_field_border_and_emoji(tmp_path):
     assert 'Bordered paragraph' in text
     assert '1 January 2024' in text
     assert '\U0001F600' in text
+
+
+def _epub_text(path):
+    with zipfile.ZipFile(path) as zf:
+        names = zf.namelist()
+        html = b''.join(zf.read(n) for n in names
+                        if n.endswith(('.xhtml', '.html'))).decode('utf-8')
+    return names, html
+
+
+@pytest.mark.parametrize('name', ['out.kepub', 'out.kepub.epub'])
+def test_kepub_output_adds_kobo_markup(epub3_path, tmp_path, name):
+    out = tmp_path / name
+    convert(epub3_path, out)
+    names, html = _epub_text(out)
+    assert any(n.endswith('kobo.js') for n in names)
+    assert 'id="book-columns"' in html and 'id="book-inner"' in html
+    # one Kobo span per sentence, trailing whitespace inside the span
+    spans = re.findall(r'<span class="koboSpan" id="kobo\.\d+\.\d+">([^<]*)</span>',
+                       html)
+    assert len(spans) > 5
+    assert any(s.endswith('. ') or s.endswith('.') for s in spans)
+
+
+def test_kepub_input_strips_kobo_markup(epub3_path, tmp_path):
+    kepub = tmp_path / 'book.kepub.epub'
+    convert(epub3_path, kepub)
+    _, text = _epub_text(kepub)
+    assert 'koboSpan' in text
+    back = tmp_path / 'back.epub'
+    convert(kepub, back)
+    names, html = _epub_text(back)
+    assert 'koboSpan' not in html and 'book-columns' not in html
+    assert not any(n.endswith('kobo.js') for n in names)
+    with zipfile.ZipFile(epub3_path) as zf:
+        original = b''.join(zf.read(n) for n in zf.namelist()
+                            if n.endswith('.xhtml')).decode('utf-8')
+    sentence = re.search(r'<p[^>]*>([^<]{20,})</p>', original).group(1)
+    assert sentence in html

@@ -929,6 +929,8 @@ class Plumber:
         if not input_fmt:
             raise ValueError('Input file must have an extension')
         input_fmt = input_fmt[1:].lower().replace('original_', '')
+        if self.input.lower().endswith('.kepub.epub'):
+            input_fmt = 'kepub'
         if view_kepub and input_fmt.lower() == 'kepub':
             input_fmt = 'epub'
         self.archive_input_tdir = None
@@ -951,6 +953,8 @@ class Plumber:
             output_fmt = 'oeb'
         else:
             output_fmt = os.path.splitext(self.output)[1]
+            if self.output.lower().endswith('.kepub.epub'):
+                output_fmt = '.kepub'
             if not output_fmt:
                 output_fmt = '.oeb'
             output_fmt = output_fmt[1:].lower()

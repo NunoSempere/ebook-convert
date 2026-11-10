@@ -787,7 +787,7 @@ def localize_website_link(url: str) -> str:
 def is_rtl_lang(lang: str | bytes | None) -> bool | str | None:
     lang = canonicalize_lang(lang)
     # Aramaic, Arabic, Azeri, Hebrew, Dhivehi, Sorani, Urdu, Farsi
-    return lang and lang in ('ara', 'heb', 'aze', 'div', 'arc', 'syc', 'myz', 'ckb', 'urd', 'fas')
+    return lang and lang in ('ara', 'heb', 'aze', 'div', 'arc', 'syc', 'myz', 'ckb', 'urd', 'fas', 'yid')
 
 
 def install_qt_translator() -> None:

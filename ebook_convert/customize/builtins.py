@@ -612,7 +612,7 @@ from ebook_convert.ebooks.conversion.plugins.azw4_input import AZW4Input
 from ebook_convert.ebooks.conversion.plugins.docx_input import DOCXInput
 from ebook_convert.ebooks.conversion.plugins.docx_output import DOCXOutput
 from ebook_convert.ebooks.conversion.plugins.epub_input import EPUBInput
-from ebook_convert.ebooks.conversion.plugins.epub_output import EPUBOutput
+from ebook_convert.ebooks.conversion.plugins.epub_output import EPUBOutput, KEPUBOutput
 from ebook_convert.ebooks.conversion.plugins.fb2_input import FB2Input
 from ebook_convert.ebooks.conversion.plugins.fb2_output import FB2Output
 from ebook_convert.ebooks.conversion.plugins.html_input import HTMLInput
@@ -667,6 +667,7 @@ plugins += [
     FB2Output,
     HTMLOutput,
     HTMLZOutput,
+    KEPUBOutput,
     LRFOutput,
     MOBIOutput,
     OEBOutput,

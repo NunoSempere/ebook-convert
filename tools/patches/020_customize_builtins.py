@@ -14,7 +14,7 @@ INPUT_PLUGINS = [
     'ODTInput', 'PDBInput', 'PDFInput', 'PMLInput', 'RBInput', 'RTFInput', 'SNBInput', 'TCRInput', 'TXTInput',
 ]
 OUTPUT_PLUGINS = [
-    'AZW3Output', 'DOCXOutput', 'EPUBOutput', 'FB2Output', 'HTMLOutput', 'HTMLZOutput', 'LRFOutput', 'MOBIOutput',
+    'AZW3Output', 'DOCXOutput', 'EPUBOutput', 'FB2Output', 'HTMLOutput', 'HTMLZOutput', 'KEPUBOutput', 'LRFOutput', 'MOBIOutput',
     'OEBOutput', 'PDBOutput', 'PMLOutput', 'RBOutput', 'RTFOutput', 'SNBOutput', 'TCROutput', 'TXTOutput', 'TXTZOutput',
 ]
 # plugin modules that exist in the vendored tree, keyed by class name
@@ -25,7 +25,7 @@ PLUGIN_MODULES = {
     'RBInput': 'rb_input', 'RTFInput': 'rtf_input', 'SNBInput': 'snb_input', 'TCRInput': 'tcr_input',
     'TXTInput': 'txt_input',
     'AZW3Output': 'mobi_output', 'DOCXOutput': 'docx_output', 'EPUBOutput': 'epub_output', 'FB2Output': 'fb2_output',
-    'HTMLOutput': 'html_output', 'HTMLZOutput': 'htmlz_output', 'LRFOutput': 'lrf_output', 'MOBIOutput': 'mobi_output',
+    'HTMLOutput': 'html_output', 'HTMLZOutput': 'htmlz_output', 'KEPUBOutput': 'epub_output', 'LRFOutput': 'lrf_output', 'MOBIOutput': 'mobi_output',
     'OEBOutput': 'oeb_output', 'PDBOutput': 'pdb_output', 'PMLOutput': 'pml_output', 'RBOutput': 'rb_output',
     'RTFOutput': 'rtf_output', 'SNBOutput': 'snb_output', 'TCROutput': 'tcr_output', 'TXTOutput': 'txt_output',
     'TXTZOutput': 'txt_output',

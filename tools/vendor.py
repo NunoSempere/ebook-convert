@@ -115,6 +115,7 @@ INCLUDE = [
     ('resources/templates/lrf.xsl', 'data/templates/lrf.xsl'),
     ('resources/templates/rtf.xsl', 'data/templates/rtf.xsl'),
     ('resources/templates/html.css', 'data/templates/html.css'),
+    ('resources/templates/kobo.js', 'data/templates/kobo.js'),
     ('resources/templates/new_nav.html', 'data/templates/new_nav.html'),
     ('resources/templates/new_book.html', 'data/templates/new_book.html'),
     ('resources/templates/inline_toc_styles.css', 'data/templates/inline_toc_styles.css'),
@@ -158,7 +159,7 @@ EXCLUDE = [
     # Tweak Book editor tools (Qt, hunspell, TTS, network)
     'ebooks/oeb/polish/check', 'ebooks/oeb/polish/check/*',
     'ebooks/oeb/polish/tts.py', 'ebooks/oeb/polish/spell.py',
-    'ebooks/oeb/polish/download.py', 'ebooks/oeb/polish/kepubify.py',
+    'ebooks/oeb/polish/download.py',
     'ebooks/oeb/polish/main.py', 'ebooks/oeb/polish/report.py',
     'ebooks/oeb/polish/stats.py', 'ebooks/oeb/polish/import_book.py',
     'ebooks/oeb/polish/hyphenation.py', 'ebooks/oeb/polish/tests', 'ebooks/oeb/polish/tests/*',
