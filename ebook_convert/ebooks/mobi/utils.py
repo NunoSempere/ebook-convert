@@ -623,15 +623,20 @@ class CNCX(object):  # {{{
 
 
 def is_guide_ref_start(ref):
-    return (ref.title.lower() == 'start' or
+    # title can be None for references with non-standard types
+    return ((ref.title or '').lower() == 'start' or
             (ref.type and ref.type.lower() in {'start',
                     'other.start', 'text'}))
 
 
 def convert_color_for_font_tag(val):
     rgba = parse_color_string(str(val or ''))
-    if rgba is None or rgba == 'currentColor':
-        return val
-    clamp = lambda x: min(x, max(0, x), 1)
-    rgb = map(clamp, rgba[:3])
-    return '#' + ''.join(map(lambda x:'%02x' % int(x * 255), rgb))
+    if not isinstance(rgba, tuple):
+        # not a color (for example inherit, var(...) or a plain number, see
+        # 47ec4b5521) or currentColor: pass it through, always as a string
+        return str(val)
+    # The channels are already in 0..1 (clamp them anyway, color3 does not
+    # clamp percentages), round rather than truncate as colors converted from
+    # other color spaces are not exact multiples of 1/255
+    clamp = lambda x: max(0.0, min(1.0, x))
+    return '#' + ''.join('%02x' % int(clamp(x) * 255 + 0.5) for x in rgba[:3])

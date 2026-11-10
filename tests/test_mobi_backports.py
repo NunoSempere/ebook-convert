@@ -352,3 +352,74 @@ def test_tagx_offset_is_verified():
         assert [tuple(t) for t in tags] == [(1, 1, 1, 0), (0, 0, 0, 1)]
 
 # }}}
+
+
+# MOBI Output: colours, guide references and margins (Calibre 47ec4b5521,
+# 2a057203e2, fdbffe60fe) {{{
+
+@pytest.mark.parametrize('val,expected', [
+    ('currentColor', 'currentColor'),
+    ('inherit', 'inherit'),
+    ('red', '#ff0000'),
+    ('#012', '#001122'),
+    ('rgb(10%, 20%, 30%)', '#1a334d'),
+    ('rgb(-51, 306, 0)', '#00ff00'),
+    ('rgb(var(--x))', 'rgb(var(--x))'),
+    # plain numbers used to be returned as-is and later crash the serializer
+    (1.5, '1.5'),
+    (None, 'None'),
+])
+def test_convert_color_for_font_tag(val, expected):
+    from ebook_convert.ebooks.mobi.utils import convert_color_for_font_tag
+    got = convert_color_for_font_tag(val)
+    assert got == expected
+    assert isinstance(got, str)
+
+
+def test_is_guide_ref_start_tolerates_missing_title():
+    import logging
+    from ebook_convert.ebooks.mobi.utils import is_guide_ref_start
+    from ebook_convert.ebooks.oeb.base import OEBBook
+    guide = OEBBook(logging.getLogger('test'), html_preprocessor=None).guide
+    # A non-standard type gets no default title
+    assert not is_guide_ref_start(guide.add('foo', None, 'a.html'))
+    assert is_guide_ref_start(guide.add('text', 'Main', 'b.html'))
+    assert is_guide_ref_start(guide.add('bar', 'Start', 'c.html'))
+
+
+class FakeStyle:
+    """Just enough of oeb.stylizer.Style for convert_margin()."""
+
+    def __init__(self, computed, raw):
+        self.computed, self.raw = computed, raw
+
+    def __getitem__(self, name):
+        return self.computed[name]
+
+    def _get(self, name):
+        return self.raw.get(name)
+
+    def _unit_convert(self, value, base=None):
+        try:
+            return float(value[:-1]) / 100 * base
+        except ValueError:
+            # like Stylizer._unit_convert, unparsable values come back as-is
+            return value
+
+
+def test_convert_margin_caps_percentages_at_kindle_width():
+    from ebook_convert.ebooks.mobi.mobiml import convert_margin
+    # 10% of a 1000px wide (tablet) profile is 100px, but on a 600px Kindle
+    # screen it should be at most 60px
+    style = FakeStyle({'margin-left': 100.0}, {'margin-left': '10%'})
+    assert convert_margin(style, 'margin-left') == 60.0
+    # absolute values are untouched
+    style = FakeStyle({'margin-left': 12.0}, {'margin-left': '12pt'})
+    assert convert_margin(style, 'margin-left') == 12.0
+    # invalid % lengths must not raise
+    style = FakeStyle({'margin-left': 7.0}, {'margin-left': 'bad%'})
+    assert convert_margin(style, 'margin-left') == 7.0
+    style = FakeStyle({'margin-left': 'auto'}, {'margin-left': 'auto'})
+    assert convert_margin(style, 'margin-left') == 0.0
+
+# }}}
