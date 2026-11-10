@@ -3,6 +3,7 @@ import re
 import shutil
 import struct
 from io import BytesIO
+from types import SimpleNamespace
 
 from PIL import Image
 import pytest
@@ -43,6 +44,23 @@ def jpegs_in(data):
         except Exception:
             continue
         yield img
+
+
+class RecordingLog:
+    """Duck typed stand-in for the conversion log."""
+
+    def __init__(self):
+        self.warnings = []
+
+    def _record(self, msg, *args):
+        self.warnings.append(msg % args if args else msg)
+
+    warning = warn = error = _record
+
+    def info(self, *args):
+        pass
+
+    debug = info
 
 # }}}
 
@@ -139,5 +157,198 @@ def test_webp_image_becomes_png(tmp_path, ext):
     assert pos >= 0
     png = Image.open(BytesIO(data[pos:]))
     assert png.size == (40, 30)
+
+# }}}
+
+
+# KF8 reader: url() rewriting in CSS flows (Calibre 529c26f60a, a67fb90335,
+# 61ccbfc995) {{{
+
+class TestFlowLinks:
+    resource_map = ['images/00001.jpeg', 'fonts/00002.ttf', None]
+
+    @property
+    def flowinfo(self):
+        from ebook_convert.ebooks.mobi.reader.mobi8 import FlowInfo
+        return [
+            FlowInfo(None, None, None, None),
+            FlowInfo('css', 'file', 'styles', '0001.css'),
+            FlowInfo('css', 'file', 'styles', '0002.css'),
+            FlowInfo('css', 'inline', None, None),
+        ]
+
+    def convert(self, css):
+        from ebook_convert.ebooks.mobi.reader.markup import update_flow_links
+        reader = SimpleNamespace(flows=[None, css], flowinfo=self.flowinfo,
+                                 header=SimpleNamespace(codec='utf-8'))
+        log = RecordingLog()
+        flows = update_flow_links(reader, self.resource_map, log)
+        return flows[1], log.warnings
+
+    def assert_converts(self, src, expected):
+        output, warnings = self.convert(src)
+        assert output == expected
+        assert warnings == []
+
+    @pytest.mark.parametrize('quote', ['', '"', "'"])
+    @pytest.mark.parametrize('url,expected', [
+        ('kindle:embed:0002?mime=application/x-font-ttf', '../fonts/00002.ttf'),
+        ('kindle:embed:0002', '../fonts/00002.ttf'),
+        ('kindle:embed:0001?mime=image/jpeg', '../images/00001.jpeg'),
+        ('kindle:flow:0002?mime=text/css', '../styles/0002.css'),
+    ])
+    def test_quoting_is_preserved(self, quote, url, expected):
+        self.assert_converts('a { b: url(%s%s%s); }' % (quote, url, quote),
+                             'a { b: url(%s%s%s); }' % (quote, expected, quote))
+
+    def test_whitespace_inside_url(self):
+        self.assert_converts('@import url( "kindle:flow:0001?mime=text/css" );',
+                             '@import url("../styles/0001.css");')
+
+    def test_multiple_urls(self):
+        self.assert_converts(
+            '@font-face { src: url(kindle:embed:0002?mime=font/ttf) format("truetype"), url("kindle:embed:0002") }'
+            ' p { background: url(KINDLE:EMBED:0001?mime=image/jpeg) }',
+            '@font-face { src: url(../fonts/00002.ttf) format("truetype"), url("../fonts/00002.ttf") }'
+            ' p { background: url(../images/00001.jpeg) }',
+        )
+
+    def test_extra_query_parameters(self):
+        self.assert_converts('url(kindle:embed:0002?foo=1&mime=font/ttf)',
+                             'url(../fonts/00002.ttf)')
+
+    def test_style_attribute_is_not_broken(self):
+        self.assert_converts(
+            '<div style="background: url(kindle:embed:0001?mime=image/jpeg)"/>',
+            '<div style="background: url(../images/00001.jpeg)"/>',
+        )
+
+    @pytest.mark.parametrize('url,expected_warning', [
+        ('url("kindle:embed:0003?mime=font/ttf")', 'Referenced font 3'),
+        ('url(kindle:embed:0003?mime=image/png)', 'Referenced image 3'),
+        ('url(kindle:embed:0000)', 'Referenced font 0'),
+        ('url(kindle:embed:00ZZ)', 'unrecognized'),
+        ('url(kindle:embed:00|1)', 'unrecognized'),
+        ('url(kindle:embed:0100)', 'Referenced font 1024'),
+        ('url(kindle:flow:0003?mime=text/css)', 'invalid flow'),
+        ('url(kindle:flow:0000?mime=text/css)', 'invalid flow'),
+        ('url(kindle:flow:0100?mime=text/css)', 'invalid flow'),
+    ])
+    def test_invalid_references_are_preserved_with_warning(self, url, expected_warning):
+        output, warnings = self.convert(url)
+        assert output == url
+        assert len(warnings) == 1, warnings
+        assert expected_warning in warnings[0]
+
+    def test_non_kindle_urls_untouched(self):
+        self.assert_converts('url(images/x.png) url("kindle.png")',
+                             'url(images/x.png) url("kindle.png")')
+
+    def test_bytes_flows_are_decoded(self):
+        from ebook_convert.ebooks.mobi.reader.markup import update_flow_links
+        reader = SimpleNamespace(
+            flows=[None, b'a { b: url(kindle:embed:0001?mime=image/jpeg) }'],
+            flowinfo=self.flowinfo, header=SimpleNamespace(codec='utf-8'))
+        flows = update_flow_links(reader, self.resource_map, RecordingLog())
+        assert flows[1] == 'a { b: url(../images/00001.jpeg) }'
+
+
+def test_out_of_range_image_references():
+    from ebook_convert.ebooks.mobi.reader.markup import insert_images_into_markup
+    parts = ['<img src="kindle:embed:0000?mime=image/jpeg"/>'
+             '<p style="background: url(kindle:embed:0005)"/>']
+    log = RecordingLog()
+    insert_images_into_markup(parts, ['images/00001.jpeg'], log)
+    assert 'kindle:embed:0000' in parts[0]
+    assert 'kindle:embed:0005' in parts[0]
+    assert len(log.warnings) == 2, log.warnings
+
+
+def test_pos_fid_regex_rejects_pipe():
+    # [0-9|A-V] used to accept a literal | in base-32 numbers
+    from ebook_convert.ebooks.mobi.reader.markup import update_internal_links
+    def must_not_be_called(*args):
+        raise AssertionError('get_id_tag_by_pos_fid called with %r' % (args,))
+
+    reader = SimpleNamespace(parts=[b'<a href="kindle:pos:fid:00|1:off:0000000000">x</a>'],
+                             header=SimpleNamespace(codec='utf-8'),
+                             get_id_tag_by_pos_fid=must_not_be_called)
+    parts = update_internal_links(reader, RecordingLog())
+    assert 'kindle:pos:fid:00|1' in parts[0]
+
+# }}}
+
+
+# MOBI language codes (Calibre 15c4ba730f and the locale_to_iana rewrite) {{{
+
+@pytest.mark.parametrize('lang,sublang,expected', [
+    (0, 0, 'und'),
+    (255, 0, 'und'),
+    (9, 0, 'en'),
+    (9, 4, 'en-us'),
+    (7, 0, 'de'),
+    (7, 8, 'de-ch'),
+    # German has no sub language 4, the region of another language
+    # (Arabic: Saudi Arabia) must not be used
+    (7, 4, 'de'),
+    (25, 8, 'ru'),
+    # hr and sr share a langcode
+    (26, 0, 'hr'),
+    (26, 4, 'hr'),
+    (26, 12, 'sr'),
+])
+def test_mobi2iana(lang, sublang, expected):
+    from ebook_convert.ebooks.mobi.langcodes import mobi2iana
+    assert mobi2iana(lang, sublang) == expected
+
+
+@pytest.mark.parametrize('code,expected', [
+    ('en', 'en'),
+    ('en-US', 'en-us'),
+    ('en-CA', 'en-ca'),
+    ('de-CH', 'de-ch'),
+    ('zh-TW', 'zh-tw'),
+    ('sr', 'sr'),
+    ('hr', 'hr'),
+    ('fr-BE', 'fr-be'),
+    (None, 'und'),
+])
+def test_locale_round_trip(code, expected):
+    from ebook_convert.ebooks.mobi.langcodes import iana2mobi, locale_to_iana
+    locale, = struct.unpack('>L', iana2mobi(code))
+    assert locale_to_iana(locale) == expected
+
+# }}}
+
+
+# INDX records with an incorrect TAGX offset (Calibre aec2c1a551) {{{
+
+def make_indx(tagx_offset_field, tagx_pos):
+    from ebook_convert.ebooks.mobi.reader.index import INDEX_HEADER_FIELDS
+    fields = dict.fromkeys(INDEX_HEADER_FIELDS, 0)
+    fields['len'] = 4 * (len(INDEX_HEADER_FIELDS) + 1)
+    fields['tagx'] = tagx_offset_field
+    header = b'INDX' + b''.join(struct.pack('>L', fields[f])
+                                for f in INDEX_HEADER_FIELDS)
+    # TAGX section: one tag (1, 1, 1, 0) and an end-of-field marker
+    tagx = (b'TAGX' + struct.pack('>LL', 20, 1) + bytes([1, 1, 1, 0]) +
+            bytes([0, 0, 0, 1]))
+    assert tagx_pos >= len(header)
+    return header + b'\0' * (tagx_pos - len(header)) + tagx
+
+
+def test_tagx_offset_is_verified():
+    from ebook_convert.ebooks.mobi.reader.index import (
+        get_tag_section_start, parse_indx_header, parse_tagx_section)
+    real_pos = 4 * (45 + 1) + 16
+    for claimed in (real_pos, real_pos - 8, 0, 4):
+        data = make_indx(claimed, real_pos)
+        hdr = parse_indx_header(data)
+        assert hdr['idx_header_end_pos'] == 4 * (45 + 1)
+        start = get_tag_section_start(data, hdr)
+        assert start == real_pos
+        control_byte_count, tags = parse_tagx_section(data[start:])
+        assert control_byte_count == 1
+        assert [tuple(t) for t in tags] == [(1, 1, 1, 0), (0, 0, 0, 1)]
 
 # }}}

@@ -259,13 +259,14 @@ class Mobi8Reader(object):
                 # svg
                 typ = 'svg'
                 start = m.start()
-                m2 = image_tag_pattern.search(flowpart)
+                # strip off anything before <svg if inlining
+                from_svg = flowpart[start:]
+                m2 = image_tag_pattern.search(from_svg)
                 if m2 is not None:
                     format = 'inline'
                     dir = None
                     fname = None
-                    # strip off anything before <svg if inlining
-                    flowpart = re.sub(br'(</?)svg:', r'\1', flowpart[start:])
+                    flowpart = from_svg
                 else:
                     format = 'file'
                     dir = "images"
@@ -337,7 +338,7 @@ class Mobi8Reader(object):
             # See https://www.mobileread.com/forums/showthread.php?t=259557
             m = self.aid_re.match(tag)
             if m is not None:
-                self.linked_aids.add(m.group(1))
+                self.linked_aids.add(m.group(1).decode('utf-8'))
                 return m.group(1) + b'-' + self.aid_anchor_suffix
 
         # No tag found, link to start of file
@@ -347,11 +348,10 @@ class Mobi8Reader(object):
         guide = Guide()
         has_start = False
         for ref_type, ref_title, pos_fid in self.guide:
-            try:
-                if len(pos_fid) != 2:
-                    continue
-            except TypeError:
+            if not isinstance(pos_fid, list):
                 continue  # thumbnailstandard record, ignore it
+            if len(pos_fid) != 2:
+                continue
             linktgt, idtext = self.get_id_tag_by_pos_fid(*pos_fid)
             if idtext:
                 if isinstance(idtext, bytes):
@@ -518,9 +518,16 @@ class Mobi8Reader(object):
                 pass
 
         opf.create_manifest_from_files_in([os.getcwd()], exclude=exclude)
+        mime_map = {
+            'text/html': 'application/xhtml+xml',
+            'font/ttf': 'application/x-font-truetype',
+            'font/otf': 'application/vnd.ms-opentype',
+            'font/woff': 'application/font-woff',
+        }
         for entry in opf.manifest:
-            if entry.mime_type == 'text/html':
-                entry.mime_type = 'application/xhtml+xml'
+            n = mime_map.get(entry.mime_type)
+            if n is not None:
+                entry.mime_type = n
         opf.create_spine(spine)
         opf.set_toc(toc)
         ppd = getattr(self.header.exth, 'page_progression_direction', None)

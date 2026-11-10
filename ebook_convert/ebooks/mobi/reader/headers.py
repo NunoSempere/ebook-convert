@@ -3,7 +3,8 @@ import struct, re, os
 from ebook_convert.utils.date import parse_date
 from ebook_convert.ebooks.mobi import MobiError
 from ebook_convert.ebooks.metadata import MetaInformation, check_isbn
-from ebook_convert.ebooks.mobi.langcodes import main_language, sub_language, mobi2iana
+from ebook_convert.ebooks.mobi.langcodes import (main_language, sub_language,
+                                                 locale_to_iana)
 from ebook_convert.utils.cleantext import clean_ascii_chars, clean_xml_chars
 from ebook_convert.utils.config_base import tweaks
 from ebook_convert.utils import entities
@@ -124,6 +125,8 @@ class EXTHHeader(object):  # {{{
                     self.mi.authors.append(m.group())
                 if self.mi.is_null('author_sort'):
                     self.mi.author_sort = m.group()
+                else:
+                    self.mi.author_sort += ' & ' + m.group()
             else:
                 self.mi.authors.append(au)
         elif idx == 101:
@@ -254,8 +257,8 @@ class BookHeader(object):
                     self.exth.mi.uid = self.unique_id
                     if self.exth.mi.is_null('language'):
                         try:
-                            self.exth.mi.language = mobi2iana(langid, sublangid)
-                        except:
+                            self.exth.mi.language = locale_to_iana(langcode)
+                        except Exception:
                             self.log.exception('Unknown language code')
                 except:
                     self.log.exception('Invalid EXTH header')

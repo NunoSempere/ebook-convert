@@ -335,19 +335,25 @@ def iana2mobi(icode):
 
 
 def mobi2iana(langcode, sublangcode):
-    prefix = suffix = None
+    # sublangcode is in the units stored in IANA_MOBI, i.e. the Windows sub
+    # language id shifted left by two bits. Several languages can share a
+    # langcode (for example hr and sr), so prefer an exact match and fall back
+    # to the first language with a matching langcode. The region of a
+    # different language is never used (15c4ba730f).
+    prefix = None
     for code, d in IANA_MOBI.items():
-        for subcode, t in d.items():
-            cc, cl = t
+        if code is None:
+            continue
+        for subcode, (cc, cl) in d.items():
             if cc == langcode:
-                prefix = code
-            if cl == sublangcode:
-                suffix = subcode.lower() if subcode else None
-                break
-        if prefix is not None:
-            break
-    if prefix is None:
-        return 'und'
-    if suffix is None:
-        return prefix
-    return prefix + '-' + suffix
+                if cl == sublangcode:
+                    return '%s-%s' % (code, subcode.lower()) if subcode else code
+                if prefix is None:
+                    prefix = code
+    return prefix or 'und'
+
+
+def locale_to_iana(locale):
+    '''Convert the 32 bit locale field of the MOBI header, as written by
+    iana2mobi()'''
+    return mobi2iana(locale & 0xFF, (locale >> 8) & 0xFC)

@@ -201,7 +201,15 @@ class MobiReader(object):
             self.log.warning('MOBI markup appears to contain random bytes. '
                              'Stripping.')
             self.processed_html = self.remove_random_bytes(self.processed_html)
-            root = html.fromstring(self.processed_html)
+            try:
+                root = html.fromstring(self.processed_html)
+            except Exception:
+                self.log.warning('MOBI markup could not be parsed by lxml, '
+                                 'using the HTML5 parser')
+                from ebook_convert.utils.html5 import parse
+                root = parse(self.processed_html, keep_doctype=False,
+                             namespace_elements=False, maybe_xhtml=False,
+                             sanitize_names=True)
         if root.xpath('descendant::p/descendant::p'):
             from ebook_convert.utils.html5 import parse
             self.log.warning('Malformed markup, parsing using html5lib')
@@ -734,7 +742,7 @@ class MobiReader(object):
         if guide is not None:
             opf.create_guide(guide)
             for ref in opf.guide:
-                if ref.type.lower() == 'toc':
+                if (ref.type or '').lower() == 'toc':
                     toc = ref.href()
 
         ncx_manifest_entry = None
@@ -821,13 +829,16 @@ class MobiReader(object):
             if flags & 1:
                 try:
                     num += sizeof_trailing_entry(data, size - num)
-                except IndexError:
+                except (IndexError, TypeError):
                     self.warn_about_trailing_entry_corruption()
                     return 0
             flags >>= 1
         if self.book_header.extra_flags & 1:
             off = size - num - 1
-            num += (ord(data[off:off+1]) & 0x3) + 1
+            try:
+                num += (ord(data[off:off+1]) & 0x3) + 1
+            except TypeError:
+                num += 1
         return num
 
     def warn_about_trailing_entry_corruption(self):
@@ -967,6 +978,8 @@ class MobiReader(object):
                     imgfmt = 'png'
                 except AnimatedGIF:
                     pass
+                except OSError:
+                    continue
             path = os.path.join(output_dir, '%05d.%s' % (image_index, imgfmt))
             image_name_map[image_index] = os.path.basename(path)
             if imgfmt == 'png':
