@@ -1,3 +1,30 @@
+# Guide types that are kept by Clean
+KNOWN_GUIDE_TYPES = frozenset((
+    'cover',
+    'titlepage',
+    'masthead',
+    'toc',
+    'title-page',
+    'copyright-page',
+    'text',
+    'index',
+    'glossary',
+    'acknowledgements',
+    'bibliography',
+    'colophon',
+    'dedication',
+    'epigraph',
+    'foreword',
+    'loi',
+    'lot',
+    'notes',
+    'preface',
+))
+# Prefix for guide types that carry EPUB 3 landmark types with no equivalent
+# known guide type through conversion
+CUSTOM_GUIDE_TYPE_PREFIX = 'other.calibre-epub-type-'
+
+
 class Clean(object):
     '''Clean up guide, leaving only known values '''
 
@@ -35,12 +62,8 @@ class Clean(object):
             self.oeb.guide.remove('start')
 
         for x in list(self.oeb.guide):
-            if x.lower() not in {
-                    'cover', 'titlepage', 'masthead', 'toc', 'title-page',
-                    'copyright-page', 'text', 'index', 'glossary',
-                    'acknowledgements', 'bibliography', 'colophon',
-                    'copyright-page', 'dedication', 'epigraph', 'foreword',
-                    'loi', 'lot', 'notes', 'preface'}:
+            if (x.lower() not in KNOWN_GUIDE_TYPES and
+                    not x.lower().startswith(CUSTOM_GUIDE_TYPE_PREFIX)):
                 item = self.oeb.guide[x]
                 if item.title and item.title.lower() == 'start':
                     continue

@@ -605,6 +605,10 @@ class Metadata(object):
         their local names using Python attribute syntax.  Only attributes
         allowed by the OPF 2.0 specification are supported.
         """
+        # True for a language that was guessed because the book has none, see
+        # oeb/reader.py; such a language must not be written into the output
+        is_fallback = False
+
         class Attribute(object):
             """Smart accessor for allowed OEB metadata item attributes."""
 
@@ -1788,6 +1792,18 @@ class OEBBook(object):
         self.pages = PageList()
         self.auto_generated_toc = True
         self._temp_files = []
+
+    def set_page_progression_direction_if_needed(self):
+        """Set the spine's page-progression-direction to 'rtl' when the book's
+        language is written right-to-left and no direction is set yet."""
+        if not self.spine.page_progression_direction:
+            try:
+                from ebook_convert.utils.localization import is_rtl_lang
+                lang = self.metadata.language[0].value
+                if is_rtl_lang(lang):
+                    self.spine.page_progression_direction = 'rtl'
+            except Exception:
+                pass
 
     def clean_temp_files(self):
         for path in self._temp_files:

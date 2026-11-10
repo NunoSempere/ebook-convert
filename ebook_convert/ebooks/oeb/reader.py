@@ -137,14 +137,22 @@ class OEBReader(object):
         if pwm:
             self.oeb.metadata.primary_writing_mode = pwm
         mi = o.to_book_metadata()
+        # A language guessed from the interface language (by the OPF reader
+        # or here) must not be used where it would be wrong, e.g. in lang
+        # attributes, so mark it as a fallback
+        lang_is_fallback = getattr(o, 'languages_are_fallback', False)
         if not mi.language:
             mi.language = get_lang().replace('_', '-')
+            lang_is_fallback = True
         self.oeb.metadata.add('language', mi.language)
         if not mi.book_producer:
             mi.book_producer = ('%(a)s (%(v)s) [http://%(a)s-ebook.com]' %
                                 dict(a=__appname__, v=__version__))
         meta_info_to_oeb_metadata(mi, self.oeb.metadata, self.logger)
         m = self.oeb.metadata
+        if lang_is_fallback:
+            for lang in m.language:
+                lang.is_fallback = True
         m.add('identifier', str(uuid.uuid4()), id='uuid_id', scheme='uuid')
         self.oeb.uid = self.oeb.metadata.identifier[-1]
         if not m.title:

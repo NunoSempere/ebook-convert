@@ -54,6 +54,34 @@ class CoverManager(object):
 </html>
     ''')
 
+    @staticmethod
+    def fill_metadata(template, title, lang):
+        # The title of the book is the text alternative of the cover image for
+        # screen readers, and the language of the book is the language of the
+        # page. The template is later used with %, so escape that too.
+        from ebook_convert.utils.entities import prepare_string_for_xml
+
+        def escape(x):
+            return prepare_string_for_xml(x, True).replace('%', '%%')
+
+        template = template.replace('__title__',
+                                    escape(title.strip() or 'Cover'))
+        return template.replace(
+            '__lang__', ' xml:lang="%s"' % escape(lang) if lang else '')
+
+    @staticmethod
+    def book_language(oeb):
+        # The language of the book as a BCP 47 language tag, for use in the
+        # lang attributes of HTML files. A language guessed from the calibre
+        # interface language is not used, as it is likely to be wrong.
+        from ebook_convert.utils.localization import lang_as_bcp47
+        for lang in oeb.metadata.language:
+            if not getattr(lang, 'is_fallback', False):
+                ans = lang_as_bcp47(str(lang))
+                if ans:
+                    return ans
+        return None
+
     def __init__(self, no_default_cover=False, no_svg_cover=False,
                  preserve_aspect_ratio=False, fixed_size=None):
         self.no_default_cover = no_default_cover
