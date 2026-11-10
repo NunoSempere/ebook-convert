@@ -1,3 +1,5 @@
+# License: GPLv3 Copyright: 2008, Kovid Goyal <kovid at kovidgoyal.net>
+
 import errno
 import os
 import re
@@ -8,6 +10,7 @@ from lxml import etree
 
 from ebook_convert.ebooks import ConversionError, DRMError
 from ebook_convert.ebooks.chardet import xml_to_unicode
+from ebook_convert.ebooks.pdf.bidi import fix_pdftohtml_html
 from ebook_convert.ptempfile import PersistentTemporaryFile
 from ebook_convert.utils.cleantext import clean_xml_chars
 from ebook_convert.utils import directory
@@ -54,8 +57,8 @@ def pdftohtml(output_dir, pdf_path, no_images, as_xml=False):
         logf.flush()
         logf.close()
 
-        with open(logf.name) as fobj:
-            out = fobj.read().strip()
+        with open(logf.name, 'rb') as fobj:
+            out = fobj.read().decode('utf-8', 'replace').strip()
 
         if ret != 0:
             raise ConversionError('pdftohtml failed with return code: '
@@ -84,7 +87,13 @@ def pdftohtml(output_dir, pdf_path, no_images, as_xml=False):
                 raw = re.sub(r'<a href="index.html#(\d+)"', r'<a href="#p\1"',
                              raw, flags=re.I)
                 raw = entities.xml_replace_entities(raw)
-                raw = raw.replace('\u00a0', ' ')
+                # No-break spaces (&#160;/&nbsp; after the entity replacement
+                # above) and paragraph separators (U+2029) become plain spaces,
+                # otherwise the heuristics and search/replace miss them
+                raw = re.sub(r'[  ]', ' ', raw)
+                # pdftohtml outputs the text of a line in visual order, which
+                # means right-to-left text comes out with its letters backwards
+                raw = fix_pdftohtml_html(raw)
 
                 i.write(raw.encode('utf-8'))
 
@@ -92,8 +101,10 @@ def pdftohtml(output_dir, pdf_path, no_images, as_xml=False):
                    'UTF-8', '-noframes', '-p', '-nomerge', '-nodrm', '-q',
                    '-stdout', os.path.basename(pdfsrc)]
 
-            raw = subprocess.check_output(cmd).strip()
-            if raw:
+            p = subprocess.run(cmd, stdout=subprocess.PIPE,
+                               stderr=subprocess.DEVNULL)
+            raw = p.stdout.strip()
+            if p.returncode == 0 and raw:
                 parse_outline(raw, output_dir)
 
         try:
@@ -103,9 +114,11 @@ def pdftohtml(output_dir, pdf_path, no_images, as_xml=False):
 
 
 def parse_outline(raw, output_dir):
+    from ebook_convert.utils.xml_parse import safe_xml_fromstring
+
     raw = clean_xml_chars(xml_to_unicode(raw, strip_encoding_pats=True,
                                          assume_utf8=True)[0])
-    outline = etree.fromstring(raw).xpath('(//outline)[1]')
+    outline = safe_xml_fromstring(raw).xpath('(//outline)[1]')
     if outline:
         from ebook_convert.ebooks.oeb.polish.toc import TOC, create_ncx
         outline = outline[0]
@@ -117,11 +130,10 @@ def parse_outline(raw, output_dir):
                 if child.tag == 'outline':
                     parent = toc.children[-1] if toc.children else toc
                     process_node(child, parent)
-                else:
-                    if child.text:
-                        page = child.get('page', '1')
-                        toc.add(child.text, 'index.html', 'p' + page)
-                        count[0] += 1
+                elif child.text:
+                    page = child.get('page', '1')
+                    toc.add(child.text, 'index.html', 'p' + page)
+                    count[0] += 1
         process_node(outline, toc)
         if count[0] > 2:
             root = create_ncx(toc, (lambda x: x), 'pdftohtml', 'en',
@@ -158,4 +170,14 @@ def flip_images(raw):
             continue
         flip_image(img, flip)
     raw = re.sub(r'<STYLE.+?</STYLE>\s*', '', raw, flags=re.I | re.DOTALL)
+
+    # Add dummy alt text to the images, epubcheck complains without it
+    counter = 0
+
+    def add_alt(m):
+        nonlocal counter
+        counter += 1
+        return m.group(1).rstrip('/') + ' alt="Image %d"/>' % counter
+
+    raw = re.sub(r'(<IMG[^>]+)/?>', add_alt, raw, flags=re.I)
     return raw
