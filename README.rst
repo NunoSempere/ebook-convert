@@ -4,14 +4,22 @@ ebook-convert
 
 Command-line ebook converter, carved out of the `Calibre project`_. It is only
 the conversion pipeline: no GUI, no library management, no Qt, no device
-drivers. Just:
+drivers.
+
+**No installation needed.** With `uv`_ on your machine, this is the whole
+thing:
 
 .. code:: shell-session
 
-   $ ebook-convert book.epub book.mobi
+   $ uvx ebook-convert book.epub book.mobi
+
+``uvx`` fetches the package into a cache the first time and runs it straight
+away; later runs start instantly. Swap the extensions to convert between any
+of the formats listed below, for example ``uvx ebook-convert novel.docx
+novel.epub`` or ``uvx ebook-convert story.fb2 story.txt``.
 
 The package is pure Python and every dependency ships binary wheels, so it
-installs anywhere with a stock Python 3.10+ and no compiler.
+runs anywhere with a stock Python 3.10+ and no compiler.
 
 This is a packaging-focused fork of `gryf's ebook-converter`_, which did the
 hard work of extracting the converter from Calibre and removing Qt. All
@@ -24,13 +32,11 @@ single-file binaries.
 Installation
 ------------
 
-Run it without installing anything permanently, with `uv`_:
+The recommended way is not to install at all and run it through ``uvx`` as
+shown above. uv itself is a single binary; see its `install page`_.
 
-.. code:: shell-session
-
-   $ uvx ebook-convert book.epub book.mobi
-
-Or install it as a tool:
+If you would rather have a permanent ``ebook-convert`` command on your
+``$PATH``:
 
 .. code:: shell-session
 
@@ -56,7 +62,10 @@ Usage
 
 .. code:: shell-session
 
-   $ ebook-convert INPUT OUTPUT [-v|-q]
+   $ uvx ebook-convert INPUT OUTPUT [-v|-q]
+
+(or plain ``ebook-convert INPUT OUTPUT`` if you installed it or use the
+binary.)
 
 The formats are taken from the file extensions. ``-v`` makes the output more
 verbose (repeat for more), ``-q`` quieter.
@@ -185,6 +194,7 @@ This work is licensed under GPL3, like the original. See LICENSE for details.
 .. _Calibre project: https://calibre-ebook.com/
 .. _gryf's ebook-converter: https://github.com/gryf/ebook-converter
 .. _uv: https://docs.astral.sh/uv/
+.. _install page: https://docs.astral.sh/uv/getting-started/installation/
 .. _GitHub release: https://github.com/NunoSempere/ebook-convert/releases
 .. _poppler: https://poppler.freedesktop.org/
 .. _Liberation fonts: https://github.com/liberationfonts/liberation-fonts
