@@ -16,26 +16,6 @@ from ebook_convert.utils import encoding as uenc
 from ebook_convert.utils.localization import get_udc
 
 
-def is_path_inside(parent, child):
-    """True if the (already resolved) path ``child`` is ``parent`` or under
-    it."""
-    try:
-        return os.path.commonpath((parent, child)) == parent
-    except ValueError:
-        return False
-
-
-def is_existing_subpath(child, parent):
-    """Check if child is under parent. If either child or parent dont exist,
-    returns False."""
-    try:
-        parent = os.path.realpath(parent, strict=True)  # resolve symlinks
-        child = os.path.realpath(child, strict=True)
-    except OSError:
-        return False
-    return is_path_inside(parent, child)
-
-
 def sanitize_file_name(name, substitute='_'):
     """
     Sanitize the filename `name`. All invalid characters are replaced by
